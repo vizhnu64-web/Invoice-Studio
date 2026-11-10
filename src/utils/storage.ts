@@ -15,6 +15,7 @@ import {
   WorkflowSessionState
 } from '../types';
 import { defaultCompanySettings, defaultFieldCatalog, sampleSpreadsheetData, defaultCalculationSettings } from '../mockData';
+import { EmailConfig, EmailSendStatus, EmailService } from './emailService';
 
 const STORAGE_KEYS = {
   COMPANY: 'invoice_studio_company_settings_v2',
@@ -26,6 +27,8 @@ const STORAGE_KEYS = {
   CALCULATION: 'invoice_studio_calculation_settings_v2',
   WORKFLOW_SESSION: 'invoice_studio_workflow_session_v2',
   SAVED_TEMPLATES: 'invoice_studio_saved_templates_v2',
+  EMAIL_CONFIG: 'invoice_studio_email_config_v2',
+  EMAIL_STATUSES: 'invoice_studio_email_statuses_v2',
 };
 
 // Fallback in-memory storage for non-browser / Node.js test environments
@@ -401,6 +404,54 @@ export const storage = {
       return true;
     } catch (e) {
       console.error('Failed to save mapping template:', e);
+      return false;
+    }
+  },
+
+  loadEmailConfig(): EmailConfig {
+    try {
+      const data = safeGetItem(STORAGE_KEYS.EMAIL_CONFIG);
+      if (data) {
+        const parsed = JSON.parse(data);
+        return {
+          ...EmailService.getDefaultConfig(),
+          ...parsed,
+        };
+      }
+    } catch (e) {
+      console.warn('Failed to load email config from storage:', e);
+    }
+    return EmailService.getDefaultConfig();
+  },
+
+  saveEmailConfig(config: EmailConfig): boolean {
+    try {
+      safeSetItem(STORAGE_KEYS.EMAIL_CONFIG, JSON.stringify(config));
+      return true;
+    } catch (e) {
+      console.error('Failed to save email config to storage:', e);
+      return false;
+    }
+  },
+
+  loadEmailStatuses(): Record<string, EmailSendStatus> {
+    try {
+      const data = safeGetItem(STORAGE_KEYS.EMAIL_STATUSES);
+      if (data) {
+        return JSON.parse(data);
+      }
+    } catch (e) {
+      console.warn('Failed to load email statuses from storage:', e);
+    }
+    return {};
+  },
+
+  saveEmailStatuses(statuses: Record<string, EmailSendStatus>): boolean {
+    try {
+      safeSetItem(STORAGE_KEYS.EMAIL_STATUSES, JSON.stringify(statuses));
+      return true;
+    } catch (e) {
+      console.error('Failed to save email statuses to storage:', e);
       return false;
     }
   }

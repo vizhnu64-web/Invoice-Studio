@@ -50,6 +50,7 @@ export const Step1DataSource: React.FC<Step1DataSourceProps> = ({
   const [sourceType, setSourceType] = useState<'excel' | 'googlesheets'>('excel');
   const [isDragging, setIsDragging] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [googleConnected, setGoogleConnected] = useState(false);
   const [googleSheetUrl, setGoogleSheetUrl] = useState('');
   const [isConnectingGoogle, setIsConnectingGoogle] = useState(false);
@@ -92,7 +93,8 @@ export const Step1DataSource: React.FC<Step1DataSourceProps> = ({
       setTimeout(() => setUploadStatus(null), 4000);
     } catch (err) {
       console.error('File parsing error:', err);
-      alert('Unable to parse the spreadsheet. Please verify it is a valid XLSX, XLS, or CSV file.');
+      setUploadError('Unable to parse the spreadsheet. Please verify it is a valid XLSX, XLS, or CSV file.');
+      setTimeout(() => setUploadError(null), 5000);
     }
   };
 
@@ -162,6 +164,13 @@ export const Step1DataSource: React.FC<Step1DataSourceProps> = ({
           <div className="mt-4 flex items-center space-x-2 bg-emerald-50 text-emerald-800 px-4 py-2.5 rounded-xl border border-emerald-200 text-xs font-semibold">
             <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
             <span>{uploadStatus}</span>
+          </div>
+        )}
+
+        {uploadError && (
+          <div className="mt-4 flex items-center space-x-2 bg-rose-50 text-rose-800 px-4 py-2.5 rounded-xl border border-rose-200 text-xs font-semibold">
+            <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0" />
+            <span>{uploadError}</span>
           </div>
         )}
       </div>

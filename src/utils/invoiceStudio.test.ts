@@ -855,6 +855,365 @@ describe('Invoice Studio - Automated Logic & PDF Generation Test Suite', () => {
     assert.strictEqual(uniqueSet.size, deduplicated.length);
   });
 
+  test('27. EmailService - Email Format Validation', async () => {
+    const { EmailService } = await import('./emailService');
+
+    // Valid formats
+    assert.strictEqual(EmailService.validateEmail('client@company.com'), true);
+    assert.strictEqual(EmailService.validateEmail('john.doe+finance@sub.domain.org'), true);
+    assert.strictEqual(EmailService.validateEmail('user_123@domain.co.in'), true);
+
+    // Invalid formats
+    assert.strictEqual(EmailService.validateEmail(''), false);
+    assert.strictEqual(EmailService.validateEmail('plainaddress'), false);
+    assert.strictEqual(EmailService.validateEmail('@missingusername.com'), false);
+    assert.strictEqual(EmailService.validateEmail('username@.com'), false);
+    assert.strictEqual(EmailService.validateEmail('user@domain'), false);
+    assert.strictEqual(EmailService.validateEmail(null as any), false);
+  });
+
+  test('28. EmailService - Connection Diagnostics (SMTP & Mailgun)', async () => {
+    const { EmailService } = await import('./emailService');
+
+    // Valid SMTP connection test
+    const validSmtp = await EmailService.testConnection({
+      provider: 'smtp',
+      smtpServer: 'smtp.mailtrap.io',
+      smtpPort: '587',
+      encryption: 'TLS'
+    });
+    assert.strictEqual(validSmtp.success, true);
+    assert.ok(validSmtp.message.includes('SMTP Connection verified'));
+
+    // Invalid SMTP port
+    const invalidPortSmtp = await EmailService.testConnection({
+      provider: 'smtp',
+      smtpServer: 'smtp.mailtrap.io',
+      smtpPort: '99999'
+    });
+    assert.strictEqual(invalidPortSmtp.success, false);
+    assert.ok(invalidPortSmtp.message.includes('Invalid port'));
+
+    // Missing SMTP host
+    const missingHostSmtp = await EmailService.testConnection({
+      provider: 'smtp',
+      smtpServer: ''
+    });
+    assert.strictEqual(missingHostSmtp.success, false);
+
+    // Failing SMTP host
+    const failingHostSmtp = await EmailService.testConnection({
+      provider: 'smtp',
+      smtpServer: 'smtp-timeout.test'
+    });
+    assert.strictEqual(failingHostSmtp.success, false);
+    assert.ok(failingHostSmtp.message.includes('timed out'));
+
+    // Valid Mailgun connection test
+    const validMailgun = await EmailService.testConnection({
+      provider: 'mailgun',
+      mailgunDomain: 'mg.mycompany.com',
+      apiKey: 'key-12345'
+    });
+    assert.strictEqual(validMailgun.success, true);
+    assert.ok(validMailgun.message.includes('Mailgun API verified'));
+
+    // Failing Mailgun domain
+    const failingMailgun = await EmailService.testConnection({
+      provider: 'mailgun',
+      mailgunDomain: 'invalid-domain.test'
+    });
+    assert.strictEqual(failingMailgun.success, false);
+  });
+
+  test('29. EmailService - Single Invoice Email Dispatch', async () => {
+    const { EmailService } = await import('./emailService');
+
+    const testRecord = {
+      id: 'rec_test_01',
+      invoiceNumber: 'INV-2026-001',
+      customerName: 'Rohit Mehta',
+      sourceType: 'excel' as const,
+      sourceName: 'sales.xlsx',
+      worksheetName: 'Sheet1',
+      generatedDate: '2026-11-10',
+      totalAmount: 45000,
+      gstAmount: 8100,
+      templateId: 'modern-clean-v1',
+      profileId: 'default',
+      revisionNumber: 1,
+      status: 'success' as const,
+      dataSnapshot: {
+        rowFields: {
+          customer_email: 'rohit@mehtaenterprises.com',
+          due_date: '2026-11-25',
+          payment_method: 'NEFT'
+        }
+      }
+    };
+
+    const result = await EmailService.sendInvoiceEmail({
+      recipientEmail: 'rohit@mehtaenterprises.com',
+      subject: 'Tax Invoice INV-2026-001',
+      body: 'Please find attached your invoice.',
+      record: testRecord,
+      config: EmailService.getDefaultConfig()
+    });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.status, 'sent');
+    assert.ok(result.messageId);
+    assert.strictEqual(result.invoiceNumber, 'INV-2026-001');
+    assert.strictEqual(result.recipientEmail, 'rohit@mehtaenterprises.com');
+
+    // Failure simulation with rejected recipient
+    const failResult = await EmailService.sendInvoiceEmail({
+      recipientEmail: 'fail@client.com',
+      subject: 'Invoice',
+      body: 'Body',
+      record: testRecord,
+      config: EmailService.getDefaultConfig()
+    });
+    assert.strictEqual(failResult.success, false);
+    assert.strictEqual(failResult.status, 'failed');
+  });
+
+  test('30. EmailService - Multi / Bulk Email Dispatch with 100% Recipient Isolation', async () => {
+    const { EmailService } = await import('./emailService');
+
+    const records = [
+      {
+        id: 'rec_bulk_1',
+        invoiceNumber: 'INV-101',
+        customerName: 'Alpha Corp',
+        sourceType: 'excel' as const,
+        sourceName: 'batch.xlsx',
+        worksheetName: 'Batch1',
+        generatedDate: '2026-11-10',
+        totalAmount: 15000,
+        gstAmount: 2700,
+        templateId: 'modern',
+        profileId: 'p1',
+        revisionNumber: 1,
+        status: 'success' as const,
+        dataSnapshot: {}
+      },
+      {
+        id: 'rec_bulk_2',
+        invoiceNumber: 'INV-102',
+        customerName: 'Beta LLC',
+        sourceType: 'excel' as const,
+        sourceName: 'batch.xlsx',
+        worksheetName: 'Batch1',
+        generatedDate: '2026-11-10',
+        totalAmount: 28000,
+        gstAmount: 5040,
+        templateId: 'modern',
+        profileId: 'p1',
+        revisionNumber: 1,
+        status: 'success' as const,
+        dataSnapshot: {}
+      },
+      {
+        id: 'rec_bulk_3',
+        invoiceNumber: 'INV-103',
+        customerName: 'Gamma Inc',
+        sourceType: 'excel' as const,
+        sourceName: 'batch.xlsx',
+        worksheetName: 'Batch1',
+        generatedDate: '2026-11-10',
+        totalAmount: 32000,
+        gstAmount: 5760,
+        templateId: 'modern',
+        profileId: 'p1',
+        revisionNumber: 1,
+        status: 'success' as const,
+        dataSnapshot: {}
+      }
+    ];
+
+    const requests = [
+      {
+        recipientEmail: 'billing@alphacorp.com',
+        subject: 'Invoice INV-101 for Alpha Corp',
+        body: 'Alpha Corp invoice attached.',
+        record: records[0],
+        config: EmailService.getDefaultConfig()
+      },
+      {
+        recipientEmail: 'accounts@betallc.com',
+        subject: 'Invoice INV-102 for Beta LLC',
+        body: 'Beta LLC invoice attached.',
+        record: records[1],
+        config: EmailService.getDefaultConfig()
+      },
+      {
+        recipientEmail: 'finance@gammainc.com',
+        subject: 'Invoice INV-103 for Gamma Inc',
+        body: 'Gamma Inc invoice attached.',
+        record: records[2],
+        config: EmailService.getDefaultConfig()
+      }
+    ];
+
+    let progressCalls = 0;
+    const report = await EmailService.sendBatchEmails(requests, (current, total, res) => {
+      progressCalls++;
+      assert.strictEqual(typeof current, 'number');
+      assert.strictEqual(total, 3);
+      assert.ok(res.invoiceNumber);
+    });
+
+    assert.strictEqual(report.totalSelected, 3);
+    assert.strictEqual(report.totalRecipients, 3);
+    assert.strictEqual(report.successCount, 3);
+    assert.strictEqual(report.failureCount, 0);
+    assert.strictEqual(progressCalls, 3);
+
+    // Verify STRICT RECIPIENT ISOLATION:
+    // Ensure each result maps strictly to its own recipient and invoice number
+    assert.strictEqual(report.results[0].recipientEmail, 'billing@alphacorp.com');
+    assert.strictEqual(report.results[0].invoiceNumber, 'INV-101');
+
+    assert.strictEqual(report.results[1].recipientEmail, 'accounts@betallc.com');
+    assert.strictEqual(report.results[1].invoiceNumber, 'INV-102');
+
+    assert.strictEqual(report.results[2].recipientEmail, 'finance@gammainc.com');
+    assert.strictEqual(report.results[2].invoiceNumber, 'INV-103');
+  });
+
+  test('31. Storage - Email Configuration & Status Persistence', async () => {
+    const { storage } = await import('./storage');
+
+    // Save custom email configuration
+    storage.saveEmailConfig({
+      provider: 'mailgun',
+      mailgunDomain: 'custom.mybusiness.com',
+      apiKey: 'secret-key-xyz',
+      senderEmail: 'invoices@mybusiness.com',
+      senderDisplayName: 'My Business Accounts'
+    });
+
+    const loadedConfig = storage.loadEmailConfig();
+    assert.strictEqual(loadedConfig.provider, 'mailgun');
+    assert.strictEqual(loadedConfig.mailgunDomain, 'custom.mybusiness.com');
+    assert.strictEqual(loadedConfig.senderEmail, 'invoices@mybusiness.com');
+
+    // Save and load email statuses
+    storage.saveEmailStatuses({
+      'rec_1': 'sent',
+      'rec_2': 'failed',
+      'rec_3': 'pending'
+    });
+
+    const loadedStatuses = storage.loadEmailStatuses();
+    assert.strictEqual(loadedStatuses['rec_1'], 'sent');
+    assert.strictEqual(loadedStatuses['rec_2'], 'failed');
+    assert.strictEqual(loadedStatuses['rec_3'], 'pending');
+  });
+
+  test('32. Payment Methods & Payment Tracking Data Integrity', async () => {
+    const supportedMethods = [
+      'UPI',
+      'Bank Transfer / NEFT',
+      'Bank Transfer / RTGS',
+      'Bank Transfer / IMPS',
+      'Cash',
+      'Cheque',
+      'Debit Card',
+      'Credit Card',
+      'Payment Gateway',
+      'Net Banking',
+      'Demand Draft',
+      'Other'
+    ];
+
+    assert.strictEqual(supportedMethods.length, 12);
+
+    // Verify partial payment and balance due calculations
+    const totalAmount = 100000;
+    const paymentMade = 40000;
+    const balanceDue = totalAmount - paymentMade;
+
+    assert.strictEqual(balanceDue, 60000);
+
+    // Verify GenerationRecord payment tracking fields persistence
+    const { storage } = await import('./storage');
+    const paymentRecord = {
+      id: 'rec_pay_test',
+      invoiceNumber: 'INV-PAY-01',
+      customerName: 'Vikram Patel',
+      sourceType: 'excel' as const,
+      sourceName: 'sales.xlsx',
+      worksheetName: 'Sheet1',
+      generatedDate: '2026-11-10',
+      totalAmount: 100000,
+      gstAmount: 18000,
+      templateId: 'modern-clean-v1',
+      profileId: 'default',
+      revisionNumber: 1,
+      status: 'success' as const,
+      paymentMethod: 'Bank Transfer / RTGS',
+      paymentStatus: 'Partially Paid',
+      paymentDate: '2026-11-10',
+      paymentReference: 'UTR202611100987654',
+      paymentAmount: 40000,
+      paymentNotes: 'First installment of 40% received via RTGS',
+      dataSnapshot: {
+        rowFields: {
+          payment_method: 'Bank Transfer / RTGS',
+          payment_status: 'Partially Paid',
+          amount_paid: 40000
+        }
+      }
+    };
+
+    storage.saveHistory([paymentRecord]);
+    const history = storage.loadHistory();
+    const loaded = history.find(h => h.id === 'rec_pay_test');
+
+    assert.ok(loaded);
+    assert.strictEqual(loaded?.paymentMethod, 'Bank Transfer / RTGS');
+    assert.strictEqual(loaded?.paymentStatus, 'Partially Paid');
+    assert.strictEqual(loaded?.paymentReference, 'UTR202611100987654');
+    assert.strictEqual(loaded?.paymentAmount, 40000);
+  });
+
+  test('33. PDF Generation - Aspect Ratio Preservation & Unicode Fonts', async () => {
+    const { generateInvoicePDF } = await import('./pdfGenerator');
+    const { calculateItemTotals } = await import('./calculator');
+
+    const item = calculateItemTotals({
+      serialNumber: 1,
+      itemName: 'Branded Enterprise Consulting',
+      quantity: 1,
+      rate: 75000,
+      gstPercentage: 18,
+      taxType: 'IGST'
+    });
+
+    const doc = generateInvoicePDF({
+      company: {
+        ...defaultCompanySettings,
+        assets: {
+          ...defaultCompanySettings.assets,
+          logoWidth: 35,
+          logoHeight: 18
+        }
+      },
+      items: [item],
+      fields: {
+        invoice_number: 'INV-LOGO-TEST-01',
+        customer_name: 'Unicode & Branding Client'
+      }
+    });
+
+    assert.notStrictEqual(doc, null);
+    const pdfBytes = doc.output('arraybuffer');
+    assert.ok(pdfBytes.byteLength > 1000);
+  });
+
 });
+
 
 

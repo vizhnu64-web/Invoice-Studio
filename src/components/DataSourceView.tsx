@@ -32,9 +32,9 @@ export const DataSourceView: React.FC<DataSourceViewProps> = ({
   const [googleSheetUrl, setGoogleSheetUrl] = useState('');
   const [isLoadingGoogle, setIsLoadingGoogle] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
 
   const handleClearData = () => {
-    if (!window.confirm('Are you sure you want to clear all loaded spreadsheet data?')) return;
     setSpreadsheetData({
       fileName: 'No file uploaded',
       worksheets: [],
@@ -79,7 +79,8 @@ export const DataSourceView: React.FC<DataSourceViewProps> = ({
         setTimeout(() => setSuccessMessage(''), 4000);
       } catch (err) {
         console.error('Error parsing file:', err);
-        alert('Failed to parse Excel file. Please ensure it is a valid XLSX, XLS or CSV file.');
+        setErrorMessage('Failed to parse Excel file. Please ensure it is a valid XLSX, XLS or CSV file.');
+        setTimeout(() => setErrorMessage(''), 5000);
       }
     };
     reader.readAsBinaryString(file);
@@ -131,6 +132,12 @@ export const DataSourceView: React.FC<DataSourceViewProps> = ({
             <div className="flex items-center space-x-2 bg-emerald-50 text-emerald-700 px-4 py-2 rounded-xl text-sm font-semibold border border-emerald-200">
               <CheckCircle2 className="w-4 h-4 text-emerald-600" />
               <span>{successMessage}</span>
+            </div>
+          )}
+          {errorMessage && (
+            <div className="flex items-center space-x-2 bg-rose-50 text-rose-700 px-4 py-2 rounded-xl text-sm font-semibold border border-rose-200">
+              <AlertCircle className="w-4 h-4 text-rose-600" />
+              <span>{errorMessage}</span>
             </div>
           )}
         </div>

@@ -24,7 +24,8 @@ import {
   Star,
   Info,
   Coins,
-  Search
+  Search,
+  AlertCircle
 } from 'lucide-react';
 import { defaultCompanySettings, defaultCurrencySettings, CURRENCY_CATALOG } from '../mockData';
 import { formatCurrency, formatAmountInWords } from '../utils/calculator';
@@ -150,6 +151,7 @@ export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
   const [activeTab, setActiveTab] = useState<'identity' | 'colors' | 'currency' | 'typography' | 'assets' | 'bank' | 'content'>('identity');
   const [currencySearch, setCurrencySearch] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+  const [errorMsg, setErrorMsg] = useState('');
   const logoInputRef = useRef<HTMLInputElement>(null);
   const sigInputRef = useRef<HTMLInputElement>(null);
 
@@ -243,7 +245,8 @@ export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
     if (!file) return;
 
     if (!file.type.startsWith('image/')) {
-      alert('Please upload a valid image file (PNG, JPG, or SVG).');
+      setErrorMsg('Please upload a valid image file (PNG, JPG, or SVG).');
+      setTimeout(() => setErrorMsg(''), 4000);
       return;
     }
 
@@ -262,7 +265,8 @@ export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
     if (!file) return;
 
     if (!file.type.startsWith('image/')) {
-      alert('Please upload a valid image file (PNG, JPG, or SVG).');
+      setErrorMsg('Please upload a valid image file (PNG, JPG, or SVG).');
+      setTimeout(() => setErrorMsg(''), 4000);
       return;
     }
 
@@ -377,6 +381,13 @@ export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
             <span className="flex items-center space-x-1.5 bg-emerald-50 text-emerald-700 px-4 py-2 rounded-xl text-xs font-semibold border border-emerald-200 animate-fadeIn">
               <CheckCircle2 className="w-4 h-4 text-emerald-600" />
               <span>{successMsg}</span>
+            </span>
+          )}
+
+          {errorMsg && (
+            <span className="flex items-center space-x-1.5 bg-rose-50 text-rose-700 px-4 py-2 rounded-xl text-xs font-semibold border border-rose-200 animate-fadeIn">
+              <AlertCircle className="w-4 h-4 text-rose-600" />
+              <span>{errorMsg}</span>
             </span>
           )}
 

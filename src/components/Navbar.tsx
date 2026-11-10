@@ -11,7 +11,8 @@ import {
   History, 
   Building2, 
   DownloadCloud,
-  CheckCircle2
+  CheckCircle2,
+  Mail
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -35,6 +36,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'designer', label: 'Layout', icon: Layout },
     { id: 'generation', label: 'Generate', icon: Cpu },
     { id: 'history', label: 'History', icon: History },
+    { id: 'email', label: 'Email', icon: Mail },
     { id: 'company', label: 'Company', icon: Building2 },
   ];
 
@@ -54,7 +56,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </div>
 
-          <div className="hidden lg:flex items-center space-x-1">
+          <div className="hidden lg:flex items-center space-x-2 bg-slate-800/60 p-1.5 rounded-2xl border border-slate-800">
             {navItems.map(item => {
               const Icon = item.icon;
               const isActive = activeTab === item.id;
@@ -64,9 +66,9 @@ export const Navbar: React.FC<NavbarProps> = ({
                   data-tab={item.id}
                   onClick={() => setActiveTab(item.id)}
                   style={{ whiteSpace: 'nowrap' }}
-                  className={`flex items-center space-x-2 px-3 py-2 rounded-lg text-sm font-medium transition-all whitespace-nowrap ${
+                  className={`flex items-center space-x-2 px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all whitespace-nowrap cursor-pointer ${
                     isActive
-                      ? 'bg-indigo-600 text-white shadow-md'
+                      ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
                       : 'text-slate-300 hover:bg-slate-800 hover:text-white'
                   }`}
                 >
@@ -77,22 +79,23 @@ export const Navbar: React.FC<NavbarProps> = ({
             })}
           </div>
 
-          <div className="flex items-center space-x-3">
+          <div className="flex items-center space-x-4">
             {onStartGuidedWorkflow && (
               <button
+                type="button"
                 onClick={onStartGuidedWorkflow}
-                className="flex items-center space-x-1.5 bg-gradient-to-r from-indigo-500 to-indigo-600 hover:from-indigo-400 hover:to-indigo-500 text-white px-3.5 py-1.5 rounded-xl text-xs font-bold shadow-md shadow-indigo-600/30 transition-all cursor-pointer"
+                className="flex items-center space-x-1.5 bg-gradient-to-r from-indigo-500 to-indigo-600 hover:from-indigo-400 hover:to-indigo-500 text-white px-4 py-2 rounded-xl text-xs font-bold shadow-md shadow-indigo-600/30 transition-all cursor-pointer"
               >
                 <span>Create Invoice</span>
               </button>
             )}
 
-            <div className="hidden sm:flex items-center space-x-2 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 text-xs text-slate-300">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="truncate max-w-[140px]" title={activeDataSourceName}>
+            <div className="hidden sm:flex items-center space-x-2.5 bg-slate-800/80 px-3.5 py-2 rounded-xl border border-slate-700 text-xs text-slate-300 shadow-inner">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
+              <span className="truncate max-w-[140px] font-medium" title={activeDataSourceName}>
                 {activeDataSourceName}
               </span>
-              <span className="bg-indigo-950 text-indigo-300 px-1.5 py-0.5 rounded font-mono">
+              <span className="bg-indigo-950 text-indigo-300 px-2 py-0.5 rounded-md font-mono text-[11px] font-bold">
                 {totalRecordsCount} recs
               </span>
             </div>

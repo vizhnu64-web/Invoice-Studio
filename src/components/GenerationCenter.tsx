@@ -180,8 +180,17 @@ export const GenerationCenter: React.FC<GenerationCenterProps> = ({
       setPreviewTab('sheet');
     } catch (err) {
       console.error('Error generating preview:', err);
-      alert('Failed to generate preview: ' + (err as Error).message);
+      showNotification('error', 'Failed to generate preview: ' + (err as Error).message);
     }
+  };
+
+  const [notification, setNotification] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
+
+  const showNotification = (type: 'success' | 'error' | 'info', message: string) => {
+    setNotification({ type, message });
+    setTimeout(() => {
+      setNotification(prev => prev?.message === message ? null : prev);
+    }, 5000);
   };
 
   const handleClosePreview = () => {
@@ -198,16 +207,17 @@ export const GenerationCenter: React.FC<GenerationCenterProps> = ({
     const pdf = generateInvoicePDF({ company, items, fields: rowFields, template });
     const fileName = `${(rowFields['invoice_number'] || 'INV').replace(/[/\\?%*:|"<>]/g, '_')}_regenerated.pdf`;
     pdf.save(fileName);
+    showNotification('success', `Regenerated invoice ${fileName}`);
   };
 
   const handleGenerateSelected = async (asZip: boolean = false, isRegenerate: boolean = false) => {
     if (selectedRowIndices.length === 0) {
-      alert('Please select at least one record to generate invoices.');
+      showNotification('error', 'Please select at least one record to generate invoices.');
       return;
     }
 
     if (!validation.isValid) {
-      alert(`Cannot generate invoices due to mapping errors:\n\n• ${validation.errors.join('\n• ')}\n\nPlease correct mappings in the Fields tab.`);
+      showNotification('error', `Cannot generate invoices due to mapping errors: ${validation.errors.join('; ')}. Please correct mappings in the Fields tab.`);
       return;
     }
 
@@ -274,12 +284,12 @@ export const GenerationCenter: React.FC<GenerationCenterProps> = ({
     setGenerationHistory(prev => [...newRecords, ...prev]);
     setIsGenerating(false);
     setProgressMsg('');
-    alert(`Successfully ${isRegenerate ? 'regenerated' : 'generated'} ${selectedRowIndices.length} invoice(s)!`);
+    showNotification('success', `Successfully ${isRegenerate ? 'regenerated' : 'generated'} ${selectedRowIndices.length} invoice(s)!`);
   };
 
   const handleClearGenerationData = () => {
-    if (!window.confirm('Are you sure you want to clear row selections and reset batch data?')) return;
     setSelectedRowIndices([]);
+    showNotification('info', 'Cleared selected records.');
   };
 
   const brandPrimary = company.brandPalette?.primaryColor || '#4f46e5';
@@ -294,6 +304,25 @@ export const GenerationCenter: React.FC<GenerationCenterProps> = ({
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+      {notification && (
+        <div className={`p-4 rounded-xl flex items-center justify-between border shadow-sm transition-all ${
+          notification.type === 'success' ? 'bg-emerald-50 border-emerald-200 text-emerald-900' :
+          notification.type === 'error' ? 'bg-rose-50 border-rose-200 text-rose-900' :
+          'bg-indigo-50 border-indigo-200 text-indigo-900'
+        }`}>
+          <div className="flex items-center space-x-2 text-sm font-semibold">
+            <span>{notification.type === 'success' ? '✓' : notification.type === 'error' ? '⚠' : 'ℹ'}</span>
+            <span>{notification.message}</span>
+          </div>
+          <button 
+            onClick={() => setNotification(null)}
+            className="text-xs font-bold opacity-60 hover:opacity-100 px-2 py-1"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Top Banner */}
       <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>

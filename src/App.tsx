@@ -27,6 +27,8 @@ import { LayoutDesigner } from './components/LayoutDesigner';
 import { GenerationCenter } from './components/GenerationCenter';
 import { HistoryView } from './components/HistoryView';
 import { CompanySettingsView } from './components/CompanySettingsView';
+import { EmailCenterView } from './components/EmailCenterView';
+import { EmailSendStatus } from './utils/emailService';
 
 import { GuidedWorkflow } from './components/workflow/GuidedWorkflow';
 import { GuidedWorkflowStep } from './types';
@@ -42,6 +44,15 @@ export default function App() {
   const [generationHistory, setGenerationHistory] = useState<GenerationRecord[]>(() => storage.loadHistory());
   const [template, setTemplate] = useState<InvoiceTemplate>(() => storage.loadTemplate());
   const [calculationSettings, setCalculationSettings] = useState<CalculationSettings>(() => storage.loadCalculationSettings());
+  const [emailStatuses, setEmailStatuses] = useState<Record<string, EmailSendStatus>>(() => storage.loadEmailStatuses());
+
+  const handleUpdateEmailStatuses = (action: React.SetStateAction<Record<string, EmailSendStatus>>) => {
+    setEmailStatuses(prev => {
+      const next = typeof action === 'function' ? action(prev) : action;
+      storage.saveEmailStatuses(next);
+      return next;
+    });
+  };
 
   const handleStartGuidedWorkflow = (step?: GuidedWorkflowStep) => {
     if (step) {
@@ -193,6 +204,17 @@ export default function App() {
             setGenerationHistory={handleUpdateHistory}
             company={company}
             template={template}
+            emailStatuses={emailStatuses}
+            setEmailStatuses={handleUpdateEmailStatuses}
+          />
+        )}
+        {activeTab === 'email' && (
+          <EmailCenterView
+            generationHistory={generationHistory}
+            company={company}
+            template={template}
+            emailStatuses={emailStatuses}
+            setEmailStatuses={handleUpdateEmailStatuses}
           />
         )}
         {activeTab === 'company' && (

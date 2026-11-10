@@ -123,10 +123,21 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
         const logoUrl = company.assets.logoUrl;
         const format = getImageFormat(logoUrl);
         const logoW = Math.min(company.assets.logoWidth || 32, 40);
-        // Omitting height parameter preserves natural aspect ratio without stretching
-        const imgInfo = doc.addImage(logoUrl, format, leftColX, leftY, logoW);
-        const actualH = imgInfo && typeof imgInfo === 'object' && 'h' in imgInfo ? (imgInfo as any).h : (logoW * 0.4);
-        leftY += actualH + 6;
+        let logoH = logoW * 0.4;
+        try {
+          const props = doc.getImageProperties(logoUrl);
+          if (props && props.width && props.height) {
+            logoH = (logoW * props.height) / props.width;
+            const maxH = company.assets.logoHeight || 20;
+            if (logoH > maxH) {
+              logoH = maxH;
+            }
+          }
+        } catch (propErr) {
+          console.warn('getImageProperties warning:', propErr);
+        }
+        doc.addImage(logoUrl, format, leftColX, leftY, logoW, logoH);
+        leftY += logoH + 6;
       } catch (err) {
         console.warn('Could not render logo in PDF:', err);
       }
@@ -490,7 +501,17 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
         const sigUrl = company.assets.signatureUrl;
         const format = getImageFormat(sigUrl);
         const sigW = Math.min(company.assets.signatureWidth || 35, 45);
-        const sigH = Math.min(company.assets.signatureHeight || 15, 20);
+        let sigH = Math.min(company.assets.signatureHeight || 15, 20);
+        try {
+          const props = doc.getImageProperties(sigUrl);
+          if (props && props.width && props.height) {
+            sigH = (sigW * props.height) / props.width;
+            const maxH = company.assets.signatureHeight || 20;
+            if (sigH > maxH) sigH = maxH;
+          }
+        } catch (propErr) {
+          // fallback
+        }
         doc.addImage(sigUrl, format, pageWidth - margin - sigW, currentY + 2, sigW, sigH);
         currentY += sigH + 4;
         sigDrawn = true;

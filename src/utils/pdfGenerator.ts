@@ -32,6 +32,18 @@ function hexToRgb(hex: string): [number, number, number] {
   return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
 }
 
+function getImageFormat(url: string): string {
+  if (!url) return 'PNG';
+  const lower = url.toLowerCase();
+  if (lower.includes('image/jpeg') || lower.includes('image/jpg') || lower.endsWith('.jpg') || lower.endsWith('.jpeg')) {
+    return 'JPEG';
+  }
+  if (lower.includes('image/webp') || lower.endsWith('.webp')) {
+    return 'WEBP';
+  }
+  return 'PNG';
+}
+
 export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
   const { company, items, fields = {}, paymentMade = 0, discount = 0, additionalCharges = 0, template } = options;
   
@@ -106,11 +118,13 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
     let rightY = startHeaderY;
 
     // Left Column: Logo & Company Details
-    if (company.assets?.logoUrl && company.assets.logoUrl.startsWith('data:image')) {
+    if (company.assets?.logoUrl) {
       try {
+        const logoUrl = company.assets.logoUrl;
+        const format = getImageFormat(logoUrl);
         const logoW = Math.min(company.assets.logoWidth || 32, 40);
         // Omitting height parameter preserves natural aspect ratio without stretching
-        const imgInfo = doc.addImage(company.assets.logoUrl, 'PNG', leftColX, leftY, logoW);
+        const imgInfo = doc.addImage(logoUrl, format, leftColX, leftY, logoW);
         const actualH = imgInfo && typeof imgInfo === 'object' && 'h' in imgInfo ? (imgInfo as any).h : (logoW * 0.4);
         leftY += actualH + 6;
       } catch (err) {
@@ -471,11 +485,13 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
     
     // If signature image uploaded
     let sigDrawn = false;
-    if (company.assets?.signatureUrl && company.assets.signatureUrl.startsWith('data:image')) {
+    if (company.assets?.signatureUrl) {
       try {
+        const sigUrl = company.assets.signatureUrl;
+        const format = getImageFormat(sigUrl);
         const sigW = Math.min(company.assets.signatureWidth || 35, 45);
         const sigH = Math.min(company.assets.signatureHeight || 15, 20);
-        doc.addImage(company.assets.signatureUrl, 'PNG', pageWidth - margin - sigW, currentY + 2, sigW, sigH);
+        doc.addImage(sigUrl, format, pageWidth - margin - sigW, currentY + 2, sigW, sigH);
         currentY += sigH + 4;
         sigDrawn = true;
       } catch (err) {

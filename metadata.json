@@ -1,0 +1,6 @@
+{
+  "name": "Invoice Studio",
+  "description": "Advanced multi-source invoice generation system with Excel/Google Sheets import, universal field mapping, customizable PDF layouts, and bulk generation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

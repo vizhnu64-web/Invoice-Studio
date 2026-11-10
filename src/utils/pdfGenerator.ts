@@ -108,10 +108,11 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
     // Left Column: Logo & Company Details
     if (company.assets?.logoUrl && company.assets.logoUrl.startsWith('data:image')) {
       try {
-        const logoW = Math.min(company.assets.logoWidth || 35, 45);
-        const logoH = Math.min(company.assets.logoHeight || 15, 20);
-        doc.addImage(company.assets.logoUrl, 'PNG', leftColX, leftY, logoW, logoH);
-        leftY += logoH + 4;
+        const logoW = Math.min(company.assets.logoWidth || 32, 40);
+        // Omitting height parameter preserves natural aspect ratio without stretching
+        const imgInfo = doc.addImage(company.assets.logoUrl, 'PNG', leftColX, leftY, logoW);
+        const actualH = imgInfo && typeof imgInfo === 'object' && 'h' in imgInfo ? (imgInfo as any).h : (logoW * 0.4);
+        leftY += actualH + 6;
       } catch (err) {
         console.warn('Could not render logo in PDF:', err);
       }

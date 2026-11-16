@@ -100,7 +100,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   );
 
   const handleClearHistory = () => {
-    if (!window.confirm('Are you sure you want to clear all generation history? This action cannot be undone.')) return;
+    setGenerationHistory([]);
     if (externalSetEmailStatuses) {
       externalSetEmailStatuses({});
     }
@@ -109,14 +109,14 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   };
 
   const handleDownloadPDF = (record: GenerationRecord) => {
-    const { rowFields, items } = record.dataSnapshot;
-    const pdf = generateInvoicePDF({ company, items, fields: rowFields, template });
+    const { rowFields, items, discount = 0, additionalCharges = 0, paymentMade = record.paymentAmount ?? 0 } = record.dataSnapshot;
+    const pdf = generateInvoicePDF({ company, items, fields: rowFields, template, discount, additionalCharges, paymentMade });
     pdf.save(`${record.invoiceNumber.replace(/[/\\?%*:|"<>]/g, '_')}.pdf`);
   };
 
   const handleRegenerateRecord = (record: GenerationRecord) => {
-    const { rowFields, items } = record.dataSnapshot;
-    const pdf = generateInvoicePDF({ company, items, fields: rowFields, template });
+    const { rowFields, items, discount = 0, additionalCharges = 0, paymentMade = record.paymentAmount ?? 0 } = record.dataSnapshot;
+    const pdf = generateInvoicePDF({ company, items, fields: rowFields, template, discount, additionalCharges, paymentMade });
     pdf.save(`${record.invoiceNumber.replace(/[/\\?%*:|"<>]/g, '_')}_regenerated.pdf`);
   };
 

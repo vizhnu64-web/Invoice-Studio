@@ -404,28 +404,46 @@ export function calculateItemTotals(item: Partial<InvoiceItem> | ItemCalculation
 
     lineSubtotal = qty * rate;
     discountAmount = discountType === 'percentage' ? (lineSubtotal * discountVal) / 100 : discountVal;
-    taxableAmount = Math.max(0, lineSubtotal - discountAmount);
+    const netAmount = Math.max(0, lineSubtotal - discountAmount);
 
-    if (taxType === 'IGST') {
-      igstPct = gstPct;
-      igstAmt = (taxableAmount * igstPct) / 100;
-    } else if (taxType === 'CGST_SGST') {
-      cgstPct = gstPct / 2;
-      sgstPct = gstPct / 2;
-      cgstAmt = (taxableAmount * cgstPct) / 100;
-      sgstAmt = (taxableAmount * sgstPct) / 100;
+    if (isTaxInclusive && taxType !== 'NONE' && gstPct > 0) {
+      // Price entered includes GST: extract taxable amount without double-taxing
+      itemTotal = netAmount;
+      taxableAmount = itemTotal / (1 + gstPct / 100);
+      const totalTax = itemTotal - taxableAmount;
+
+      if (taxType === 'IGST') {
+        igstPct = gstPct;
+        igstAmt = totalTax;
+      } else if (taxType === 'CGST_SGST') {
+        cgstPct = gstPct / 2;
+        sgstPct = gstPct / 2;
+        cgstAmt = totalTax / 2;
+        sgstAmt = totalTax / 2;
+      }
+    } else {
+      taxableAmount = netAmount;
+      if (taxType === 'IGST') {
+        igstPct = gstPct;
+        igstAmt = (taxableAmount * igstPct) / 100;
+      } else if (taxType === 'CGST_SGST') {
+        cgstPct = gstPct / 2;
+        sgstPct = gstPct / 2;
+        cgstAmt = (taxableAmount * cgstPct) / 100;
+        sgstAmt = (taxableAmount * sgstPct) / 100;
+      }
+
+      const totalTax = igstAmt + cgstAmt + sgstAmt;
+      itemTotal = taxableAmount + totalTax;
     }
-
-    const totalTax = igstAmt + cgstAmt + sgstAmt;
-    itemTotal = taxableAmount + totalTax;
   }
 
   return {
     id: item.id || Math.random().toString(36).substr(2, 9),
     serialNumber: item.serialNumber || 1,
-    itemName: item.itemName || 'Professional Consulting Services',
+    itemName: item.itemName !== undefined ? item.itemName : 'Professional Consulting Services',
     itemDescription: item.itemDescription || '',
-    hsnSac: item.hsnSac || '9983',
+    hsnSac: item.hsnSac !== undefined ? item.hsnSac : '9983',
     quantity: qty,
     unit: item.unit || 'Nos',
     rate,
@@ -465,7 +483,8 @@ export function calculateInvoiceSummary(
   additionalDiscount: number = 0, 
   otherCharges: number = 0, 
   advancePaid: number = 0,
-  currency?: Partial<CurrencySettings>
+  currency?: Partial<CurrencySettings>,
+  roundOffOptions?: { enabled?: boolean; manualRoundOff?: number | null }
 ) {
   let subtotal = 0;
   let totalLineDiscount = 0;
@@ -486,8 +505,22 @@ export function calculateInvoiceSummary(
   const totalTax = totalCgst + totalSgst + totalIgst;
   const taxableTotalAfterDiscount = Math.max(0, totalTaxable - additionalDiscount);
   const grossTotal = taxableTotalAfterDiscount + totalTax + otherCharges;
-  const roundedTotal = Math.round(grossTotal);
-  const roundOff = roundedTotal - grossTotal;
+  const roundOffEnabled = roundOffOptions?.enabled !== undefined ? roundOffOptions.enabled : true;
+
+  let roundedTotal = grossTotal;
+  let roundOff = 0;
+
+  if (roundOffOptions?.manualRoundOff !== undefined && roundOffOptions?.manualRoundOff !== null && !isNaN(roundOffOptions.manualRoundOff)) {
+    roundOff = roundOffOptions.manualRoundOff;
+    roundedTotal = grossTotal + roundOff;
+  } else if (roundOffEnabled) {
+    roundedTotal = Math.round(grossTotal);
+    roundOff = roundedTotal - grossTotal;
+  } else {
+    roundedTotal = Math.round(grossTotal * 100) / 100;
+    roundOff = 0;
+  }
+
   const balanceDue = Math.max(0, roundedTotal - advancePaid);
 
   return {

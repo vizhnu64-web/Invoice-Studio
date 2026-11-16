@@ -18,6 +18,7 @@ interface GeneratePDFOptions {
   paymentMade?: number;
   discount?: number;
   additionalCharges?: number;
+  roundOffOptions?: { enabled?: boolean; manualRoundOff?: number | null };
 }
 
 function hexToRgb(hex: string): [number, number, number] {
@@ -45,7 +46,7 @@ function getImageFormat(url: string): string {
 }
 
 export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
-  const { company, items, fields = {}, paymentMade = 0, discount = 0, additionalCharges = 0, template } = options;
+  const { company, items, fields = {}, paymentMade = 0, discount = 0, additionalCharges = 0, template, roundOffOptions } = options;
   
   const orientation = template?.orientation || 'portrait';
   const doc = new jsPDFConstructor({
@@ -199,7 +200,7 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
     doc.setFont(validFont, 'bold');
     doc.setFontSize(18);
     doc.setTextColor(accentRgb[0], accentRgb[1], accentRgb[2]);
-    const invTitle = template?.labels?.['invoice_title'] || fields['invoice_title'] || company.content?.invoiceTitle || 'TAX INVOICE';
+    const invTitle = fields['invoice_title'] || template?.labels?.['invoice_title'] || company.content?.invoiceTitle || 'TAX INVOICE';
     doc.text(invTitle, pageWidth - margin, rightY, { align: 'right' });
     rightY += 8;
 
@@ -230,6 +231,21 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
       rightY += 4.5;
     }
 
+    if (fields['po_number']) {
+      doc.text(`PO No: ${fields['po_number']}`, pageWidth - margin, rightY, { align: 'right' });
+      rightY += 4.5;
+    }
+
+    if (fields['reference_number']) {
+      doc.text(`Ref No: ${fields['reference_number']}`, pageWidth - margin, rightY, { align: 'right' });
+      rightY += 4.5;
+    }
+
+    if (fields['reverse_charge'] === 'Yes') {
+      doc.text(`Reverse Charge: Yes`, pageWidth - margin, rightY, { align: 'right' });
+      rightY += 4.5;
+    }
+
     // Dynamic height calculation: advance currentY to max of left or right column height + padding
     const headerHeight = Math.max(leftY - startHeaderY, rightY - startHeaderY);
     currentY = startHeaderY + headerHeight + 4;
@@ -243,6 +259,12 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
   // --- 2. Bill To Section ---
   const showBillTo = template?.showSections?.billTo !== false;
   if (showBillTo) {
+    const startBillY = currentY;
+    const hasSeparateShipping =
+      Boolean(fields['shipping_address']) &&
+      fields['shipping_address'] !== fields['customer_address'];
+    const billColWidth = hasSeparateShipping ? contentWidth * 0.48 : contentWidth * 0.7;
+
     doc.setFont(validFont, 'bold');
     doc.setFontSize(9.5);
     doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
@@ -262,13 +284,46 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
       doc.text(fields['customer_business'], margin, currentY);
       currentY += 4;
     }
-    doc.text(fields['customer_address'] || 'Customer Address Here', margin, currentY, { maxWidth: contentWidth * 0.7 });
+    const custAddr = fields['customer_address'] || 'Customer Address Here';
+    const custAddrLines = doc.splitTextToSize(custAddr, billColWidth);
+    doc.text(custAddrLines, margin, currentY);
+    currentY += custAddrLines.length * 4;
 
-    currentY += 4;
-    if (fields['customer_gstin']) {
-      doc.text(`Customer GSTIN: ${fields['customer_gstin']}`, margin, currentY);
+    const custTaxParts = [
+      fields['customer_gstin'] ? `GSTIN: ${fields['customer_gstin']}` : '',
+      fields['customer_pan'] ? `PAN: ${fields['customer_pan']}` : ''
+    ].filter(Boolean);
+    if (custTaxParts.length > 0) {
+      doc.text(custTaxParts.join(' | '), margin, currentY);
       currentY += 4;
     }
+
+    const custContactParts = [
+      fields['customer_phone'] ? `Ph: ${fields['customer_phone']}` : '',
+      fields['customer_email'] ? `Email: ${fields['customer_email']}` : ''
+    ].filter(Boolean);
+    if (custContactParts.length > 0) {
+      doc.text(custContactParts.join(' | '), margin, currentY);
+      currentY += 4;
+    }
+
+    if (hasSeparateShipping) {
+      let shipY = startBillY;
+      const shipX = margin + contentWidth * 0.52;
+      doc.setFont(validFont, 'bold');
+      doc.setFontSize(9.5);
+      doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+      doc.text('Ship To:', shipX, shipY);
+      shipY += 4.5;
+      doc.setFont(validFont, 'normal');
+      doc.setFontSize(8.5);
+      doc.setTextColor(grayRgb[0], grayRgb[1], grayRgb[2]);
+      const shipLines = doc.splitTextToSize(fields['shipping_address'], contentWidth * 0.46);
+      doc.text(shipLines, shipX, shipY);
+      shipY += shipLines.length * 4;
+      currentY = Math.max(currentY, shipY);
+    }
+
     currentY += 3;
   }
 
@@ -347,7 +402,7 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
   }
 
   // --- 5. Invoice Summary & Tax Breakdown ---
-  const summary = calculateInvoiceSummary(items, discount, additionalCharges, paymentMade, company.currency);
+  const summary = calculateInvoiceSummary(items, discount, additionalCharges, paymentMade, company.currency, roundOffOptions);
   const showSummary = template?.showSections?.taxSummary !== false;
 
   const summaryWidth = 80;
@@ -379,8 +434,8 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
       addSummaryRow('CGST Total:', formatCurrency(summary.totalCgst, company.currency));
       addSummaryRow('SGST Total:', formatCurrency(summary.totalSgst, company.currency));
     }
-    if (discount > 0) {
-      addSummaryRow('Discount:', `- ${formatCurrency(discount, company.currency)}`);
+    if (summary.totalDiscount > 0) {
+      addSummaryRow('Discount:', `- ${formatCurrency(summary.totalDiscount, company.currency)}`);
     }
     if (additionalCharges > 0) {
       addSummaryRow('Additional Charges:', formatCurrency(additionalCharges, company.currency));
@@ -437,17 +492,39 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
           doc.text(`UPI ID: ${activeBank.upiId}`, margin, leftY);
           leftY += 4;
         }
-        if (company.content?.paymentInstructions) {
-          doc.text(company.content.paymentInstructions, margin, leftY, { maxWidth: leftWidth });
-          leftY += 4;
+        const payInst = fields['payment_instructions'] || company.content?.paymentInstructions;
+        if (payInst) {
+          const payLines = doc.splitTextToSize(payInst, leftWidth);
+          doc.text(payLines, margin, leftY);
+          leftY += payLines.length * 3.8 + 1;
         }
+        leftY += 3;
+      }
+    }
+
+    // Payment Status & Transaction Details (if provided)
+    if (template?.showSections?.paymentSummary !== false && (fields['payment_status'] || fields['payment_method'] || fields['payment_reference'])) {
+      const paySummaryParts = [
+        fields['payment_status'] ? `Status: ${fields['payment_status']}` : '',
+        fields['payment_method'] ? `Method: ${fields['payment_method']}` : '',
+        fields['payment_reference'] ? `Ref: ${fields['payment_reference']}` : ''
+      ].filter(Boolean);
+      if (paySummaryParts.length > 0) {
+        doc.setFont(validFont, 'bold');
+        doc.setFontSize(8);
+        doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+        doc.text('Payment Tracking:', margin, leftY);
         leftY += 4;
+        doc.setFont(validFont, 'normal');
+        doc.setTextColor(grayRgb[0], grayRgb[1], grayRgb[2]);
+        doc.text(paySummaryParts.join(' | '), margin, leftY, { maxWidth: leftWidth });
+        leftY += 5;
       }
     }
 
     // Notes
     const showNotes = template?.showSections?.notes !== false;
-    const notesContent = fields['notes_content'] || company.content?.defaultNotes;
+    const notesContent = fields['notes_content'] !== undefined ? fields['notes_content'] : company.content?.defaultNotes;
     if (showNotes && notesContent) {
       doc.setFont(validFont, 'bold');
       doc.setFontSize(8);
@@ -457,8 +534,35 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
       doc.setFont(validFont, 'normal');
       doc.setFontSize(8);
       doc.setTextColor(grayRgb[0], grayRgb[1], grayRgb[2]);
-      doc.text(notesContent, margin, leftY, { maxWidth: leftWidth });
-      leftY += 6;
+      const notesLines = doc.splitTextToSize(notesContent, leftWidth);
+      doc.text(notesLines, margin, leftY);
+      leftY += notesLines.length * 3.8 + 3;
+    }
+
+    if (fields['delivery_instructions']) {
+      doc.setFont(validFont, 'bold');
+      doc.setFontSize(8);
+      doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+      doc.text('Delivery Instructions:', margin, leftY);
+      leftY += 4;
+      doc.setFont(validFont, 'normal');
+      doc.setTextColor(grayRgb[0], grayRgb[1], grayRgb[2]);
+      const delivLines = doc.splitTextToSize(fields['delivery_instructions'], leftWidth);
+      doc.text(delivLines, margin, leftY);
+      leftY += delivLines.length * 3.8 + 3;
+    }
+
+    if (fields['additional_remarks']) {
+      doc.setFont(validFont, 'bold');
+      doc.setFontSize(8);
+      doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+      doc.text('Remarks:', margin, leftY);
+      leftY += 4;
+      doc.setFont(validFont, 'normal');
+      doc.setTextColor(grayRgb[0], grayRgb[1], grayRgb[2]);
+      const remLines = doc.splitTextToSize(fields['additional_remarks'], leftWidth);
+      doc.text(remLines, margin, leftY);
+      leftY += remLines.length * 3.8 + 3;
     }
 
     currentY = Math.max(summaryY + 6, leftY + 6);
@@ -543,7 +647,7 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
       doc.line(margin, pageHeight - 10, pageWidth - margin, pageHeight - 10);
       doc.setFontSize(7);
       doc.setTextColor(grayRgb[0], grayRgb[1], grayRgb[2]);
-      const footerMsg = company.content?.footerMessage || 'This is a computer generated invoice powered by Invoice Studio.';
+      const footerMsg = fields['custom_footer_text'] || company.content?.footerMessage || 'This is a computer generated invoice powered by Invoice Studio.';
       doc.text(footerMsg, margin, pageHeight - 6);
       doc.text(`Page ${p} of ${totalPages}`, pageWidth - margin, pageHeight - 6, { align: 'right' });
     }

@@ -23,7 +23,8 @@ import {
   Clock,
   Bookmark,
   ExternalLink,
-  ChevronRight
+  ChevronRight,
+  FilePlus2
 } from 'lucide-react';
 import { SpreadsheetData, GenerationRecord, CompanySettings, GuidedWorkflowStep } from '../types';
 import { storage } from '../utils/storage';
@@ -188,8 +189,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </p>
         </div>
 
-        {/* TWO LARGE CLEAR STARTING OPTIONS */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* THREE CLEAR STARTING OPTIONS */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {/* OPTION A: Import Excel / CSV */}
           <div
             onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
@@ -207,7 +208,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   <FileSpreadsheet className="w-6 h-6" />
                 </div>
                 <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-full">
-                  Option A • Recommended
+                  Option A • Spreadsheet
                 </span>
               </div>
 
@@ -293,6 +294,53 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               >
                 <Globe className="w-4 h-4" />
                 <span>Connect & Import Google Sheet</span>
+                <ArrowRight className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          {/* OPTION C: Manual Entry */}
+          <div className="rounded-2xl p-6 border-2 border-slate-200 hover:border-violet-500 bg-gradient-to-b from-slate-50/60 to-white hover:shadow-md transition-all flex flex-col justify-between md:col-span-2 lg:col-span-1">
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="w-12 h-12 rounded-2xl bg-violet-100 text-violet-700 flex items-center justify-center font-bold">
+                  <FilePlus2 className="w-6 h-6" />
+                </div>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-violet-700 bg-violet-50 px-2.5 py-1 rounded-full">
+                  Option C • Direct Form
+                </span>
+              </div>
+
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Manual Invoice Entry</h3>
+                <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                  Create a single multi-item invoice directly without spreadsheets. Pick from saved customers, calculate GST live, and export PDF.
+                </p>
+              </div>
+
+              <div className="space-y-1.5 text-[11px] text-slate-500 bg-white p-3 rounded-xl border border-slate-200">
+                <div className="flex items-center space-x-2">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Structured 7-section invoice form</span>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Multiple line items, CGST/SGST & IGST</span>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Draft saving & customer directory</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="pt-6">
+              <button
+                onClick={() => setActiveTab('manual')}
+                className="w-full bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold py-3 px-4 rounded-xl text-center shadow-sm transition-all flex items-center justify-center space-x-2 cursor-pointer"
+              >
+                <FilePlus2 className="w-4 h-4" />
+                <span>Open Manual Entry</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
             </div>

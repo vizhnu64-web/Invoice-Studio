@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { GenerationRecord, CompanySettings, InvoiceTemplate } from '../types';
 import { 
   Mail, 
@@ -29,6 +29,7 @@ interface EmailCenterViewProps {
   template: InvoiceTemplate;
   emailStatuses: Record<string, EmailSendStatus>;
   setEmailStatuses: React.Dispatch<React.SetStateAction<Record<string, EmailSendStatus>>>;
+  initialSelectedRecordId?: string | null;
 }
 
 export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
@@ -37,8 +38,11 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
   template,
   emailStatuses,
   setEmailStatuses,
+  initialSelectedRecordId,
 }) => {
-  const [selectedRecordIds, setSelectedRecordIds] = useState<string[]>([]);
+  const [selectedRecordIds, setSelectedRecordIds] = useState<string[]>(() =>
+    initialSelectedRecordId ? [initialSelectedRecordId] : []
+  );
   const [searchTerm, setSearchTerm] = useState('');
   const [emailConfig, setEmailConfig] = useState<EmailConfig>(() => storage.loadEmailConfig());
   const [emailSubject, setEmailSubject] = useState('Tax Invoice {{invoiceNumber}} from {{companyName}}');
@@ -49,9 +53,21 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
   const [connectionStatus, setConnectionStatus] = useState<{ success: boolean; message: string } | null>(null);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number; message: string } | null>(null);
   const [batchReport, setBatchReport] = useState<BatchEmailReport | null>(null);
-  const [activePreviewId, setActivePreviewId] = useState<string | null>(generationHistory[0]?.id || null);
+  const [activePreviewId, setActivePreviewId] = useState<string | null>(
+    initialSelectedRecordId || generationHistory[0]?.id || null
+  );
   const [customRecipientEmail, setCustomRecipientEmail] = useState<string>('');
   const [actionNotification, setActionNotification] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
+
+  useEffect(() => {
+    if (initialSelectedRecordId) {
+      setActivePreviewId(initialSelectedRecordId);
+      setSelectedRecordIds(prev =>
+        prev.includes(initialSelectedRecordId) ? prev : [initialSelectedRecordId, ...prev]
+      );
+      setCustomRecipientEmail('');
+    }
+  }, [initialSelectedRecordId]);
 
   const filteredRecords = generationHistory.filter(record =>
     record.invoiceNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||

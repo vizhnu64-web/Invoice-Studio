@@ -12,7 +12,10 @@ import {
   CalculationSettings,
   AdvancedAmountCalculationSettings,
   GstConfigurationSettings,
-  WorkflowSessionState
+  WorkflowSessionState,
+  ManualInvoiceDraft,
+  ManualInvoiceData,
+  CustomerRecord
 } from '../types';
 import { defaultCompanySettings, defaultFieldCatalog, sampleSpreadsheetData, defaultCalculationSettings } from '../mockData';
 import { EmailConfig, EmailSendStatus, EmailService } from './emailService';
@@ -29,6 +32,9 @@ const STORAGE_KEYS = {
   SAVED_TEMPLATES: 'invoice_studio_saved_templates_v2',
   EMAIL_CONFIG: 'invoice_studio_email_config_v2',
   EMAIL_STATUSES: 'invoice_studio_email_statuses_v2',
+  MANUAL_DRAFTS: 'invoice_studio_manual_drafts_v2',
+  MANUAL_WORKING: 'invoice_studio_manual_working_v2',
+  CUSTOMERS: 'invoice_studio_customers_v2',
 };
 
 // Fallback in-memory storage for non-browser / Node.js test environments
@@ -452,6 +458,147 @@ export const storage = {
       return true;
     } catch (e) {
       console.error('Failed to save email statuses to storage:', e);
+      return false;
+    }
+  },
+
+  loadManualDrafts(): ManualInvoiceDraft[] {
+    try {
+      const data = safeGetItem(STORAGE_KEYS.MANUAL_DRAFTS);
+      if (data) {
+        const parsed = JSON.parse(data);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {
+      console.warn('Failed to load manual drafts from storage:', e);
+    }
+    return [];
+  },
+
+  saveManualDraft(draft: ManualInvoiceDraft): boolean {
+    try {
+      const existing = this.loadManualDrafts();
+      const filtered = existing.filter(d => d.id !== draft.id);
+      safeSetItem(STORAGE_KEYS.MANUAL_DRAFTS, JSON.stringify([draft, ...filtered]));
+      return true;
+    } catch (e) {
+      console.error('Failed to save manual draft to storage:', e);
+      return false;
+    }
+  },
+
+  deleteManualDraft(id: string): boolean {
+    try {
+      const existing = this.loadManualDrafts();
+      const filtered = existing.filter(d => d.id !== id);
+      safeSetItem(STORAGE_KEYS.MANUAL_DRAFTS, JSON.stringify(filtered));
+      return true;
+    } catch (e) {
+      console.error('Failed to delete manual draft from storage:', e);
+      return false;
+    }
+  },
+
+  loadActiveManualForm(): ManualInvoiceData | null {
+    try {
+      const data = safeGetItem(STORAGE_KEYS.MANUAL_WORKING);
+      if (data) {
+        return JSON.parse(data);
+      }
+    } catch (e) {
+      console.warn('Failed to load active manual form from storage:', e);
+    }
+    return null;
+  },
+
+  saveActiveManualForm(data: ManualInvoiceData): boolean {
+    try {
+      safeSetItem(STORAGE_KEYS.MANUAL_WORKING, JSON.stringify(data));
+      return true;
+    } catch (e) {
+      console.error('Failed to save active manual form to storage:', e);
+      return false;
+    }
+  },
+
+  clearActiveManualForm(): boolean {
+    try {
+      safeRemoveItem(STORAGE_KEYS.MANUAL_WORKING);
+      return true;
+    } catch (e) {
+      console.error('Failed to clear active manual form:', e);
+      return false;
+    }
+  },
+
+  loadCustomers(): CustomerRecord[] {
+    try {
+      const data = safeGetItem(STORAGE_KEYS.CUSTOMERS);
+      if (data) {
+        const parsed = JSON.parse(data);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {
+      console.warn('Failed to load customer directory from storage:', e);
+    }
+    return [
+      {
+        id: 'cust_seed_1',
+        customerName: 'Sharma Enterprises Pvt Ltd',
+        contactPerson: 'Aarav Sharma',
+        email: 'accounts@sharmaenterprises.test',
+        phone: '+91 98110 22334',
+        billingAddress: 'Plot 12, Industrial Area, Phase 2',
+        shippingAddress: 'Plot 12, Industrial Area, Phase 2',
+        city: 'Gurugram',
+        state: 'Haryana',
+        postalCode: '122001',
+        country: 'India',
+        gstin: '06AABCS1234Q1ZU',
+        pan: 'AABCS1234Q',
+        referenceNumber: 'CUST-001',
+        updatedAt: '2026-11-01T09:00:00.000Z'
+      },
+      {
+        id: 'cust_seed_2',
+        customerName: 'Apex Digital Solutions',
+        contactPerson: 'Priya Nair',
+        email: 'finance@apexdigital.test',
+        phone: '+91 98450 55667',
+        billingAddress: '45 MG Road, Indiranagar',
+        shippingAddress: '45 MG Road, Indiranagar',
+        city: 'Bengaluru',
+        state: 'Karnataka',
+        postalCode: '560038',
+        country: 'India',
+        gstin: '29AABCA5678R1Z5',
+        pan: 'AABCA5678R',
+        referenceNumber: 'CUST-002',
+        updatedAt: '2026-11-01T09:00:00.000Z'
+      }
+    ];
+  },
+
+  saveCustomer(customer: CustomerRecord): boolean {
+    try {
+      const existing = this.loadCustomers();
+      const filtered = existing.filter(c => c.id !== customer.id);
+      safeSetItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify([customer, ...filtered]));
+      return true;
+    } catch (e) {
+      console.error('Failed to save customer to directory:', e);
+      return false;
+    }
+  },
+
+  deleteCustomer(id: string): boolean {
+    try {
+      const existing = this.loadCustomers();
+      const filtered = existing.filter(c => c.id !== id);
+      safeSetItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(filtered));
+      return true;
+    } catch (e) {
+      console.error('Failed to delete customer from directory:', e);
       return false;
     }
   }

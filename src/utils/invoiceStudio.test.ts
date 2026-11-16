@@ -1213,6 +1213,190 @@ describe('Invoice Studio - Automated Logic & PDF Generation Test Suite', () => {
     assert.ok(pdfBytes.byteLength > 1000);
   });
 
+  test('34. Tax-Inclusive Calculated Mode & Explicit Empty HSN Preservation', () => {
+    const inclusiveItem = calculateItemTotals({
+      serialNumber: 1,
+      itemName: 'Subscription Plan',
+      hsnSac: '',
+      quantity: 2,
+      rate: 1180,
+      gstPercentage: 18,
+      taxType: 'IGST',
+      calculationMode: 'calculated',
+      isTaxInclusive: true,
+    });
+
+    assert.strictEqual(inclusiveItem.hsnSac, '');
+    assert.strictEqual(inclusiveItem.taxableAmount, 2000);
+    assert.strictEqual(inclusiveItem.igstAmount, 360);
+    assert.strictEqual(inclusiveItem.itemTotal, 2360);
+  });
+
+  test('35. Manual Invoice Numbering & Duplicate Detection', async () => {
+    const { generateNextInvoiceNumber, isDuplicateInvoiceNumber } = await import('./manualInvoice');
+    const history: any[] = [
+      { id: 'r1', invoiceNumber: 'INV-2026-004' },
+      { id: 'r2', invoiceNumber: 'INV-2026-005' },
+    ];
+
+    const nextNum = generateNextInvoiceNumber(history, defaultFieldCatalog);
+    assert.strictEqual(nextNum, 'INV-2026-006');
+    assert.strictEqual(isDuplicateInvoiceNumber('inv-2026-005', history), true);
+    assert.strictEqual(isDuplicateInvoiceNumber('INV-2026-006', history), false);
+    assert.strictEqual(isDuplicateInvoiceNumber('INV-2026-005', history, 'r2'), false);
+  });
+
+  test('36. Manual Invoice Multi-Item Computation (CGST+SGST, Non-GST, Discounts, Partial Paid)', async () => {
+    const {
+      createDefaultManualInvoice,
+      createEmptyManualLineItem,
+      computeManualInvoice,
+      validateManualInvoice,
+      convertManualInvoiceToGenerationRecord,
+    } = await import('./manualInvoice');
+
+    const draft = createDefaultManualInvoice(defaultCompanySettings, defaultFieldCatalog, []);
+    draft.invoiceNumber = 'MAN-2026-001';
+    draft.customerName = 'Horizon Retail Pvt Ltd';
+    draft.customerEmail = 'billing@horizonretail.test';
+    draft.transactionType = 'CGST_SGST';
+    draft.gstEnabled = true;
+    draft.pricingType = 'exclusive';
+    draft.additionalDiscount = 500;
+    draft.additionalDiscountType = 'fixed';
+    draft.additionalCharges = 250;
+    draft.paymentStatus = 'Partially Paid';
+    draft.amountPaid = 10000;
+
+    const item1 = {
+      ...createEmptyManualLineItem(18),
+      itemName: 'Cloud Architecture Audit',
+      quantity: 2,
+      rate: 10000,
+      discount: 10,
+      discountType: 'percentage' as const,
+      gstPercentage: 18,
+    };
+
+    const item2 = {
+      ...createEmptyManualLineItem(5),
+      itemName: 'Priority Support Add-on',
+      quantity: 1,
+      rate: 2000,
+      discount: 0,
+      discountType: 'fixed' as const,
+      gstPercentage: 5,
+    };
+
+    draft.items = [item1, item2];
+
+    const computed = computeManualInvoice(draft, defaultCompanySettings);
+    assert.strictEqual(computed.items.length, 2);
+    assert.strictEqual(computed.items[0].taxableAmount, 18000);
+    assert.strictEqual(computed.items[0].cgstAmount, 1620);
+    assert.strictEqual(computed.items[0].sgstAmount, 1620);
+    assert.strictEqual(computed.items[1].taxableAmount, 2000);
+    assert.strictEqual(computed.summary.subtotal, 22000);
+    assert.strictEqual(computed.summary.lineDiscount, 2000);
+    assert.strictEqual(computed.summary.totalDiscount, 2500);
+    assert.strictEqual(computed.summary.totalTaxable, 19500);
+    assert.strictEqual(computed.summary.totalCgst, 1670);
+    assert.strictEqual(computed.summary.totalSgst, 1670);
+    assert.strictEqual(computed.summary.totalInvoiceAmount, 23090);
+    assert.strictEqual(computed.summary.balanceDue, 13090);
+
+    const nonGstDraft = { ...draft, gstEnabled: false };
+    const nonGstComputed = computeManualInvoice(nonGstDraft, defaultCompanySettings);
+    assert.strictEqual(nonGstComputed.summary.totalTax, 0);
+    assert.strictEqual(nonGstComputed.summary.totalInvoiceAmount, 19750);
+
+    const validRes = validateManualInvoice(draft, []);
+    assert.strictEqual(validRes.isValid, true);
+
+    const dupRes = validateManualInvoice(draft, [{ id: 'old_1', invoiceNumber: 'MAN-2026-001' } as any]);
+    assert.strictEqual(dupRes.isValid, false);
+    assert.ok(dupRes.errors.invoiceNumber);
+
+    const record = convertManualInvoiceToGenerationRecord(draft, defaultCompanySettings, {
+      id: 'modern-clean-v1',
+      name: 'Modern Corporate Clean',
+      isDefault: true,
+      orientation: 'portrait',
+      primaryColor: '#0f172a',
+      fontFamily: 'Inter',
+      showSections: {
+        companyHeader: true,
+        invoiceDetails: true,
+        billTo: true,
+        subject: true,
+        itemTable: true,
+        taxSummary: true,
+        amountInWords: true,
+        paymentSummary: true,
+        notes: true,
+        bankDetails: true,
+        signature: true,
+        terms: true,
+        footer: true,
+      },
+      labels: { invoice_title: 'TAX INVOICE', bill_to: 'Billed To:', subtotal: 'Subtotal' },
+    });
+
+    assert.strictEqual(record.sourceType, 'manual');
+    assert.strictEqual(record.totalAmount, 23090);
+
+    const pdfDoc = generateInvoicePDF({
+      company: defaultCompanySettings,
+      items: record.dataSnapshot.items,
+      fields: record.dataSnapshot.rowFields,
+      paymentMade: record.dataSnapshot.paymentMade,
+      discount: record.dataSnapshot.discount,
+      additionalCharges: record.dataSnapshot.additionalCharges,
+    });
+    assert.ok(pdfDoc.output('arraybuffer').byteLength > 1000);
+  });
+
+  test('37. Storage - Manual Drafts & Customer Directory Persistence', async () => {
+    const { storage } = await import('./storage');
+    const { createDefaultManualInvoice } = await import('./manualInvoice');
+
+    const initialCustomers = storage.loadCustomers();
+    assert.ok(initialCustomers.length >= 2);
+
+    storage.saveCustomer({
+      id: 'cust_test_new',
+      customerName: 'Zenith Labs Pvt Ltd',
+      contactPerson: 'Kiran Verma',
+      email: 'ap@zenithlabs.test',
+      phone: '+91 98200 11223',
+      billingAddress: '88 Tech Park',
+      city: 'Pune',
+      state: 'Maharashtra',
+      postalCode: '411001',
+      country: 'India',
+      gstin: '27AABCZ1234K1Z2',
+      updatedAt: '2026-11-16T00:00:00.000Z',
+    });
+
+    const customersAfterSave = storage.loadCustomers();
+    assert.ok(customersAfterSave.some((c) => c.customerName === 'Zenith Labs Pvt Ltd'));
+
+    const draftData = createDefaultManualInvoice(defaultCompanySettings, defaultFieldCatalog, []);
+    draftData.customerName = 'Zenith Labs Pvt Ltd';
+    storage.saveManualDraft({
+      id: 'draft_test_1',
+      title: 'Draft Zenith',
+      data: draftData,
+      updatedAt: '2026-11-16T00:00:00.000Z',
+    });
+
+    const drafts = storage.loadManualDrafts();
+    assert.ok(drafts.some((d) => d.id === 'draft_test_1' && d.title === 'Draft Zenith'));
+
+    storage.deleteManualDraft('draft_test_1');
+    assert.strictEqual(storage.loadManualDrafts().some((d) => d.id === 'draft_test_1'), false);
+  });
+
 });
 
 

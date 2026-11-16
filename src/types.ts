@@ -269,7 +269,7 @@ export interface GenerationRecord {
   id: string;
   invoiceNumber: string;
   customerName: string;
-  sourceType: 'excel' | 'googlesheets' | 'mock';
+  sourceType: 'excel' | 'googlesheets' | 'mock' | 'manual';
   sourceName: string;
   worksheetName: string;
   generatedDate: string;
@@ -287,6 +287,108 @@ export interface GenerationRecord {
   paymentReference?: string;
   paymentAmount?: number;
   paymentNotes?: string;
+}
+
+export interface CustomerRecord {
+  id: string;
+  customerName: string;
+  contactPerson?: string;
+  email?: string;
+  phone?: string;
+  billingAddress: string;
+  shippingAddress?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
+  country?: string;
+  gstin?: string;
+  pan?: string;
+  referenceNumber?: string;
+  updatedAt: string;
+}
+
+export interface ManualInvoiceLineItem {
+  id: string;
+  itemName: string;
+  itemDescription: string;
+  hsnSac: string;
+  quantity: number;
+  unit: string;
+  rate: number;
+  discount: number;
+  discountType: 'fixed' | 'percentage';
+  gstPercentage: number;
+}
+
+export interface ManualInvoiceData {
+  id?: string;
+  // 1. Invoice Information
+  invoiceNumber: string;
+  autoNumbering: boolean;
+  invoiceDate: string;
+  dueDate: string;
+  invoiceType: string;
+  poNumber: string;
+  referenceNumber: string;
+  placeOfSupply: string;
+  stateCode: string;
+  reverseCharge: 'No' | 'Yes';
+  subject: string;
+  additionalReference: string;
+
+  // 2. Customer Information
+  selectedCustomerId?: string;
+  customerName: string;
+  contactPerson: string;
+  customerEmail: string;
+  customerPhone: string;
+  billingAddress: string;
+  shippingAddress: string;
+  sameAsBilling: boolean;
+  customerCity: string;
+  customerState: string;
+  customerPostalCode: string;
+  customerCountry: string;
+  customerGstin: string;
+  customerPan: string;
+  customerReferenceNumber: string;
+
+  // 3. Items
+  items: ManualInvoiceLineItem[];
+
+  // 4. Tax & Calculation Settings
+  gstEnabled: boolean;
+  pricingType: 'exclusive' | 'inclusive';
+  transactionType: 'IGST' | 'CGST_SGST' | 'NONE';
+  defaultGstRate: number;
+  additionalDiscount: number;
+  additionalDiscountType: 'fixed' | 'percentage';
+  additionalCharges: number;
+  roundOffEnabled: boolean;
+  manualRoundOffOverride?: number | null;
+
+  // 5. Payment Information
+  paymentMethod: string;
+  paymentStatus: 'Unpaid' | 'Partially Paid' | 'Paid';
+  amountPaid: number;
+  paymentDate: string;
+  transactionReference: string;
+  paymentNotes: string;
+
+  // 6. Notes & Terms
+  notes: string;
+  terms: string;
+  paymentInstructions: string;
+  deliveryInstructions: string;
+  additionalRemarks: string;
+  customFooterText: string;
+}
+
+export interface ManualInvoiceDraft {
+  id: string;
+  title: string;
+  data: ManualInvoiceData;
+  updatedAt: string;
 }
 
 export interface InvoiceModel {

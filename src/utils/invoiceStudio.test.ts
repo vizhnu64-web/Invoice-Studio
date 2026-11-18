@@ -1397,6 +1397,41 @@ describe('Invoice Studio - Automated Logic & PDF Generation Test Suite', () => {
     assert.strictEqual(storage.loadManualDrafts().some((d) => d.id === 'draft_test_1'), false);
   });
 
+  test('38. Google Sheets URL/ID Extraction & Value Parser', async () => {
+    const { extractSpreadsheetId, parseValuesToSpreadsheetData } = await import('./googleSheets');
+
+    const url = 'https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit#gid=0';
+    const extractedId = extractSpreadsheetId(url);
+    assert.strictEqual(extractedId, '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms');
+
+    const rawId = '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms';
+    assert.strictEqual(extractSpreadsheetId(rawId), rawId);
+
+    assert.throws(() => extractSpreadsheetId('invalid-url'), /Invalid Google Sheets URL or ID/);
+
+    const sheetValuesMap = {
+      'Sheet1': [
+        ['Invoice Number', 'Customer Name', 'Amount'],
+        ['INV-001', 'Acme Corp', '15000'],
+        ['INV-002', 'Beta Inc', '25000'],
+      ],
+    };
+
+    const parsedData = parseValuesToSpreadsheetData(
+      'Test Sheet Title',
+      [{ title: 'Sheet1' }],
+      sheetValuesMap
+    );
+
+    assert.strictEqual(parsedData.fileName, 'Test Sheet Title.gsheet');
+    assert.strictEqual(parsedData.worksheets.length, 1);
+    assert.strictEqual(parsedData.worksheets[0].name, 'Sheet1');
+    assert.deepStrictEqual(parsedData.worksheets[0].headers, ['Invoice Number', 'Customer Name', 'Amount']);
+    assert.strictEqual(parsedData.worksheets[0].rows.length, 2);
+    assert.strictEqual(parsedData.worksheets[0].rows[0]['Invoice Number'], 'INV-001');
+    assert.strictEqual(parsedData.worksheets[0].rows[1]['Customer Name'], 'Beta Inc');
+  });
+
 });
 
 

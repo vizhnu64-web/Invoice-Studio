@@ -3,49 +3,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import test, { describe } from 'node:test';
+import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PassThrough } from 'node:stream';
+import fs from 'node:fs';
+import path from 'node:path';
+import { AppServerConfig, SIGNIN_GOOGLE_SCOPES, GOOGLE_SHEETS_SCOPE, GOOGLE_GMAIL_SEND_SCOPE } from './config.js';
+import { encryptSecret, decryptSecret } from './crypto.js';
 import {
-  AppServerConfig,
-  BASE_GOOGLE_SCOPES,
-  GOOGLE_DRIVE_SCOPE,
-  GOOGLE_GMAIL_SEND_SCOPE,
-  GOOGLE_SHEETS_SCOPE,
-} from './config.js';
-import {
-  decryptSecret,
-  encryptSecret,
-  signPayload,
-  verifySignedPayload,
-} from './crypto.js';
-import {
-  createPersistenceStore,
-  DatabaseConfigurationError,
-  PersistedSpreadsheetRecord,
-  PersistenceStore,
-  StoredAppUser,
-  StoredCustomerRecord,
-  StoredDriveFileRef,
-  StoredEmailLog,
-  StoredInvoiceRecord,
-  StoredOAuthConnection,
-  StoredQuotationRecord,
-  StoredSession,
-  StoredSmtpConfig,
-  StoredWorkspaceState,
-  SyncHistoryEntry,
-} from './db.js';
-import {
+  DRIVE_ROOT_FOLDER_NAME,
   DRIVE_SUBFOLDER_KEYS,
   DriveFileSummary,
   DriveTransportAdapter,
-  mergeTimestampedRecords,
 } from './driveService.js';
-import {
-  buildGmailRawMimeMessage,
-  EmailTransportAdapter,
-} from './emailBackendService.js';
+import { EmailTransportAdapter } from './emailBackendService.js';
 import { GoogleTransportAdapter, HttpApiError } from './googleService.js';
 import {
   handleAuthDisconnect,
@@ -57,1499 +27,1116 @@ import {
   handleDriveUploadPdf,
   handleEmailHistory,
   handleEmailSend,
+  handleEmailTestSend,
   handleGoogleAuthCallback,
   handleGoogleAuthStart,
+  handleHealth,
   handleInvoices,
   handleQuotations,
   handleSheetsData,
   handleSheetsMetadata,
   handleSheetsSync,
-  handleSheetsValues,
   handleSmtpConfig,
   handleSmtpTest,
   handleWorkspace,
   HandlerRuntimeDeps,
 } from './handlers.js';
-import { NormalizedRequest, NormalizedResponse } from './http.js';
+import {
+  decodeEncryptedSessionCookie,
+  encodeEncryptedSessionCookie,
+  EncryptedSessionData,
+  NormalizedRequest,
+  NormalizedResponse,
+  SESSION_COOKIE_NAME,
+} from './http.js';
 import {
   buildSheetRange,
+  computeSyncDiff,
   extractSpreadsheetId,
   normalizeSheetValues,
 } from './sheetsNormalization.js';
 
 const TEST_CONFIG: AppServerConfig = {
+  appUrl: 'http://localhost:3000',
   googleClientId: 'test-client-id.apps.googleusercontent.com',
   googleClientSecret: 'test-client-secret-value',
   googleRedirectUri: 'http://localhost:3000/api/auth/google/callback',
-  sessionSecret: 'test_session_secret_at_least_32_characters_long',
-  tokenEncryptionKey: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-  databaseUrl: 'postgres://test:test@localhost:5432/test',
-  appUrl: 'http://localhost:3000',
+  sessionSecret: 'super-secret-session-signing-key-32-chars!!',
+  tokenEncryptionKey: 'super-secret-aes256-encryption-key-32-chars!!',
   isProduction: false,
 };
 
-/**
- * Explicit test-only PersistenceStore implementing strict userId isolation
- * for unit/integration verification of multi-user auth, Drive, Sheets,
- * Quotations, Invoices, and Dual Gmail/SMTP email flows.
- */
-class TestPersistenceStore implements PersistenceStore {
-  public users = new Map<string, StoredAppUser>();
-  public sessions = new Map<string, StoredSession>();
-  public connections = new Map<string, StoredOAuthConnection>();
-  public workspaces = new Map<string, StoredWorkspaceState>();
-  public customers = new Map<string, StoredCustomerRecord>();
-  public quotations = new Map<string, StoredQuotationRecord>();
-  public invoices = new Map<string, StoredInvoiceRecord>();
-  public driveFiles = new Map<string, StoredDriveFileRef>();
-  public smtpConfigs = new Map<string, StoredSmtpConfig>();
-  public emailLogs: StoredEmailLog[] = [];
-  public spreadsheets = new Map<string, PersistedSpreadsheetRecord>();
-  public rowHashes = new Map<string, Map<string, string>>();
-  public history: SyncHistoryEntry[] = [];
-
-  async upsertAppUser(params: {
-    userId: string;
-    email: string;
-    name: string | null;
-    picture: string | null;
-  }): Promise<StoredAppUser> {
-    const existing = this.users.get(params.userId);
-    const now = new Date().toISOString();
-    const user: StoredAppUser = {
-      userId: params.userId,
-      email: params.email,
-      name: params.name,
-      picture: params.picture,
-      onboardingCompleted: existing?.onboardingCompleted ?? false,
-      driveRootFolderId: existing?.driveRootFolderId ?? null,
-      driveSubfolders: existing?.driveSubfolders ?? {},
-      driveLastSyncAt: existing?.driveLastSyncAt ?? null,
-      driveSyncStatus: existing?.driveSyncStatus ?? null,
-      driveLastError: existing?.driveLastError ?? null,
-      createdAt: existing?.createdAt ?? now,
-      lastLoginAt: now,
-    };
-    this.users.set(params.userId, user);
-    return user;
-  }
-
-  async getAppUser(userId: string): Promise<StoredAppUser | null> {
-    return this.users.get(userId) || null;
-  }
-
-  async updateAppUserOnboarding(userId: string, completed: boolean): Promise<void> {
-    const u = this.users.get(userId);
-    if (u) u.onboardingCompleted = completed;
-  }
-
-  async updateAppUserDriveState(
-    userId: string,
-    patch: {
-      driveRootFolderId?: string | null;
-      driveSubfolders?: Record<string, string>;
-      driveLastSyncAt?: string | null;
-      driveSyncStatus?: string | null;
-      driveLastError?: string | null;
-    }
-  ): Promise<void> {
-    const u = this.users.get(userId);
-    if (!u) return;
-    if (patch.driveRootFolderId !== undefined) u.driveRootFolderId = patch.driveRootFolderId;
-    if (patch.driveSubfolders !== undefined) u.driveSubfolders = patch.driveSubfolders;
-    if (patch.driveLastSyncAt !== undefined) u.driveLastSyncAt = patch.driveLastSyncAt;
-    if (patch.driveSyncStatus !== undefined) u.driveSyncStatus = patch.driveSyncStatus;
-    if (patch.driveLastError !== undefined) u.driveLastError = patch.driveLastError;
-  }
-
-  async createSession(
-    sessionId: string,
-    userId: string,
-    expiresAtIso: string
-  ): Promise<StoredSession> {
-    const sess: StoredSession = {
-      sessionId,
-      userId,
-      expiresAt: expiresAtIso,
-      createdAt: new Date().toISOString(),
-    };
-    this.sessions.set(sessionId, sess);
-    return sess;
-  }
-
-  async getSession(sessionId: string): Promise<StoredSession | null> {
-    const sess = this.sessions.get(sessionId);
-    if (!sess) return null;
-    if (Date.parse(sess.expiresAt) <= Date.now()) {
-      this.sessions.delete(sessionId);
-      return null;
-    }
-    return sess;
-  }
-
-  async deleteSession(sessionId: string): Promise<void> {
-    this.sessions.delete(sessionId);
-  }
-
-  async deleteAllUserSessions(userId: string): Promise<void> {
-    for (const [sid, sess] of this.sessions.entries()) {
-      if (sess.userId === userId) this.sessions.delete(sid);
-    }
-  }
-
-  async getOAuthConnection(userId: string): Promise<StoredOAuthConnection | null> {
-    return this.connections.get(userId) || null;
-  }
-
-  async upsertOAuthConnection(conn: {
-    userId: string;
-    googleSub: string;
-    email: string;
-    name: string | null;
-    picture: string | null;
-    scopes: string;
-    encryptedRefreshToken: string | null;
-    encryptedAccessToken: string | null;
-    accessTokenExpiresAt: string | null;
-  }): Promise<StoredOAuthConnection> {
-    const existing = this.connections.get(conn.userId);
-    const now = new Date().toISOString();
-    const record: StoredOAuthConnection = {
-      userId: conn.userId,
-      googleSub: conn.googleSub,
-      email: conn.email,
-      name: conn.name,
-      picture: conn.picture,
-      scopes: conn.scopes,
-      encryptedRefreshToken: conn.encryptedRefreshToken ?? existing?.encryptedRefreshToken ?? null,
-      encryptedAccessToken: conn.encryptedAccessToken,
-      accessTokenExpiresAt: conn.accessTokenExpiresAt,
-      createdAt: existing?.createdAt || now,
-      updatedAt: now,
-    };
-    this.connections.set(conn.userId, record);
-    return record;
-  }
-
-  async updateOAuthScopes(userId: string, scopes: string): Promise<void> {
-    const existing = this.connections.get(userId);
-    if (existing) {
-      existing.scopes = scopes;
-      existing.updatedAt = new Date().toISOString();
-    }
-  }
-
-  async deleteOAuthConnection(userId: string): Promise<void> {
-    this.connections.delete(userId);
-  }
-
-  async getWorkspaceState(userId: string): Promise<StoredWorkspaceState | null> {
-    return this.workspaces.get(userId) || null;
-  }
-
-  async upsertWorkspaceState(
-    userId: string,
-    patch: {
-      companySettings?: any;
-      template?: any;
-      fields?: any[];
-      calculationSettings?: any;
-      preferences?: Record<string, any>;
-    }
-  ): Promise<StoredWorkspaceState> {
-    const existing = this.workspaces.get(userId);
-    const state: StoredWorkspaceState = {
-      userId,
-      companySettings:
-        patch.companySettings !== undefined
-          ? patch.companySettings
-          : (existing?.companySettings ?? null),
-      template: patch.template !== undefined ? patch.template : (existing?.template ?? null),
-      fields: patch.fields !== undefined ? patch.fields : (existing?.fields ?? null),
-      calculationSettings:
-        patch.calculationSettings !== undefined
-          ? patch.calculationSettings
-          : (existing?.calculationSettings ?? null),
-      preferences:
-        patch.preferences !== undefined
-          ? { ...(existing?.preferences || {}), ...patch.preferences }
-          : (existing?.preferences || {}),
-      updatedAt: new Date().toISOString(),
-      version: (existing?.version || 0) + 1,
-    };
-    this.workspaces.set(userId, state);
-    return state;
-  }
-
-  async listCustomers(userId: string): Promise<StoredCustomerRecord[]> {
-    return Array.from(this.customers.values()).filter((c) => c.userId === userId);
-  }
-
-  async upsertCustomer(userId: string, id: string, data: any): Promise<StoredCustomerRecord> {
-    const existing = this.customers.get(id);
-    if (existing && existing.userId !== userId) {
-      throw new Error('Forbidden: customer belongs to another user.');
-    }
-    const rec: StoredCustomerRecord = {
-      id,
-      userId,
-      data,
-      updatedAt: new Date().toISOString(),
-    };
-    this.customers.set(id, rec);
-    return rec;
-  }
-
-  async deleteCustomer(userId: string, id: string): Promise<boolean> {
-    const existing = this.customers.get(id);
-    if (!existing || existing.userId !== userId) return false;
-    this.customers.delete(id);
-    return true;
-  }
-
-  async listQuotations(userId: string): Promise<StoredQuotationRecord[]> {
-    return Array.from(this.quotations.values()).filter((q) => q.userId === userId);
-  }
-
-  async getQuotation(userId: string, id: string): Promise<StoredQuotationRecord | null> {
-    const q = this.quotations.get(id);
-    return q && q.userId === userId ? q : null;
-  }
-
-  async upsertQuotation(userId: string, rec: any): Promise<StoredQuotationRecord> {
-    const existing = this.quotations.get(rec.id);
-    if (existing && existing.userId !== userId) {
-      throw new Error('Forbidden: quotation belongs to another user.');
-    }
-    const now = new Date().toISOString();
-    const saved: StoredQuotationRecord = {
-      id: rec.id,
-      userId,
-      quotationNumber: rec.quotationNumber,
-      status: rec.status,
-      customerName: rec.customerName,
-      totalAmount: rec.totalAmount,
-      validUntil: rec.validUntil,
-      convertedInvoiceId: rec.convertedInvoiceId ?? existing?.convertedInvoiceId ?? null,
-      convertedInvoiceNumber:
-        rec.convertedInvoiceNumber ?? existing?.convertedInvoiceNumber ?? null,
-      convertedAt: rec.convertedAt ?? existing?.convertedAt ?? null,
-      driveFileId: rec.driveFileId ?? existing?.driveFileId ?? null,
-      pdfDriveFileId: rec.pdfDriveFileId ?? existing?.pdfDriveFileId ?? null,
-      data: rec.data,
-      createdAt: existing?.createdAt || now,
-      updatedAt: now,
-    };
-    this.quotations.set(rec.id, saved);
-    return saved;
-  }
-
-  async deleteQuotation(userId: string, id: string): Promise<boolean> {
-    const existing = this.quotations.get(id);
-    if (!existing || existing.userId !== userId) return false;
-    this.quotations.delete(id);
-    return true;
-  }
-
-  async listInvoices(userId: string): Promise<StoredInvoiceRecord[]> {
-    return Array.from(this.invoices.values()).filter((inv) => inv.userId === userId);
-  }
-
-  async getInvoice(userId: string, id: string): Promise<StoredInvoiceRecord | null> {
-    const inv = this.invoices.get(id);
-    return inv && inv.userId === userId ? inv : null;
-  }
-
-  async upsertInvoice(userId: string, rec: any): Promise<StoredInvoiceRecord> {
-    const existing = this.invoices.get(rec.id);
-    if (existing && existing.userId !== userId) {
-      throw new Error('Forbidden: invoice belongs to another user.');
-    }
-    const now = new Date().toISOString();
-    const saved: StoredInvoiceRecord = {
-      id: rec.id,
-      userId,
-      invoiceNumber: rec.invoiceNumber,
-      sourceType: rec.sourceType,
-      sourceQuotationId: rec.sourceQuotationId ?? existing?.sourceQuotationId ?? null,
-      sourceQuotationNumber: rec.sourceQuotationNumber ?? existing?.sourceQuotationNumber ?? null,
-      customerName: rec.customerName,
-      totalAmount: rec.totalAmount,
-      paymentStatus: rec.paymentStatus,
-      driveFileId: rec.driveFileId ?? existing?.driveFileId ?? null,
-      pdfDriveFileId: rec.pdfDriveFileId ?? existing?.pdfDriveFileId ?? null,
-      data: rec.data,
-      createdAt: existing?.createdAt || now,
-      updatedAt: now,
-    };
-    this.invoices.set(rec.id, saved);
-    return saved;
-  }
-
-  async deleteInvoice(userId: string, id: string): Promise<boolean> {
-    const existing = this.invoices.get(id);
-    if (!existing || existing.userId !== userId) return false;
-    this.invoices.delete(id);
-    return true;
-  }
-
-  async listDriveFiles(userId: string): Promise<StoredDriveFileRef[]> {
-    return Array.from(this.driveFiles.values()).filter((f) => f.userId === userId);
-  }
-
-  async getDriveFileRef(
-    userId: string,
-    entityType: string,
-    entityId: string
-  ): Promise<StoredDriveFileRef | null> {
-    return this.driveFiles.get(`${userId}::${entityType}::${entityId}`) || null;
-  }
-
-  async upsertDriveFileRef(ref: {
-    id: string;
-    userId: string;
-    entityType: string;
-    entityId: string;
-    folderKey: string;
-    fileName: string;
-    driveFileId: string;
-    mimeType: string;
-  }): Promise<StoredDriveFileRef> {
-    const saved: StoredDriveFileRef = {
-      ...ref,
-      updatedAt: new Date().toISOString(),
-    };
-    this.driveFiles.set(`${ref.userId}::${ref.entityType}::${ref.entityId}`, saved);
-    return saved;
-  }
-
-  async getSmtpConfig(userId: string): Promise<StoredSmtpConfig | null> {
-    return this.smtpConfigs.get(userId) || null;
-  }
-
-  async upsertSmtpConfig(cfg: any): Promise<StoredSmtpConfig> {
-    const existing = this.smtpConfigs.get(cfg.userId);
-    const saved: StoredSmtpConfig = {
-      userId: cfg.userId,
-      host: cfg.host,
-      port: cfg.port,
-      securityMode: cfg.securityMode,
-      username: cfg.username,
-      encryptedPassword:
-        cfg.encryptedPassword !== undefined
-          ? cfg.encryptedPassword
-          : (existing?.encryptedPassword ?? null),
-      senderName: cfg.senderName,
-      senderEmail: cfg.senderEmail,
-      verifiedAt: cfg.verifiedAt !== undefined ? cfg.verifiedAt : (existing?.verifiedAt ?? null),
-      updatedAt: new Date().toISOString(),
-    };
-    this.smtpConfigs.set(cfg.userId, saved);
-    return saved;
-  }
-
-  async insertEmailLog(entry: Omit<StoredEmailLog, 'createdAt'>): Promise<StoredEmailLog> {
-    const saved: StoredEmailLog = {
-      ...entry,
-      createdAt: new Date().toISOString(),
-    };
-    this.emailLogs.unshift(saved);
-    return saved;
-  }
-
-  async listEmailLogs(userId: string, limit = 100): Promise<StoredEmailLog[]> {
-    return this.emailLogs.filter((l) => l.userId === userId).slice(0, limit);
-  }
-
-  async getRowHashesForSpreadsheet(
-    userId: string,
-    spreadsheetId: string
-  ): Promise<Map<string, string>> {
-    return new Map(this.rowHashes.get(`${userId}::${spreadsheetId}`) || []);
-  }
-
-  async saveSyncedSpreadsheetTransaction(params: any): Promise<PersistedSpreadsheetRecord> {
-    const key = `${params.userId}::${params.spreadsheetId}`;
-    const totalRows = params.worksheets.reduce((acc: number, ws: any) => acc + ws.rows.length, 0);
-    const saved: PersistedSpreadsheetRecord = {
-      id: key,
-      userId: params.userId,
-      spreadsheetId: params.spreadsheetId,
-      spreadsheetUrl: params.spreadsheetUrl,
-      title: params.title,
-      selectedSheetName: params.selectedSheetName,
-      selectedRange: params.selectedRange,
-      headerRowIndex: params.headerRowIndex,
-      sheetsMeta: params.sheetsMeta,
-      worksheets: params.worksheets,
-      totalRows,
-      lastSyncAt: new Date().toISOString(),
-      lastSyncStatus: params.syncStatus,
-      lastSyncStats: params.stats,
-    };
-    this.spreadsheets.set(key, saved);
-
-    const hashes = new Map<string, string>();
-    for (const grp of params.syncedRowRecords) {
-      for (const rec of grp.records) {
-        hashes.set(`${key}::${grp.sheetName}::${rec.rowKey}`, rec.rowHash);
-      }
-    }
-    this.rowHashes.set(key, hashes);
-
-    this.history.unshift({
-      id: params.logId,
-      userId: params.userId,
-      spreadsheetId: params.spreadsheetId,
-      spreadsheetTitle: params.title,
-      sheetName: params.selectedSheetName,
-      status: params.syncStatus,
-      rowsRetrieved: params.stats.rowsRetrieved,
-      createdCount: params.stats.createdCount,
-      updatedCount: params.stats.updatedCount,
-      unchangedCount: params.stats.unchangedCount,
-      skippedCount: params.stats.skippedCount,
-      errorMessage: null,
-      createdAt: new Date().toISOString(),
-    });
-    return saved;
-  }
-
-  async recordSyncFailureLog(params: any): Promise<void> {
-    this.history.unshift({
-      id: params.logId,
-      userId: params.userId,
-      spreadsheetId: params.spreadsheetId,
-      spreadsheetTitle: params.spreadsheetTitle,
-      sheetName: params.sheetName,
-      status: 'failed',
-      rowsRetrieved: 0,
-      createdCount: 0,
-      updatedCount: 0,
-      unchangedCount: 0,
-      skippedCount: 0,
-      errorMessage: params.errorMessage,
-      createdAt: new Date().toISOString(),
-    });
-  }
-
-  async getLatestSyncedData(userId: string, spreadsheetId?: string) {
-    let spreadsheet: PersistedSpreadsheetRecord | null = null;
-    if (spreadsheetId) {
-      spreadsheet = this.spreadsheets.get(`${userId}::${spreadsheetId}`) || null;
-    } else {
-      for (const rec of this.spreadsheets.values()) {
-        if (rec.userId === userId) {
-          spreadsheet = rec;
-          break;
-        }
-      }
-    }
-    return {
-      spreadsheet,
-      history: this.history.filter((h) => h.userId === userId),
-    };
-  }
+interface MockRes {
+  statusCode: number;
+  headers: Record<string, string | string[]>;
+  body: string;
+  json(): any;
+  getCookies(): Record<string, string>;
+  getRawSetCookies(): string[];
+  res: NormalizedResponse;
 }
 
-/**
- * In-memory DriveTransportAdapter simulating per-token Google Drive v3
- * folder/file creation, appProperties lookup, and updates without duplicates.
- */
-class MockDriveTransport implements DriveTransportAdapter {
-  private seq = 1;
-  public files = new Map<
-    string,
-    DriveFileSummary & { ownerToken: string; content: string }
-  >();
-
-  async findFile({
-    accessToken,
-    name,
-    parentId,
-    mimeType,
-    appPropertyKey,
-    appPropertyValue,
-  }: any): Promise<DriveFileSummary | null> {
-    for (const f of this.files.values()) {
-      if (f.ownerToken !== accessToken) continue;
-      if (name && f.name !== name) continue;
-      if (parentId && !(f.parents || []).includes(parentId)) continue;
-      if (mimeType && f.mimeType !== mimeType) continue;
-      if (appPropertyKey && appPropertyValue) {
-        if (f.appProperties?.[appPropertyKey] !== appPropertyValue) continue;
-      }
-      return {
-        id: f.id,
-        name: f.name,
-        mimeType: f.mimeType,
-        modifiedTime: f.modifiedTime,
-        parents: f.parents,
-        appProperties: f.appProperties,
-      };
-    }
-    return null;
-  }
-
-  async getFileMetadata({ accessToken, fileId }: any): Promise<DriveFileSummary | null> {
-    const f = this.files.get(fileId);
-    if (!f || f.ownerToken !== accessToken) return null;
-    return {
-      id: f.id,
-      name: f.name,
-      mimeType: f.mimeType,
-      modifiedTime: f.modifiedTime,
-      parents: f.parents,
-      appProperties: f.appProperties,
-    };
-  }
-
-  async createFolder({
-    accessToken,
-    name,
-    parentId,
-    appProperties,
-  }: any): Promise<DriveFileSummary> {
-    const id = `drv_folder_${this.seq++}`;
-    const entry = {
-      id,
-      name,
-      mimeType: 'application/vnd.google-apps.folder',
-      modifiedTime: new Date().toISOString(),
-      parents: parentId ? [parentId] : undefined,
-      appProperties: appProperties || {},
-      ownerToken: accessToken,
-      content: '',
-    };
-    this.files.set(id, entry);
-    return entry;
-  }
-
-  async createOrUpdateFile({
-    accessToken,
-    existingFileId,
-    name,
-    parentId,
-    mimeType,
-    content,
-    appProperties,
-  }: any): Promise<DriveFileSummary> {
-    const text = Buffer.isBuffer(content) ? content.toString('base64') : String(content);
-    if (existingFileId && this.files.has(existingFileId)) {
-      const existing = this.files.get(existingFileId)!;
-      existing.name = name;
-      existing.mimeType = mimeType;
-      existing.content = text;
-      existing.modifiedTime = new Date().toISOString();
-      if (appProperties) {
-        existing.appProperties = { ...(existing.appProperties || {}), ...appProperties };
-      }
-      return existing;
-    }
-    const id = `drv_file_${this.seq++}`;
-    const entry = {
-      id,
-      name,
-      mimeType,
-      modifiedTime: new Date().toISOString(),
-      parents: [parentId],
-      appProperties: appProperties || {},
-      ownerToken: accessToken,
-      content: text,
-    };
-    this.files.set(id, entry);
-    return entry;
-  }
-
-  async downloadFileText({ accessToken, fileId }: any): Promise<string> {
-    const f = this.files.get(fileId);
-    if (!f || f.ownerToken !== accessToken) {
-      throw new HttpApiError(404, 'DRIVE_NOT_FOUND', 'Drive file not found');
-    }
-    return f.content;
-  }
-}
-
-function createMockHttpPair(options: {
-  method: string;
-  url?: string;
-  body?: any;
-  cookieHeader?: string;
-}) {
-  const stream = new PassThrough() as any;
-  stream.method = options.method;
-  stream.url = options.url || '/';
-  stream.headers = {
-    host: 'localhost:3000',
-    ...(options.cookieHeader ? { cookie: options.cookieHeader } : {}),
-  };
-  stream.body = options.body;
-
-  const headersMap = new Map<string, string | string[]>();
-  let responseBody: any = null;
-  let statusCode = 200;
-
-  const res: any = {
+function createMockRes(): MockRes {
+  const state: MockRes = {
     statusCode: 200,
-    setHeader(name: string, val: string | string[]) {
-      headersMap.set(name.toLowerCase(), val);
+    headers: {},
+    body: '',
+    json() {
+      return state.body ? JSON.parse(state.body) : {};
     },
-    getHeader(name: string) {
-      return headersMap.get(name.toLowerCase());
+    getRawSetCookies() {
+      const raw = state.headers['Set-Cookie'] || state.headers['set-cookie'];
+      if (!raw) return [];
+      return Array.isArray(raw) ? raw : [raw];
     },
-    status(code: number) {
-      statusCode = code;
-      this.statusCode = code;
-      return this;
-    },
-    json(payload: any) {
-      responseBody = payload;
-    },
-    end(raw?: string) {
-      if (raw && !responseBody) {
-        try {
-          responseBody = JSON.parse(raw);
-        } catch {
-          responseBody = raw;
+    getCookies() {
+      const out: Record<string, string> = {};
+      for (const line of state.getRawSetCookies()) {
+        const pair = line.split(';')[0];
+        const eq = pair.indexOf('=');
+        if (eq > 0) {
+          out[pair.slice(0, eq).trim()] = decodeURIComponent(pair.slice(eq + 1).trim());
         }
       }
+      return out;
     },
+    res: {
+      status(code: number) {
+        state.statusCode = code;
+        return this;
+      },
+      setHeader(name: string, value: string | number | readonly string[]) {
+        state.headers[name] = Array.isArray(value) ? [...value] : String(value);
+        return this;
+      },
+      getHeader(name: string) {
+        return state.headers[name];
+      },
+      json(payload: any) {
+        state.headers['Content-Type'] = 'application/json; charset=utf-8';
+        state.body = JSON.stringify(payload);
+        return this;
+      },
+      end(chunk?: any) {
+        if (typeof chunk === 'string') state.body += chunk;
+        return this;
+      },
+    } as unknown as NormalizedResponse,
   };
+  return state;
+}
+
+function createReq(opts: {
+  method?: string;
+  url?: string;
+  query?: Record<string, string>;
+  body?: any;
+  cookies?: Record<string, string>;
+}): NormalizedRequest {
+  const cookieHeader = opts.cookies
+    ? Object.entries(opts.cookies)
+        .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+        .join('; ')
+    : undefined;
 
   return {
-    req: stream as NormalizedRequest,
-    res: res as NormalizedResponse,
-    getResult: () => ({
-      statusCode,
-      body: responseBody,
-      setCookies: (headersMap.get('set-cookie') as string[] | undefined) || [],
-      location: headersMap.get('location') as string | undefined,
-    }),
+    method: opts.method || 'GET',
+    url: opts.url || '/api/test',
+    query: opts.query || {},
+    body: opts.body,
+    headers: {
+      host: 'localhost:3000',
+      ...(cookieHeader ? { cookie: cookieHeader } : {}),
+    },
+  } as unknown as NormalizedRequest;
+}
+
+/**
+ * In-memory per-user Google Drive simulator keyed by accessToken -> user Drive bucket.
+ * Accurately enforces strict per-user Drive isolation (User A's token can never see User B's files).
+ */
+class MultiUserMockDrive {
+  private buckets = new Map<
+    string,
+    Map<
+      string,
+      {
+        summary: DriveFileSummary;
+        content: Buffer;
+      }
+    >
+  >();
+  private idCounter = 1;
+  public failNextWriteError: Error | null = null;
+
+  private getBucket(accessToken: string) {
+    // Map token prefix (e.g. "token-user-a-...") to owner bucket so refreshed tokens hit the same Drive
+    const ownerKey = accessToken.split(':')[0] || accessToken;
+    let bucket = this.buckets.get(ownerKey);
+    if (!bucket) {
+      bucket = new Map();
+      this.buckets.set(ownerKey, bucket);
+    }
+    return bucket;
+  }
+
+  public getFilesForOwner(ownerKey: string) {
+    return Array.from(this.buckets.get(ownerKey)?.values() || []);
+  }
+
+  public corruptFileForOwner(ownerKey: string, fileName: string, rawText: string) {
+    const bucket = this.buckets.get(ownerKey);
+    if (!bucket) throw new Error('No bucket');
+    for (const entry of bucket.values()) {
+      if (entry.summary.name === fileName) {
+        entry.content = Buffer.from(rawText, 'utf8');
+        return;
+      }
+    }
+    throw new Error(`File ${fileName} not found`);
+  }
+
+  public asAdapter(): DriveTransportAdapter {
+    return {
+      findFile: async ({
+        accessToken,
+        name,
+        parentId,
+        mimeType,
+        appPropertyKey,
+        appPropertyValue,
+      }) => {
+        const bucket = this.getBucket(accessToken);
+        const matches = Array.from(bucket.values()).filter(({ summary }) => {
+          if (name && summary.name !== name) return false;
+          if (parentId && !(summary.parents || []).includes(parentId)) return false;
+          if (mimeType && summary.mimeType !== mimeType) return false;
+          if (appPropertyKey && appPropertyValue) {
+            if (summary.appProperties?.[appPropertyKey] !== appPropertyValue) return false;
+          }
+          return true;
+        });
+        return matches.length > 0 ? { ...matches[matches.length - 1].summary } : null;
+      },
+
+      getFileMetadata: async ({ accessToken, fileId }) => {
+        const bucket = this.getBucket(accessToken);
+        const entry = bucket.get(fileId);
+        return entry ? { ...entry.summary } : null;
+      },
+
+      createFolder: async ({ accessToken, name, parentId, appProperties }) => {
+        const bucket = this.getBucket(accessToken);
+        const id = `drv_folder_${this.idCounter++}`;
+        const summary: DriveFileSummary = {
+          id,
+          name,
+          mimeType: 'application/vnd.google-apps.folder',
+          modifiedTime: new Date().toISOString(),
+          parents: parentId ? [parentId] : undefined,
+          appProperties,
+        };
+        bucket.set(id, { summary, content: Buffer.alloc(0) });
+        return { ...summary };
+      },
+
+      createOrUpdateFile: async ({
+        accessToken,
+        existingFileId,
+        name,
+        parentId,
+        mimeType,
+        content,
+        appProperties,
+      }) => {
+        if (this.failNextWriteError) {
+          const err = this.failNextWriteError;
+          this.failNextWriteError = null;
+          throw err;
+        }
+        const bucket = this.getBucket(accessToken);
+        const buf = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');
+        if (existingFileId && bucket.has(existingFileId)) {
+          const existing = bucket.get(existingFileId)!;
+          const updated: DriveFileSummary = {
+            ...existing.summary,
+            name,
+            mimeType,
+            modifiedTime: new Date().toISOString(),
+            appProperties: { ...(existing.summary.appProperties || {}), ...(appProperties || {}) },
+          };
+          bucket.set(existingFileId, { summary: updated, content: buf });
+          return { ...updated };
+        }
+        const id = `drv_file_${this.idCounter++}`;
+        const summary: DriveFileSummary = {
+          id,
+          name,
+          mimeType,
+          modifiedTime: new Date().toISOString(),
+          parents: [parentId],
+          appProperties,
+        };
+        bucket.set(id, { summary, content: buf });
+        return { ...summary };
+      },
+
+      downloadFileText: async ({ accessToken, fileId }) => {
+        const bucket = this.getBucket(accessToken);
+        const entry = bucket.get(fileId);
+        if (!entry) {
+          throw new HttpApiError(404, 'DRIVE_FILE_NOT_FOUND', `Drive file ${fileId} not found.`);
+        }
+        return entry.content.toString('utf8');
+      },
+    };
+  }
+}
+
+function makeSignedSessionCookie(session: EncryptedSessionData): Record<string, string> {
+  return {
+    [SESSION_COOKIE_NAME]: encodeEncryptedSessionCookie(session, TEST_CONFIG),
   };
 }
 
-function mergeCookies(existingCookieHeader: string, setCookieHeaders: string[]): string {
-  const jar = new Map<string, string>();
-  for (const part of existingCookieHeader.split(';')) {
-    const idx = part.indexOf('=');
-    if (idx > 0) jar.set(part.slice(0, idx).trim(), part.slice(idx + 1).trim());
-  }
-  for (const sc of setCookieHeaders) {
-    const first = sc.split(';')[0];
-    const idx = first.indexOf('=');
-    if (idx > 0) {
-      const k = first.slice(0, idx).trim();
-      const v = first.slice(idx + 1).trim();
-      if (v) jar.set(k, v);
-      else jar.delete(k);
+describe('Invoice Studio — Simplified Architecture & Full Integration Test Suite', () => {
+  test('1. Architecture Integrity: Zero Firebase, Zero PostgreSQL, SMTP Retained, Clean Env', () => {
+    const rootDir = process.cwd();
+    const pkg = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
+    const allDeps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+
+    assert.equal('firebase' in allDeps, false, 'firebase package must be removed');
+    assert.equal('pg' in allDeps, false, 'pg package must be removed');
+    assert.equal('@types/pg' in allDeps, false, '@types/pg must be removed');
+    assert.equal('nodemailer' in allDeps, true, 'nodemailer must be preserved for SMTP');
+    assert.equal('googleapis' in allDeps, true, 'googleapis must be preserved');
+
+    const envExample = fs.readFileSync(path.join(rootDir, '.env.example'), 'utf8');
+    assert.equal(envExample.includes('DATABASE_URL'), false, '.env.example must not reference DATABASE_URL');
+    assert.equal(/firebase/i.test(envExample), false, '.env.example must not reference Firebase');
+    for (const requiredVar of [
+      'APP_URL',
+      'GOOGLE_CLIENT_ID',
+      'GOOGLE_CLIENT_SECRET',
+      'GOOGLE_REDIRECT_URI',
+      'SESSION_SECRET',
+      'TOKEN_ENCRYPTION_KEY',
+    ]) {
+      assert.equal(envExample.includes(requiredVar), true, `.env.example must list ${requiredVar}`);
     }
-  }
-  return Array.from(jar.entries())
-    .map(([k, v]) => `${k}=${v}`)
-    .join('; ');
-}
 
-async function signInMockUser(
-  deps: HandlerRuntimeDeps,
-  code: string,
-  feature: 'signin' | 'drive' | 'sheets' | 'gmail' = 'signin',
-  existingCookies = ''
-): Promise<string> {
-  const startPair = createMockHttpPair({
-    method: 'GET',
-    url: `/api/auth/google/start?feature=${feature}`,
-    cookieHeader: existingCookies,
-  });
-  await handleGoogleAuthStart(startPair.req, startPair.res, deps);
-  const startOut = startPair.getResult();
-  assert.strictEqual(startOut.statusCode, 200);
-  let cookies = mergeCookies(existingCookies, startOut.setCookies);
-
-  const cbPair = createMockHttpPair({
-    method: 'POST',
-    cookieHeader: cookies,
-    body: { code, state: startOut.body.state, redirectUri: 'postmessage' },
-  });
-  await handleGoogleAuthCallback(cbPair.req, cbPair.res, deps);
-  const cbOut = cbPair.getResult();
-  assert.strictEqual(cbOut.statusCode, 200);
-  cookies = mergeCookies(cookies, cbOut.setCookies);
-  return cookies;
-}
-
-describe('Google OAuth, Multi-User Isolation, Drive, Sheets & Dual Email Backend Suite', () => {
-  test('1. AES-256-GCM encryption roundtrip & tamper detection', () => {
-    const secret = 'refresh_token_1//0gABCDEF_secret_value';
-    const encrypted = encryptSecret(secret, TEST_CONFIG.tokenEncryptionKey);
-    assert.ok(encrypted.startsWith('v1:'));
-    assert.ok(!encrypted.includes(secret));
-    assert.strictEqual(decryptSecret(encrypted, TEST_CONFIG.tokenEncryptionKey), secret);
-
-    const tampered = encrypted.slice(0, -2) + 'xx';
-    assert.throws(() => decryptSecret(tampered, TEST_CONFIG.tokenEncryptionKey));
-    assert.throws(() => decryptSecret(encrypted, 'completely_different_encryption_key_32'));
+    assert.equal(fs.existsSync(path.join(rootDir, 'api/_lib/db.ts')), false, 'api/_lib/db.ts must not exist');
+    assert.equal(fs.existsSync(path.join(rootDir, 'src/firebase.ts')), false, 'src/firebase.ts must not exist');
+    assert.equal(fs.existsSync(path.join(rootDir, 'firestore.rules')), false, 'firestore.rules must not exist');
   });
 
-  test('2. HMAC signed cookie payload verification & expiration', () => {
-    const signed = signPayload({ sid: 'sess_abc' }, TEST_CONFIG.sessionSecret, 60);
-    const verified = verifySignedPayload<{ sid: string }>(signed, TEST_CONFIG.sessionSecret);
-    assert.strictEqual(verified?.sid, 'sess_abc');
-
-    const tamperedChar = signed[2] === 'A' ? 'B' : 'A';
-    const tampered = signed.slice(0, 2) + tamperedChar + signed.slice(3);
-    assert.strictEqual(verifySignedPayload(tampered, TEST_CONFIG.sessionSecret), null);
-
-    const expired = signPayload({ sid: 'sess_old' }, TEST_CONFIG.sessionSecret, -10);
-    assert.strictEqual(verifySignedPayload(expired, TEST_CONFIG.sessionSecret), null);
+  test('2. New User Runtime Storage Starts Completely Clean (No Preloaded Demo Customers or Sheet Rows)', async () => {
+    const { storage } = await import('../../src/utils/storage');
+    storage.clearAllUserWorkspaceCaches();
+    storage.setActiveStorageUser('fresh-user-123');
+    assert.deepEqual(storage.loadCustomers(), []);
+    const sheet = storage.loadSpreadsheetData();
+    assert.equal(sheet.worksheets.length, 0);
+    assert.equal(storage.loadQuotations().length, 0);
+    assert.equal(storage.loadHistory().length, 0);
+    storage.clearAllUserWorkspaceCaches();
+    storage.setActiveStorageUser(null);
   });
 
-  test('3. Database configuration fails explicitly without silent memory fallback', () => {
-    assert.throws(() => createPersistenceStore(''), DatabaseConfigurationError);
+  test('3. Encrypted HttpOnly Session Cookie Security: Roundtrip, Tamper, Expiry & Wrong Key Rejection', () => {
+    const session: EncryptedSessionData = {
+      uid: 'google-sub-alice',
+      em: 'alice@example.com',
+      nm: 'Alice',
+      pic: null,
+      at: 'user-a:access-1',
+      rt: 'user-a:refresh-1',
+      exp: Date.now() + 3600_000,
+      sc: SIGNIN_GOOGLE_SCOPES.join(' '),
+      cat: new Date().toISOString(),
+    };
+
+    const cookieVal = encodeEncryptedSessionCookie(session, TEST_CONFIG);
+    assert.equal(cookieVal.includes('user-a:access-1'), false, 'access token must never be plaintext in cookie');
+    assert.equal(cookieVal.includes('user-a:refresh-1'), false, 'refresh token must never be plaintext in cookie');
+
+    const decoded = decodeEncryptedSessionCookie(cookieVal, TEST_CONFIG);
+    assert.equal(decoded?.uid, 'google-sub-alice');
+    assert.equal(decoded?.rt, 'user-a:refresh-1');
+
+    // Tampered cookie rejected
+    const tampered = cookieVal.slice(0, -4) + 'AAAA';
+    assert.equal(decodeEncryptedSessionCookie(tampered, TEST_CONFIG), null);
+
+    // Wrong encryption key rejected
+    assert.equal(
+      decodeEncryptedSessionCookie(cookieVal, {
+        ...TEST_CONFIG,
+        tokenEncryptionKey: 'different-key-that-must-fail-decryption-32ch',
+      }),
+      null
+    );
+
+    // Wrong HMAC session secret rejected
+    assert.equal(
+      decodeEncryptedSessionCookie(cookieVal, {
+        ...TEST_CONFIG,
+        sessionSecret: 'different-session-signing-secret-must-fail-32ch',
+      }),
+      null
+    );
   });
 
-  test('4. Spreadsheet URL parsing, range sanitization, & leading-zero normalization', () => {
-    assert.strictEqual(
-      extractSpreadsheetId(
-        'https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit#gid=0'
-      ),
-      '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms'
+  test('4. Health & Unauthorized Route Rejection (401 without valid session)', async () => {
+    const deps: HandlerRuntimeDeps = { getConfig: () => TEST_CONFIG };
+
+    const healthRes = createMockRes();
+    await handleHealth(createReq({ url: '/api/health' }), healthRes.res, deps);
+    assert.equal(healthRes.statusCode, 200);
+    assert.equal(healthRes.json().storageProvider, 'google-drive');
+    assert.equal('databaseConfigured' in healthRes.json(), false);
+
+    const wsRes = createMockRes();
+    await handleWorkspace(createReq({ method: 'GET', url: '/api/workspace' }), wsRes.res, deps);
+    assert.equal(wsRes.statusCode, 401);
+    assert.equal(wsRes.json().code, 'NOT_AUTHENTICATED');
+  });
+
+  test('5. OAuth Sign-In Flow, Google Drive 5-Folder Sole Storage & Strict Multi-User Isolation', async () => {
+    const drive = new MultiUserMockDrive();
+    const oauthTransport: GoogleTransportAdapter = {
+      exchangeAuthCode: async ({ code }) => {
+        if (code === 'code-alice') {
+          return {
+            tokens: {
+              access_token: 'alice:tok-1',
+              refresh_token: 'alice:ref-1',
+              expiry_date: Date.now() + 3600_000,
+              scope: SIGNIN_GOOGLE_SCOPES.join(' '),
+            },
+            identity: { sub: 'sub-alice', email: 'alice@biz.test', name: 'Alice Owner', picture: null },
+          };
+        }
+        return {
+          tokens: {
+            access_token: 'bob:tok-1',
+            refresh_token: 'bob:ref-1',
+            expiry_date: Date.now() + 3600_000,
+            scope: SIGNIN_GOOGLE_SCOPES.join(' '),
+          },
+          identity: { sub: 'sub-bob', email: 'bob@other.test', name: 'Bob Owner', picture: null },
+        };
+      },
+      refreshAccessToken: async () => {
+        throw new Error('not expected');
+      },
+      revokeToken: async () => {},
+      fetchSpreadsheetMetadata: async () => {
+        throw new Error('not expected');
+      },
+      fetchSheetValues: async () => [],
+    };
+
+    const deps: HandlerRuntimeDeps = {
+      getConfig: () => TEST_CONFIG,
+      transport: oauthTransport,
+      driveTransport: drive.asAdapter(),
+    };
+
+    // --- Alice signs in via OAuth ---
+    const startA = createMockRes();
+    await handleGoogleAuthStart(
+      createReq({ method: 'GET', url: '/api/auth/google/start', query: { feature: 'signin' } }),
+      startA.res,
+      deps
+    );
+    assert.equal(startA.statusCode, 200);
+    const { state: stateA } = startA.json();
+    const stateCookiesA = startA.getCookies();
+
+    const cbA = createMockRes();
+    await handleGoogleAuthCallback(
+      createReq({
+        method: 'POST',
+        url: '/api/auth/google/callback',
+        body: { code: 'code-alice', state: stateA, redirectUri: 'postmessage', feature: 'signin' },
+        cookies: stateCookiesA,
+      }),
+      cbA.res,
+      deps
+    );
+    assert.equal(cbA.statusCode, 200);
+    const aliceCookies = cbA.getCookies();
+    assert.ok(aliceCookies[SESSION_COOKIE_NAME], 'Alice must receive encrypted HttpOnly session cookie');
+
+    // Verify 5-folder Drive structure created cleanly for Alice
+    const statusDriveA = createMockRes();
+    await handleDriveStatus(createReq({ cookies: aliceCookies }), statusDriveA.res, deps);
+    assert.equal(statusDriveA.statusCode, 200);
+    const drivePayload = statusDriveA.json();
+    assert.equal(drivePayload.rootFolderName, DRIVE_ROOT_FOLDER_NAME);
+    assert.deepEqual(Object.values(drivePayload.subfolderNames).sort(), [
+      'Application Data',
+      'Backups',
+      'Company Assets',
+      'Email Records',
+      'Generated PDFs',
+    ]);
+
+    // Alice saves company settings, a customer, a quotation -> approves -> converts to invoice -> uploads PDF
+    const wsPutA = createMockRes();
+    await handleWorkspace(
+      createReq({
+        method: 'PUT',
+        cookies: aliceCookies,
+        body: {
+          onboardingCompleted: true,
+          companySettings: { legalName: 'Alice Consulting LLP', email: 'alice@biz.test' },
+        },
+      }),
+      wsPutA.res,
+      deps
+    );
+    assert.equal(wsPutA.statusCode, 200);
+
+    const custPostA = createMockRes();
+    await handleWorkspace(
+      createReq({
+        method: 'POST',
+        cookies: aliceCookies,
+        body: {
+          customer: {
+            id: 'cust_alice_1',
+            customerName: 'Northstar Logistics',
+            email: 'ap@northstar.test',
+            billingAddress: '101 Harbor Rd',
+            updatedAt: '2026-11-12T10:00:00.000Z',
+          },
+        },
+      }),
+      custPostA.res,
+      deps
+    );
+    assert.equal(custPostA.statusCode, 200);
+
+    // Save quotation twice (idempotency check — no duplicate Drive files)
+    const quotationA = {
+      id: 'quot_a_1',
+      quotationNumber: 'QT-2026-0001',
+      status: 'Draft',
+      customer: { customerName: 'Northstar Logistics' },
+      summary: { totalInvoiceAmount: 59000 },
+      validUntil: '2026-12-31',
+      createdAt: '2026-11-12T10:00:00.000Z',
+      updatedAt: '2026-11-12T10:00:00.000Z',
+    };
+    const qSave1 = createMockRes();
+    await handleQuotations(
+      createReq({ method: 'POST', url: '/api/quotations', cookies: aliceCookies, body: { quotation: quotationA } }),
+      qSave1.res,
+      [],
+      deps
+    );
+    assert.equal(qSave1.statusCode, 200);
+
+    // Approve quotation
+    const qApprove = createMockRes();
+    await handleQuotations(
+      createReq({
+        method: 'POST',
+        url: '/api/quotations/quot_a_1/status',
+        cookies: aliceCookies,
+        body: { status: 'Approved', notes: 'Approved by procurement' },
+      }),
+      qApprove.res,
+      ['quot_a_1', 'status'],
+      deps
+    );
+    assert.equal(qApprove.statusCode, 200);
+    assert.equal(qApprove.json().quotation.status, 'Approved');
+
+    // Convert approved quotation to invoice
+    const qConvert = createMockRes();
+    await handleQuotations(
+      createReq({
+        method: 'POST',
+        url: '/api/quotations/quot_a_1/convert',
+        cookies: aliceCookies,
+        body: {
+          invoice: {
+            id: 'inv_a_1',
+            invoiceNumber: 'INV-2026-0001',
+            customerName: 'Northstar Logistics',
+            totalAmount: 59000,
+            paymentStatus: 'Unpaid',
+          },
+        },
+      }),
+      qConvert.res,
+      ['quot_a_1', 'convert'],
+      deps
+    );
+    assert.equal(qConvert.statusCode, 200);
+    assert.equal(qConvert.json().quotation.status, 'Converted to Invoice');
+
+    // Duplicate conversion must be blocked (409)
+    const qDupConvert = createMockRes();
+    await handleQuotations(
+      createReq({
+        method: 'POST',
+        url: '/api/quotations/quot_a_1/convert',
+        cookies: aliceCookies,
+        body: { invoice: { id: 'inv_a_2', invoiceNumber: 'INV-2026-0002', totalAmount: 59000 } },
+      }),
+      qDupConvert.res,
+      ['quot_a_1', 'convert'],
+      deps
+    );
+    assert.equal(qDupConvert.statusCode, 409);
+
+    // Upload PDF & create backup for Alice
+    const pdfRes = createMockRes();
+    await handleDriveUploadPdf(
+      createReq({
+        method: 'POST',
+        cookies: aliceCookies,
+        body: {
+          documentType: 'invoice',
+          documentId: 'inv_a_1',
+          fileName: 'INV-2026-0001.pdf',
+          pdfBase64: Buffer.from('%PDF-1.4 fake-pdf').toString('base64'),
+        },
+      }),
+      pdfRes.res,
+      deps
+    );
+    assert.equal(pdfRes.statusCode, 200);
+
+    const backupRes = createMockRes();
+    await handleDriveBackup(createReq({ method: 'POST', cookies: aliceCookies, body: {} }), backupRes.res, deps);
+    assert.equal(backupRes.statusCode, 200);
+
+    // Verify zero duplicate JSON files in Alice's Drive
+    const aliceFiles = drive.getFilesForOwner('alice');
+    const jsonNames = aliceFiles.filter((f) => f.summary.name === 'quotations.json');
+    assert.equal(jsonNames.length, 1, 'quotations.json must be updated in-place without duplicates');
+
+    // --- Bob signs in via OAuth -> MUST see completely empty isolated workspace ---
+    const startB = createMockRes();
+    await handleGoogleAuthStart(
+      createReq({ method: 'GET', url: '/api/auth/google/start', query: { feature: 'signin' } }),
+      startB.res,
+      deps
+    );
+    const cbB = createMockRes();
+    await handleGoogleAuthCallback(
+      createReq({
+        method: 'POST',
+        url: '/api/auth/google/callback',
+        body: { code: 'code-bob', state: startB.json().state, redirectUri: 'postmessage', feature: 'signin' },
+        cookies: startB.getCookies(),
+      }),
+      cbB.res,
+      deps
+    );
+    assert.equal(cbB.statusCode, 200);
+    const bobCookies = cbB.getCookies();
+
+    const wsBob = createMockRes();
+    await handleWorkspace(createReq({ method: 'GET', cookies: bobCookies }), wsBob.res, deps);
+    assert.equal(wsBob.statusCode, 200);
+    const bobData = wsBob.json();
+    assert.equal(bobData.customers.length, 0, 'Bob must see 0 customers');
+    assert.equal(bobData.quotations.length, 0, 'Bob must see 0 quotations');
+    assert.equal(bobData.invoices.length, 0, 'Bob must see 0 invoices');
+    assert.equal(bobData.smtpConfig.configured, false, 'Bob must not see Alice SMTP config');
+
+    // Alice signs back in -> restores all Alice records cleanly from Drive
+    const wsAliceAgain = createMockRes();
+    await handleWorkspace(createReq({ method: 'GET', cookies: aliceCookies }), wsAliceAgain.res, deps);
+    assert.equal(wsAliceAgain.statusCode, 200);
+    const aliceData = wsAliceAgain.json();
+    assert.equal(aliceData.workspace.companySettings.legalName, 'Alice Consulting LLP');
+    assert.equal(aliceData.customers.length, 1);
+    assert.equal(aliceData.quotations.length, 1);
+    assert.equal(aliceData.invoices.length, 1);
+
+    // Sign out clears session cookie
+    const signOutRes = createMockRes();
+    await handleAuthDisconnect(
+      createReq({ method: 'POST', cookies: aliceCookies, body: { feature: 'all' } }),
+      signOutRes.res,
+      deps
+    );
+    assert.equal(signOutRes.statusCode, 200);
+    assert.equal(signOutRes.json().signedOut, true);
+    assert.ok(
+      signOutRes.getRawSetCookies().some((c) => c.includes(`${SESSION_COOKIE_NAME}=`) && c.includes('Max-Age=0'))
+    );
+  });
+
+  test('6. Google Drive Resilience: Version Conflict (409), Corrupted JSON Protection & Restore', async () => {
+    const drive = new MultiUserMockDrive();
+    const deps: HandlerRuntimeDeps = {
+      getConfig: () => TEST_CONFIG,
+      driveTransport: drive.asAdapter(),
+    };
+
+    const cookies = makeSignedSessionCookie({
+      uid: 'sub-resilience',
+      em: 'res@biz.test',
+      nm: 'Res User',
+      pic: null,
+      at: 'res:tok-1',
+      rt: 'res:ref-1',
+      exp: Date.now() + 3600_000,
+      sc: SIGNIN_GOOGLE_SCOPES.join(' '),
+      cat: new Date().toISOString(),
+    });
+
+    // Save version 1 -> 2
+    const save1 = createMockRes();
+    await handleWorkspace(
+      createReq({ method: 'PUT', cookies, body: { companySettings: { legalName: 'V1 Co' } } }),
+      save1.res,
+      deps
+    );
+    assert.equal(save1.statusCode, 200);
+    const currentVersion = save1.json().workspace.version;
+
+    // Attempt stale expectedVersion -> 409 VERSION_CONFLICT
+    const stale = createMockRes();
+    await handleWorkspace(
+      createReq({
+        method: 'PUT',
+        cookies,
+        body: { expectedVersion: currentVersion - 1, companySettings: { legalName: 'Stale Co' } },
+      }),
+      stale.res,
+      deps
+    );
+    assert.equal(stale.statusCode, 409);
+    assert.equal(stale.json().code, 'VERSION_CONFLICT');
+
+    // Sync & Restore
+    const syncRes = createMockRes();
+    await handleDriveSync(createReq({ method: 'POST', cookies, body: {} }), syncRes.res, deps);
+    assert.equal(syncRes.statusCode, 200);
+
+    const restoreRes = createMockRes();
+    await handleDriveRestore(createReq({ method: 'POST', cookies, body: {} }), restoreRes.res, deps);
+    assert.equal(restoreRes.statusCode, 200);
+
+    // Corrupt workspace-state.json in Drive -> must fail explicitly with DRIVE_CORRUPTED_FILE (never overwrite silently)
+    drive.corruptFileForOwner('res', 'workspace-state.json', '{not-valid-json');
+    const corruptRead = createMockRes();
+    await handleWorkspace(createReq({ method: 'GET', cookies }), corruptRead.res, deps);
+    assert.equal(corruptRead.statusCode, 500);
+    assert.equal(corruptRead.json().code, 'DRIVE_CORRUPTED_FILE');
+  });
+
+  test('7. Google Sheets URL Import, Normalization, Auto-Refresh Token & Error Preservation', async () => {
+    // Pure normalization checks
+    assert.equal(
+      extractSpreadsheetId('https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789/edit#gid=0'),
+      '1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789'
     );
     assert.throws(() => extractSpreadsheetId('https://example.com/not-a-sheet'));
+    assert.equal(buildSheetRange("Sales '2026'", 'A1:F50'), "'Sales ''2026'''!A1:F50");
 
-    assert.strictEqual(buildSheetRange("Q1 '26 Invoices", 'A2:H100'), "'Q1 ''26 Invoices'!A2:H100");
-    assert.throws(() => buildSheetRange('Sheet1', 'INVALID!!RANGE'));
+    const { worksheet, rowRecords } = normalizeSheetValues(
+      'Invoices',
+      [
+        ['Monthly Billing Export'],
+        ['Invoice No', 'Customer', 'Phone', 'Amount', 'Amount'],
+        ['INV-001', 'Riya', '009811000', '50000', '59000'],
+        ['', '', '', '', ''],
+      ],
+      { headerRowIndex: 'auto' }
+    );
+    assert.equal(worksheet.headerRowIndex, 1);
+    assert.equal(worksheet.rows.length, 1);
+    assert.equal(worksheet.rows[0]['Phone'], '009811000', 'Leading zeros must be preserved');
+    assert.deepEqual(worksheet.headers, ['Invoice No', 'Customer', 'Phone', 'Amount', 'Amount (2)']);
 
-    const normalized = normalizeSheetValues('Invoices', [
-      ['Monthly Report Export'],
-      ['Invoice Number', 'Customer', 'Amount', 'Amount'],
-      ['00042', 'Apex Ltd', '12500.00', '12500.00'],
-      ['', '', '', ''],
-      ['00043', 'Zenith Corp', '8400.50', '8400.50'],
-    ]);
+    const diff = computeSyncDiff(
+      new Map(),
+      rowRecords.map((r) => ({ compositeKey: `${worksheet.name}:${r.rowKey}`, rowHash: r.rowHash })),
+      worksheet.rawRowCount,
+      worksheet.skippedEmptyRows
+    );
+    assert.equal(diff.createdCount, 1);
 
-    assert.strictEqual(normalized.worksheet.headerRowIndex, 1);
-    assert.deepStrictEqual(normalized.worksheet.headers, [
-      'Invoice Number',
-      'Customer',
-      'Amount',
-      'Amount (2)',
-    ]);
-    assert.strictEqual(normalized.worksheet.rows.length, 2);
-    assert.strictEqual(normalized.worksheet.skippedEmptyRows, 1);
-    assert.strictEqual(normalized.worksheet.rows[0]['Invoice Number'], '00042');
-  });
-
-  test('5. Incremental OAuth scopes, token refresh, Sheets sync diff, reload recovery, & disconnect', async () => {
-    const store = new TestPersistenceStore();
-    const revokedTokens: string[] = [];
-    let refreshCallCount = 0;
+    const drive = new MultiUserMockDrive();
+    let refreshedCount = 0;
     let sheetRows: any[][] = [
-      ['Invoice Number', 'Customer Name', 'Amount'],
-      ['00101', 'Alpha Corp', '10000'],
-      ['00102', 'Beta LLC', '20000'],
-      ['00103', 'Gamma Inc', '30000'],
+      ['Invoice No', 'Customer', 'Amount'],
+      ['INV-101', 'Delta Corp', '15000'],
+      ['INV-102', 'Echo Ltd', '25000'],
     ];
+    let failSheetFetch = false;
 
-    const transport: GoogleTransportAdapter = {
-      async exchangeAuthCode({ code }) {
-        const scopes =
-          code === 'code_sheets'
-            ? [...BASE_GOOGLE_SCOPES, GOOGLE_SHEETS_SCOPE].join(' ')
-            : BASE_GOOGLE_SCOPES.join(' ');
+    const sheetsTransport: GoogleTransportAdapter = {
+      exchangeAuthCode: async () => {
+        throw new Error('unused');
+      },
+      refreshAccessToken: async () => {
+        refreshedCount++;
         return {
-          tokens: {
-            access_token: `access_tok_${code}`,
-            refresh_token: 'refresh_tok_secret_xyz',
-            expiry_date: Date.now() + 3600 * 1000,
-            scope: scopes,
-          },
-          identity: {
-            sub: 'google_sub_001',
-            email: 'finance@company.test',
-            name: 'Finance Admin',
-            picture: 'https://example.com/avatar.png',
-          },
+          access_token: 'sheetsu:tok-refreshed',
+          expiry_date: Date.now() + 3600_000,
         };
       },
-      async refreshAccessToken({ refreshToken }) {
-        refreshCallCount += 1;
-        assert.strictEqual(refreshToken, 'refresh_tok_secret_xyz');
+      revokeToken: async () => {},
+      fetchSpreadsheetMetadata: async () => {
+        if (failSheetFetch) {
+          throw new HttpApiError(403, 'SHEETS_PERMISSION_DENIED', 'No access to sheet.');
+        }
         return {
-          access_token: 'access_tok_refreshed',
-          expiry_date: Date.now() + 3600 * 1000,
+          spreadsheetId: '1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789',
+          title: 'Q4 Invoices',
+          sheets: [{ sheetId: 0, title: 'Invoices', index: 0, rowCount: 100, columnCount: 10 }],
         };
       },
-      async revokeToken(token) {
-        revokedTokens.push(token);
-      },
-      async fetchSpreadsheetMetadata({ spreadsheetId }) {
-        return {
-          spreadsheetId,
-          title: 'Q4 Invoice Master',
-          sheets: [{ sheetId: 0, title: 'Invoices', index: 0, rowCount: 1000, columnCount: 20 }],
-        };
-      },
-      async fetchSheetValues() {
-        return sheetRows;
-      },
+      fetchSheetValues: async () => sheetRows,
     };
 
     const deps: HandlerRuntimeDeps = {
       getConfig: () => TEST_CONFIG,
-      getStore: () => store,
-      transport,
+      transport: sheetsTransport,
+      driveTransport: drive.asAdapter(),
     };
 
-    // Step A: Basic sign-in grants only openid/email/profile
-    let cookieJar = await signInMockUser(deps, 'code_signin', 'signin');
-
-    // Forged state rejected (403)
-    const badStatePair = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookieJar,
-      body: { code: 'code_signin', state: 'forged_state', redirectUri: 'postmessage' },
+    // Missing sheets scope -> 403 SHEETS_SCOPE_REQUIRED
+    const noSheetsCookies = makeSignedSessionCookie({
+      uid: 'sub-sheets',
+      em: 'sheets@biz.test',
+      nm: 'Sheets User',
+      pic: null,
+      at: 'sheetsu:tok-1',
+      rt: 'sheetsu:ref-1',
+      exp: Date.now() + 3600_000,
+      sc: SIGNIN_GOOGLE_SCOPES.join(' '),
+      cat: new Date().toISOString(),
     });
-    await handleGoogleAuthCallback(badStatePair.req, badStatePair.res, deps);
-    assert.strictEqual(badStatePair.getResult().statusCode, 403);
-
-    // Step B: Calling Sheets without sheets scope returns 403 SHEETS_SCOPE_REQUIRED
-    const noScopePair = createMockHttpPair({
-      method: 'GET',
-      url: '/api/sheets/metadata?spreadsheetUrl=1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms',
-      cookieHeader: cookieJar,
-    });
-    await handleSheetsMetadata(noScopePair.req, noScopePair.res, deps);
-    assert.strictEqual(noScopePair.getResult().statusCode, 403);
-    assert.strictEqual(noScopePair.getResult().body.code, 'SHEETS_SCOPE_REQUIRED');
-
-    // Step C: Incrementally authorize Sheets scope
-    cookieJar = await signInMockUser(deps, 'code_sheets', 'sheets', cookieJar);
-
-    // Confirm encrypted storage in DB
-    const storedConn = store.connections.get('google_sub_001');
-    assert.ok(storedConn);
-    assert.ok(storedConn.encryptedRefreshToken?.startsWith('v1:'));
-    assert.ok(!storedConn.encryptedRefreshToken?.includes('refresh_tok_secret_xyz'));
-
-    // Step D: Force access token expiry -> metadata auto-refreshes
-    storedConn.accessTokenExpiresAt = new Date(Date.now() - 60000).toISOString();
-    const metaPair = createMockHttpPair({
-      method: 'GET',
-      url: '/api/sheets/metadata?spreadsheetUrl=https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit',
-      cookieHeader: cookieJar,
-    });
-    await handleSheetsMetadata(metaPair.req, metaPair.res, deps);
-    assert.strictEqual(metaPair.getResult().statusCode, 200);
-    assert.strictEqual(refreshCallCount, 1);
-
-    // Step E: Values preview & initial sync
-    const valuesPair = createMockHttpPair({
-      method: 'GET',
-      url: '/api/sheets/values?spreadsheetUrl=1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms&sheetName=Invoices',
-      cookieHeader: cookieJar,
-    });
-    await handleSheetsValues(valuesPair.req, valuesPair.res, deps);
-    assert.strictEqual(valuesPair.getResult().statusCode, 200);
-    assert.strictEqual(valuesPair.getResult().body.rowsCount, 3);
-
-    const syncPair1 = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookieJar,
-      body: {
-        spreadsheetUrl: '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms',
-        sheetName: 'Invoices',
-      },
-    });
-    await handleSheetsSync(syncPair1.req, syncPair1.res, deps);
-    assert.strictEqual(syncPair1.getResult().statusCode, 200);
-    assert.strictEqual(syncPair1.getResult().body.stats.createdCount, 3);
-
-    // Step F: Re-sync unchanged -> 'no_changes'
-    const syncPair2 = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookieJar,
-      body: {
-        spreadsheetUrl: '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms',
-        sheetName: 'Invoices',
-      },
-    });
-    await handleSheetsSync(syncPair2.req, syncPair2.res, deps);
-    assert.strictEqual(syncPair2.getResult().body.status, 'no_changes');
-
-    // Step G: Modify 1 row + add 1 row
-    sheetRows = [
-      ['Invoice Number', 'Customer Name', 'Amount'],
-      ['00101', 'Alpha Corp', '10000'],
-      ['00102', 'Beta LLC', '25000'],
-      ['00103', 'Gamma Inc', '30000'],
-      ['00104', 'Delta Studio', '12000'],
-    ];
-    const syncPair3 = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookieJar,
-      body: {
-        spreadsheetUrl: '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms',
-        sheetName: 'Invoices',
-      },
-    });
-    await handleSheetsSync(syncPair3.req, syncPair3.res, deps);
-    assert.strictEqual(syncPair3.getResult().body.stats.createdCount, 1);
-    assert.strictEqual(syncPair3.getResult().body.stats.updatedCount, 1);
-
-    // Step H: Failed sync preserves previously persisted valid rows
-    const failSyncPair = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookieJar,
-      body: {
-        spreadsheetUrl: '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms',
-        sheetName: 'Invoices',
-      },
-    });
-    await handleSheetsSync(failSyncPair.req, failSyncPair.res, {
-      ...deps,
-      transport: {
-        ...transport,
-        async fetchSheetValues() {
-          throw new HttpApiError(403, 'GOOGLE_PERMISSION_DENIED', 'Permission denied');
-        },
-      },
-    });
-    assert.strictEqual(failSyncPair.getResult().statusCode, 403);
-
-    const postFailReload = createMockHttpPair({ method: 'GET', cookieHeader: cookieJar });
-    await handleSheetsData(postFailReload.req, postFailReload.res, deps);
-    assert.strictEqual(postFailReload.getResult().body.spreadsheet.totalRows, 4);
-
-    // Step I: Full Disconnect revokes token & clears session
-    const discPair = createMockHttpPair({ method: 'POST', cookieHeader: cookieJar, body: {} });
-    await handleAuthDisconnect(discPair.req, discPair.res, deps);
-    assert.strictEqual(discPair.getResult().statusCode, 200);
-    assert.ok(revokedTokens.includes('refresh_tok_secret_xyz'));
-    assert.strictEqual(store.connections.size, 0);
-
-    cookieJar = mergeCookies(cookieJar, discPair.getResult().setCookies);
-    const statusAfter = createMockHttpPair({ method: 'GET', cookieHeader: cookieJar });
-    await handleAuthStatus(statusAfter.req, statusAfter.res, deps);
-    assert.strictEqual(statusAfter.getResult().body.authenticated, false);
-  });
-
-  test('6. Strict Multi-User Data Isolation & Server-Gated Quotation-to-Invoice Conversion', async () => {
-    const store = new TestPersistenceStore();
-    const transport: GoogleTransportAdapter = {
-      async exchangeAuthCode({ code }) {
-        const isA = code === 'user_a_code';
-        return {
-          tokens: {
-            access_token: isA ? 'tok_user_a' : 'tok_user_b',
-            refresh_token: isA ? 'ref_user_a' : 'ref_user_b',
-            expiry_date: Date.now() + 3600 * 1000,
-            scope: BASE_GOOGLE_SCOPES.join(' '),
-          },
-          identity: isA
-            ? { sub: 'sub_user_a', email: 'alice@alpha.test', name: 'Alice', picture: null }
-            : { sub: 'sub_user_b', email: 'bob@beta.test', name: 'Bob', picture: null },
-        };
-      },
-      async refreshAccessToken() {
-        return { access_token: 'refreshed', expiry_date: Date.now() + 3600 * 1000 };
-      },
-      async revokeToken() {},
-      async fetchSpreadsheetMetadata() {
-        return { spreadsheetId: 's', title: 't', sheets: [] };
-      },
-      async fetchSheetValues() {
-        return [];
-      },
-    };
-
-    const deps: HandlerRuntimeDeps = {
-      getConfig: () => TEST_CONFIG,
-      getStore: () => store,
-      transport,
-    };
-
-    // Sign in User A & create private quotation, customer, and invoice
-    const cookiesA = await signInMockUser(deps, 'user_a_code', 'signin');
-
-    const saveCustA = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookiesA,
-      body: { customer: { id: 'cust_a1', customerName: 'Alice Secret Client' } },
-    });
-    await handleWorkspace(saveCustA.req, saveCustA.res, deps);
-    assert.strictEqual(saveCustA.getResult().statusCode, 200);
-
-    const saveQtA = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookiesA,
-      body: {
-        quotation: {
-          id: 'qt_a1',
-          quotationNumber: 'QT-2026-001',
-          status: 'Draft',
-          customerName: 'Alice Secret Client',
-          totalAmount: 11800,
-          validUntilDate: '2099-12-31',
-          approvalHistory: [],
-        },
-      },
-    });
-    await handleQuotations(saveQtA.req, saveQtA.res, [], deps);
-    assert.strictEqual(saveQtA.getResult().statusCode, 200);
-
-    // Server MUST block converting a Draft quotation
-    const blockConvertDraft = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookiesA,
-      body: {
-        invoice: {
-          id: 'inv_a1',
-          invoiceNumber: 'INV-2026-001',
-          customerName: 'Alice Secret Client',
-          totalAmount: 11800,
-          paymentStatus: 'Unpaid',
-        },
-      },
-    });
-    await handleQuotations(blockConvertDraft.req, blockConvertDraft.res, ['qt_a1', 'convert'], deps);
-    assert.strictEqual(blockConvertDraft.getResult().statusCode, 403);
-
-    // Approve quotation then convert -> succeeds!
-    const approveQtA = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookiesA,
-      body: { status: 'Approved', notes: 'Approved by CFO' },
-    });
-    await handleQuotations(approveQtA.req, approveQtA.res, ['qt_a1', 'status'], deps);
-    assert.strictEqual(approveQtA.getResult().statusCode, 200);
-    assert.strictEqual(approveQtA.getResult().body.quotation.status, 'Approved');
-
-    const convertQtA = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookiesA,
-      body: {
-        invoice: {
-          id: 'inv_a1',
-          invoiceNumber: 'INV-2026-001',
-          customerName: 'Alice Secret Client',
-          totalAmount: 11800,
-          paymentStatus: 'Unpaid',
-        },
-      },
-    });
-    await handleQuotations(convertQtA.req, convertQtA.res, ['qt_a1', 'convert'], deps);
-    assert.strictEqual(convertQtA.getResult().statusCode, 200);
-    assert.strictEqual(convertQtA.getResult().body.quotation.status, 'Converted to Invoice');
-    assert.strictEqual(convertQtA.getResult().body.invoice.sourceQuotationId, 'qt_a1');
-
-    // Duplicate conversion MUST be blocked (409)
-    const dupConvert = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookiesA,
-      body: { invoice: { id: 'inv_a2', invoiceNumber: 'INV-2026-002' } },
-    });
-    await handleQuotations(dupConvert.req, dupConvert.res, ['qt_a1', 'convert'], deps);
-    assert.strictEqual(dupConvert.getResult().statusCode, 409);
-
-    // Sign in User B (completely separate Google sub)
-    const cookiesB = await signInMockUser(deps, 'user_b_code', 'signin');
-
-    // User B workspace MUST be completely empty (0 customers, 0 quotations, 0 invoices)
-    const wsB = createMockHttpPair({ method: 'GET', cookieHeader: cookiesB });
-    await handleWorkspace(wsB.req, wsB.res, deps);
-    assert.strictEqual(wsB.getResult().statusCode, 200);
-    assert.strictEqual(wsB.getResult().body.customers.length, 0);
-    assert.strictEqual(wsB.getResult().body.quotations.length, 0);
-    assert.strictEqual(wsB.getResult().body.invoices.length, 0);
-
-    // User B attempting direct access / delete / overwrite of User A's IDs MUST fail
-    const getQtAAsB = createMockHttpPair({ method: 'GET', cookieHeader: cookiesB });
-    await handleQuotations(getQtAAsB.req, getQtAAsB.res, ['qt_a1'], deps);
-    assert.strictEqual(getQtAAsB.getResult().statusCode, 404);
-
-    const delQtAAsB = createMockHttpPair({ method: 'DELETE', cookieHeader: cookiesB });
-    await handleQuotations(delQtAAsB.req, delQtAAsB.res, ['qt_a1'], deps);
-    assert.strictEqual(delQtAAsB.getResult().statusCode, 404);
-
-    const overwriteQtAAsB = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookiesB,
-      body: { quotation: { id: 'qt_a1', quotationNumber: 'HIJACK', status: 'Draft' } },
-    });
-    await handleQuotations(overwriteQtAAsB.req, overwriteQtAAsB.res, [], deps);
-    assert.strictEqual(overwriteQtAAsB.getResult().statusCode, 403);
-
-    const getInvAAsB = createMockHttpPair({ method: 'GET', cookieHeader: cookiesB });
-    await handleInvoices(getInvAAsB.req, getInvAAsB.res, ['inv_a1'], deps);
-    assert.strictEqual(getInvAAsB.getResult().statusCode, 404);
-
-    // User A's data remains completely untouched
-    const wsAAfter = createMockHttpPair({ method: 'GET', cookieHeader: cookiesA });
-    await handleWorkspace(wsAAfter.req, wsAAfter.res, deps);
-    assert.strictEqual(wsAAfter.getResult().body.customers.length, 1);
-    assert.strictEqual(wsAAfter.getResult().body.quotations.length, 1);
-    assert.strictEqual(wsAAfter.getResult().body.invoices.length, 1);
-  });
-
-  test('7. Per-User Google Drive Storage: 8 folders, idempotent sync (0 duplicates), PDF upload, backup & conflict-safe restore', async () => {
-    const store = new TestPersistenceStore();
-    const driveTransport = new MockDriveTransport();
-
-    const transport: GoogleTransportAdapter = {
-      async exchangeAuthCode({ code }) {
-        const scopes =
-          code === 'drive_code'
-            ? [...BASE_GOOGLE_SCOPES, GOOGLE_DRIVE_SCOPE].join(' ')
-            : BASE_GOOGLE_SCOPES.join(' ');
-        return {
-          tokens: {
-            access_token: 'tok_drive_user',
-            refresh_token: 'ref_drive_user',
-            expiry_date: Date.now() + 3600 * 1000,
-            scope: scopes,
-          },
-          identity: {
-            sub: 'sub_drive_1',
-            email: 'owner@drive.test',
-            name: 'Drive Owner',
-            picture: null,
-          },
-        };
-      },
-      async refreshAccessToken() {
-        return { access_token: 'tok_drive_user', expiry_date: Date.now() + 3600 * 1000 };
-      },
-      async revokeToken() {},
-      async fetchSpreadsheetMetadata() {
-        return { spreadsheetId: 's', title: 't', sheets: [] };
-      },
-      async fetchSheetValues() {
-        return [];
-      },
-    };
-
-    const deps: HandlerRuntimeDeps = {
-      getConfig: () => TEST_CONFIG,
-      getStore: () => store,
-      transport,
-      driveTransport,
-    };
-
-    // Sign in without drive scope -> sync blocked with 403 DRIVE_SCOPE_REQUIRED
-    let cookies = await signInMockUser(deps, 'signin_only', 'signin');
-    const blockedSync = createMockHttpPair({ method: 'POST', cookieHeader: cookies, body: {} });
-    await handleDriveSync(blockedSync.req, blockedSync.res, deps);
-    assert.strictEqual(blockedSync.getResult().statusCode, 403);
-    assert.strictEqual(blockedSync.getResult().body.code, 'DRIVE_SCOPE_REQUIRED');
-
-    // Grant Drive scope incrementally
-    cookies = await signInMockUser(deps, 'drive_code', 'drive', cookies);
-
-    // Seed workspace data
-    await store.upsertWorkspaceState('sub_drive_1', {
-      companySettings: { legalName: 'Drive Studio LLP', email: 'owner@drive.test' },
-    });
-    await store.upsertQuotation('sub_drive_1', {
-      id: 'qt_drv_1',
-      quotationNumber: 'QT-2026-010',
-      status: 'Approved',
-      customerName: 'Skyline Corp',
-      totalAmount: 5000,
-      validUntil: '2099-01-01',
-      data: {
-        id: 'qt_drv_1',
-        quotationNumber: 'QT-2026-010',
-        status: 'Approved',
-        customerName: 'Skyline Corp',
-        totalAmount: 5000,
-        validUntilDate: '2099-01-01',
-        updatedAt: '2026-05-01T10:00:00.000Z',
-      },
-    });
-
-    // First sync creates root + all 8 subfolders + JSON files
-    const sync1 = createMockHttpPair({ method: 'POST', cookieHeader: cookies, body: {} });
-    await handleDriveSync(sync1.req, sync1.res, deps);
-    assert.strictEqual(sync1.getResult().statusCode, 200);
-    const totalAfterFirst = driveTransport.files.size;
-
-    const statusPair = createMockHttpPair({ method: 'GET', cookieHeader: cookies });
-    await handleDriveStatus(statusPair.req, statusPair.res, deps);
-    assert.strictEqual(statusPair.getResult().body.connected, true);
-    assert.strictEqual(
-      Object.keys(statusPair.getResult().body.subfolders).length,
-      Object.keys(DRIVE_SUBFOLDER_KEYS).length
+    const scopeFailRes = createMockRes();
+    await handleSheetsMetadata(
+      createReq({
+        method: 'GET',
+        query: { spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789/edit' },
+        cookies: noSheetsCookies,
+      }),
+      scopeFailRes.res,
+      deps
     );
+    assert.equal(scopeFailRes.statusCode, 403);
+    assert.equal(scopeFailRes.json().code, 'SHEETS_SCOPE_REQUIRED');
 
-    // Second sync MUST update in place with ZERO duplicate folders or files
-    const sync2 = createMockHttpPair({ method: 'POST', cookieHeader: cookies, body: {} });
-    await handleDriveSync(sync2.req, sync2.res, deps);
-    assert.strictEqual(sync2.getResult().statusCode, 200);
-    assert.strictEqual(driveTransport.files.size, totalAfterFirst);
-
-    // Upload PDF twice -> stable driveFileId, no duplicate PDFs
-    const pdf1 = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookies,
-      body: {
-        documentType: 'quotation',
-        documentId: 'qt_drv_1',
-        fileName: 'QT-2026-010.pdf',
-        pdfBase64: Buffer.from('%PDF-1.4 mock').toString('base64'),
-      },
+    // Expired access token with sheets scope -> auto-refreshes and persists Set-Cookie
+    const expiredSheetsCookies = makeSignedSessionCookie({
+      uid: 'sub-sheets',
+      em: 'sheets@biz.test',
+      nm: 'Sheets User',
+      pic: null,
+      at: 'sheetsu:tok-expired',
+      rt: 'sheetsu:ref-1',
+      exp: Date.now() - 10_000,
+      sc: [...SIGNIN_GOOGLE_SCOPES, GOOGLE_SHEETS_SCOPE].join(' '),
+      cat: new Date().toISOString(),
     });
-    await handleDriveUploadPdf(pdf1.req, pdf1.res, deps);
-    assert.strictEqual(pdf1.getResult().statusCode, 200);
-    const pdfFileId = pdf1.getResult().body.driveFileId;
 
-    const pdf2 = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookies,
-      body: {
-        documentType: 'quotation',
-        documentId: 'qt_drv_1',
-        fileName: 'QT-2026-010.pdf',
-        pdfBase64: Buffer.from('%PDF-1.4 updated').toString('base64'),
-      },
-    });
-    await handleDriveUploadPdf(pdf2.req, pdf2.res, deps);
-    assert.strictEqual(pdf2.getResult().body.driveFileId, pdfFileId);
-
-    // Create timestamped backup snapshot
-    const backupPair = createMockHttpPair({ method: 'POST', cookieHeader: cookies, body: {} });
-    await handleDriveBackup(backupPair.req, backupPair.res, deps);
-    assert.strictEqual(backupPair.getResult().statusCode, 200);
-    assert.ok(backupPair.getResult().body.fileName.startsWith('invoice-studio-backup-'));
-
-    // Simulate brand-new device (clear DB quotations & workspace, then Restore from Drive)
-    store.quotations.clear();
-    store.workspaces.clear();
-
-    const restorePair = createMockHttpPair({ method: 'POST', cookieHeader: cookies, body: {} });
-    await handleDriveRestore(restorePair.req, restorePair.res, deps);
-    assert.strictEqual(restorePair.getResult().statusCode, 200);
-    assert.strictEqual(restorePair.getResult().body.quotationsRestored, 1);
-    assert.strictEqual(store.quotations.get('qt_drv_1')?.quotationNumber, 'QT-2026-010');
-
-    // Timestamp conflict-resolution check: newer local record must NOT be overwritten by older remote
-    const merged = mergeTimestampedRecords(
-      [{ id: '1', updatedAt: '2026-06-01T12:00:00Z', name: 'Newer Local' }],
-      [{ id: '1', updatedAt: '2026-05-01T12:00:00Z', name: 'Older Remote' }]
+    const sync1 = createMockRes();
+    await handleSheetsSync(
+      createReq({
+        method: 'POST',
+        cookies: expiredSheetsCookies,
+        body: {
+          spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789/edit',
+          sheetName: 'Invoices',
+        },
+      }),
+      sync1.res,
+      deps
     );
-    assert.strictEqual(merged.merged[0].name, 'Newer Local');
-    assert.strictEqual(merged.merged.length, 1);
+    assert.equal(sync1.statusCode, 200);
+    assert.equal(refreshedCount, 1, 'Expired access token must refresh automatically');
+    assert.equal(sync1.json().totalRows, 2);
+    assert.equal(sync1.json().stats.createdCount, 2);
+    const freshCookies = { ...expiredSheetsCookies, ...sync1.getCookies() };
+
+    // Second identical sync -> no_changes
+    const sync2 = createMockRes();
+    await handleSheetsSync(
+      createReq({
+        method: 'POST',
+        cookies: freshCookies,
+        body: {
+          spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789/edit',
+          sheetName: 'Invoices',
+        },
+      }),
+      sync2.res,
+      deps
+    );
+    assert.equal(sync2.statusCode, 200);
+    assert.equal(sync2.json().status, 'no_changes');
+
+    // Permission error on subsequent sync -> 403 while preserving prior synced rows in Drive
+    failSheetFetch = true;
+    const syncErr = createMockRes();
+    await handleSheetsSync(
+      createReq({
+        method: 'POST',
+        cookies: freshCookies,
+        body: {
+          spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789/edit',
+          sheetName: 'Invoices',
+        },
+      }),
+      syncErr.res,
+      deps
+    );
+    assert.equal(syncErr.statusCode, 403);
+
+    const persistedAfterErr = createMockRes();
+    await handleSheetsData(createReq({ method: 'GET', cookies: freshCookies }), persistedAfterErr.res, deps);
+    assert.equal(persistedAfterErr.statusCode, 200);
+    assert.equal(persistedAfterErr.json().spreadsheet.totalRows, 2, 'Prior rows must stay intact on sync failure');
   });
 
-  test('8. Dual Email Delivery: Gmail API MIME+PDF, Encrypted SMTP, Explicit Method Enforcement & Bulk Isolation', async () => {
-    const store = new TestPersistenceStore();
-    const sentGmailCalls: any[] = [];
-    const sentSmtpCalls: any[] = [];
+  test('8. Dual Email Delivery: Gmail API + Encrypted SMTP in Drive, Test Send, Delete & Zero Silent Fallback', async () => {
+    const drive = new MultiUserMockDrive();
+    const sentViaGmail: any[] = [];
+    const sentViaSmtp: any[] = [];
     let smtpVerifyCalls = 0;
 
     const emailTransport: EmailTransportAdapter = {
-      async sendViaGmail(params) {
-        sentGmailCalls.push(params);
-        return { messageId: `gmail_msg_${sentGmailCalls.length}` };
+      sendViaGmail: async (params) => {
+        sentViaGmail.push(params);
+        return { messageId: `gmail-msg-${sentViaGmail.length}` };
       },
-      async verifySmtp() {
-        smtpVerifyCalls += 1;
-      },
-      async sendViaSmtp(params) {
-        if (params.to === 'bounce@fail.test') {
-          throw new Error('550 Mailbox unavailable');
+      verifySmtp: async (params) => {
+        smtpVerifyCalls++;
+        if (params.host === 'bad.smtp.test') {
+          throw new Error('Connection refused');
         }
-        sentSmtpCalls.push(params);
-        return { messageId: `smtp_msg_${sentSmtpCalls.length}` };
       },
-    };
-
-    const transport: GoogleTransportAdapter = {
-      async exchangeAuthCode({ code }) {
-        const scopes =
-          code === 'gmail_code'
-            ? [...BASE_GOOGLE_SCOPES, GOOGLE_GMAIL_SEND_SCOPE].join(' ')
-            : BASE_GOOGLE_SCOPES.join(' ');
-        return {
-          tokens: {
-            access_token: 'tok_email_user',
-            refresh_token: 'ref_email_user',
-            expiry_date: Date.now() + 3600 * 1000,
-            scope: scopes,
-          },
-          identity: {
-            sub: 'sub_email_1',
-            email: 'sender@gmail.test',
-            name: 'Sender User',
-            picture: null,
-          },
-        };
-      },
-      async refreshAccessToken() {
-        return { access_token: 'tok_email_user', expiry_date: Date.now() + 3600 * 1000 };
-      },
-      async revokeToken() {},
-      async fetchSpreadsheetMetadata() {
-        return { spreadsheetId: 's', title: 't', sheets: [] };
-      },
-      async fetchSheetValues() {
-        return [];
+      sendViaSmtp: async (params) => {
+        sentViaSmtp.push(params);
+        return { messageId: `smtp-msg-${sentViaSmtp.length}` };
       },
     };
 
     const deps: HandlerRuntimeDeps = {
       getConfig: () => TEST_CONFIG,
-      getStore: () => store,
-      transport,
+      driveTransport: drive.asAdapter(),
       emailTransport,
     };
 
-    // RFC 2822 MIME builder sanity check (base64 PDF attachment + CC/BCC)
-    const rawMime = buildGmailRawMimeMessage({
-      from: 'sender@gmail.test',
-      to: 'client@acme.test',
-      cc: 'cc@acme.test',
-      bcc: 'bcc@acme.test',
-      subject: 'Quotation QT-001',
-      textBody: 'Please see attached PDF.',
-      attachment: {
-        filename: 'QT-001.pdf',
-        contentBase64: Buffer.from('%PDF-1.4 test').toString('base64'),
-      },
+    const baseCookiesNoGmail = makeSignedSessionCookie({
+      uid: 'sub-mailer',
+      em: 'mailer@biz.test',
+      nm: 'Mailer',
+      pic: null,
+      at: 'mailer:tok-1',
+      rt: 'mailer:ref-1',
+      exp: Date.now() + 3600_000,
+      sc: SIGNIN_GOOGLE_SCOPES.join(' '),
+      cat: new Date().toISOString(),
     });
-    const decodedMime = Buffer.from(rawMime, 'base64url').toString('utf8');
-    assert.ok(decodedMime.includes('To: client@acme.test'));
-    assert.ok(decodedMime.includes('Cc: cc@acme.test'));
-    assert.ok(decodedMime.includes('Bcc: bcc@acme.test'));
-    assert.ok(decodedMime.includes('filename="QT-001.pdf"'));
 
-    let cookies = await signInMockUser(deps, 'signin_only', 'signin');
-
-    // Step A: Configure SMTP -> password encrypted at rest, NEVER returned in GET
-    const saveSmtp = createMockHttpPair({
-      method: 'PUT',
-      cookieHeader: cookies,
-      body: {
-        host: 'smtp.company.test',
-        port: 587,
-        securityMode: 'STARTTLS',
-        username: 'billing@company.test',
-        password: 'super_secret_smtp_password',
-        senderName: 'Billing Team',
-        senderEmail: 'billing@company.test',
-      },
+    const fullCookiesWithGmail = makeSignedSessionCookie({
+      uid: 'sub-mailer',
+      em: 'mailer@biz.test',
+      nm: 'Mailer',
+      pic: null,
+      at: 'mailer:tok-1',
+      rt: 'mailer:ref-1',
+      exp: Date.now() + 3600_000,
+      sc: [...SIGNIN_GOOGLE_SCOPES, GOOGLE_GMAIL_SEND_SCOPE].join(' '),
+      cat: new Date().toISOString(),
     });
-    await handleSmtpConfig(saveSmtp.req, saveSmtp.res, deps);
-    assert.strictEqual(saveSmtp.getResult().statusCode, 200);
-    assert.strictEqual(saveSmtp.getResult().body.smtpConfig.hasPassword, true);
-    assert.strictEqual(saveSmtp.getResult().body.smtpConfig.password, undefined);
 
-    const dbSmtp = store.smtpConfigs.get('sub_email_1');
-    assert.ok(dbSmtp?.encryptedPassword?.startsWith('v1:'));
-    assert.ok(!dbSmtp?.encryptedPassword?.includes('super_secret_smtp_password'));
+    // Save SMTP config -> encrypted at rest in Drive; password NEVER returned by GET
+    const secretPass = 'SmtpSuperSecret#2026';
+    const saveSmtp = createMockRes();
+    await handleSmtpConfig(
+      createReq({
+        method: 'PUT',
+        cookies: baseCookiesNoGmail,
+        body: {
+          host: 'smtp.company.test',
+          port: 587,
+          securityMode: 'STARTTLS',
+          username: 'billing@company.test',
+          password: secretPass,
+          senderName: 'Billing Desk',
+          senderEmail: 'billing@company.test',
+        },
+      }),
+      saveSmtp.res,
+      deps
+    );
+    assert.equal(saveSmtp.statusCode, 200);
+    assert.equal(saveSmtp.json().smtpConfig.hasPassword, true);
+    assert.equal(saveSmtp.body.includes(secretPass), false, 'API response must never leak SMTP password');
 
-    const testSmtp = createMockHttpPair({ method: 'POST', cookieHeader: cookies, body: {} });
-    await handleSmtpTest(testSmtp.req, testSmtp.res, deps);
-    assert.strictEqual(testSmtp.getResult().statusCode, 200);
-    assert.strictEqual(smtpVerifyCalls, 1);
+    // Verify raw Drive file smtp-config.enc.json does NOT contain plaintext password
+    const rawSmtpFile = drive
+      .getFilesForOwner('mailer')
+      .find((f) => f.summary.name === 'smtp-config.enc.json');
+    assert.ok(rawSmtpFile, 'smtp-config.enc.json must be stored in Drive');
+    const rawSmtpText = rawSmtpFile!.content.toString('utf8');
+    assert.equal(rawSmtpText.includes(secretPass), false, 'Drive file must encrypt SMTP password');
 
-    // Step B: Explicit method enforcement — requesting 'gmail' WITHOUT gmail.send scope
-    // MUST return 403 GMAIL_SCOPE_REQUIRED and MUST NOT silently fall back to configured SMTP!
-    const gmailBlocked = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookies,
-      body: {
-        method: 'gmail',
-        items: [
-          {
-            documentType: 'quotation',
-            documentId: 'qt_1',
-            documentNumber: 'QT-001',
-            to: 'client@acme.test',
-            subject: 'Quote',
-            textBody: 'Attached',
-          },
-        ],
-      },
-    });
-    await handleEmailSend(gmailBlocked.req, gmailBlocked.res, deps);
-    assert.strictEqual(gmailBlocked.getResult().statusCode, 403);
-    assert.strictEqual(gmailBlocked.getResult().body.code, 'GMAIL_SCOPE_REQUIRED');
-    assert.strictEqual(sentSmtpCalls.length, 0);
+    // Verify GET returns public metadata only
+    const getSmtp = createMockRes();
+    await handleSmtpConfig(createReq({ method: 'GET', cookies: baseCookiesNoGmail }), getSmtp.res, deps);
+    assert.equal(getSmtp.statusCode, 200);
+    assert.equal(getSmtp.json().smtpConfig.configured, true);
+    assert.equal('password' in getSmtp.json().smtpConfig, false);
 
-    // Step C: Bulk SMTP send with 1 valid, 1 invalid email, and 1 failing SMTP recipient
-    // Verify recipient isolation & error isolation
-    const bulkSmtp = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookies,
-      body: {
-        method: 'smtp',
-        items: [
-          {
-            documentType: 'invoice',
-            documentId: 'inv_1',
-            documentNumber: 'INV-001',
-            to: 'client1@acme.test',
-            subject: 'Invoice INV-001',
-            textBody: 'Body 1',
-            attachment: { filename: 'INV-001.pdf', contentBase64: 'JVBERi0xLjQ=' },
-          },
-          {
-            documentType: 'invoice',
-            documentId: 'inv_2',
-            documentNumber: 'INV-002',
-            to: 'not-an-email',
-            subject: 'Invoice INV-002',
-            textBody: 'Body 2',
-          },
-          {
-            documentType: 'invoice',
-            documentId: 'inv_3',
-            documentNumber: 'INV-003',
-            to: 'bounce@fail.test',
-            subject: 'Invoice INV-003',
-            textBody: 'Body 3',
-          },
-        ],
-      },
-    });
-    await handleEmailSend(bulkSmtp.req, bulkSmtp.res, deps);
-    assert.strictEqual(bulkSmtp.getResult().statusCode, 200);
-    assert.strictEqual(bulkSmtp.getResult().body.sentCount, 1);
-    assert.strictEqual(bulkSmtp.getResult().body.failedCount, 2);
-    assert.strictEqual(sentSmtpCalls.length, 1);
-    assert.strictEqual(sentSmtpCalls[0].to, 'client1@acme.test');
+    // Test SMTP connection
+    const testConn = createMockRes();
+    await handleSmtpTest(createReq({ method: 'POST', cookies: baseCookiesNoGmail, body: {} }), testConn.res, deps);
+    assert.equal(testConn.statusCode, 200);
+    assert.equal(smtpVerifyCalls, 1);
 
-    // Step D: Grant Gmail send scope -> send Quotation via Gmail API
-    cookies = await signInMockUser(deps, 'gmail_code', 'gmail', cookies);
-    const gmailSend = createMockHttpPair({
-      method: 'POST',
-      cookieHeader: cookies,
-      body: {
-        method: 'gmail',
-        items: [
-          {
-            documentType: 'quotation',
-            documentId: 'qt_1',
-            documentNumber: 'QT-001',
-            to: 'buyer@client.test',
-            cc: 'manager@client.test',
-            subject: 'Quotation QT-001',
-            textBody: 'Please approve.',
-            attachment: { filename: 'QT-001.pdf', contentBase64: 'JVBERi0xLjQ=' },
-          },
-        ],
-      },
-    });
-    await handleEmailSend(gmailSend.req, gmailSend.res, deps);
-    assert.strictEqual(gmailSend.getResult().statusCode, 200);
-    assert.strictEqual(gmailSend.getResult().body.sentCount, 1);
-    assert.strictEqual(sentGmailCalls.length, 1);
-    assert.ok(sentGmailCalls[0].from.includes('sender@gmail.test'));
+    // Send test email via SMTP
+    const testSendSmtp = createMockRes();
+    await handleEmailTestSend(
+      createReq({
+        method: 'POST',
+        cookies: baseCookiesNoGmail,
+        body: { method: 'smtp', to: 'client@example.com' },
+      }),
+      testSendSmtp.res,
+      deps
+    );
+    assert.equal(testSendSmtp.statusCode, 200);
+    assert.equal(sentViaSmtp.length, 1);
+    assert.equal(sentViaSmtp[0].password, secretPass, 'Backend decrypts SMTP password for dispatch');
 
-    // Step E: Email History returns all 4 per-user logs (1 Gmail + 3 SMTP)
-    const histPair = createMockHttpPair({ method: 'GET', cookieHeader: cookies });
-    await handleEmailHistory(histPair.req, histPair.res, deps);
-    assert.strictEqual(histPair.getResult().statusCode, 200);
-    assert.strictEqual(histPair.getResult().body.logs.length, 4);
+    // Strict zero silent fallback: requesting Gmail without gmail.send scope MUST return 403 (never fall back to SMTP!)
+    const gmailNoScope = createMockRes();
+    await handleEmailSend(
+      createReq({
+        method: 'POST',
+        cookies: baseCookiesNoGmail,
+        body: {
+          method: 'gmail',
+          items: [
+            {
+              documentType: 'invoice',
+              documentId: 'inv-1',
+              documentNumber: 'INV-1',
+              to: 'client@example.com',
+              subject: 'Invoice INV-1',
+              textBody: 'Attached.',
+            },
+          ],
+        },
+      }),
+      gmailNoScope.res,
+      deps
+    );
+    assert.equal(gmailNoScope.statusCode, 403);
+    assert.equal(gmailNoScope.json().code, 'GMAIL_SCOPE_REQUIRED');
+    assert.equal(sentViaSmtp.length, 1, 'Gmail failure must NEVER silently fall back to SMTP');
+
+    // Send invoice PDF via Gmail with gmail.send scope
+    const gmailSend = createMockRes();
+    await handleEmailSend(
+      createReq({
+        method: 'POST',
+        cookies: fullCookiesWithGmail,
+        body: {
+          method: 'gmail',
+          items: [
+            {
+              documentType: 'invoice',
+              documentId: 'inv-1',
+              documentNumber: 'INV-1',
+              to: 'client@example.com',
+              subject: 'Invoice INV-1',
+              textBody: 'Please find attached.',
+              attachment: {
+                filename: 'INV-1.pdf',
+                contentBase64: Buffer.from('%PDF-1.4 sample').toString('base64'),
+              },
+            },
+          ],
+        },
+      }),
+      gmailSend.res,
+      deps
+    );
+    assert.equal(gmailSend.statusCode, 200);
+    assert.equal(sentViaGmail.length, 1);
+
+    // Send test email via Gmail
+    const testSendGmail = createMockRes();
+    await handleEmailTestSend(
+      createReq({
+        method: 'POST',
+        cookies: fullCookiesWithGmail,
+        body: { method: 'gmail', to: 'mailer@biz.test' },
+      }),
+      testSendGmail.res,
+      deps
+    );
+    assert.equal(testSendGmail.statusCode, 200);
+    assert.equal(sentViaGmail.length, 2);
+
+    // Verify email history persisted in Drive Email Records/
+    const historyRes = createMockRes();
+    await handleEmailHistory(createReq({ method: 'GET', cookies: fullCookiesWithGmail }), historyRes.res, deps);
+    assert.equal(historyRes.statusCode, 200);
+    assert.equal(historyRes.json().logs.length, 3);
+
+    // Delete SMTP config -> subsequent SMTP send must return 400 (never silently fall back to Gmail!)
+    const delSmtp = createMockRes();
+    await handleSmtpConfig(createReq({ method: 'DELETE', cookies: fullCookiesWithGmail }), delSmtp.res, deps);
+    assert.equal(delSmtp.statusCode, 200);
+    assert.equal(delSmtp.json().deleted, true);
+
+    const smtpAfterDelete = createMockRes();
+    await handleEmailSend(
+      createReq({
+        method: 'POST',
+        cookies: fullCookiesWithGmail,
+        body: {
+          method: 'smtp',
+          items: [
+            {
+              documentType: 'quotation',
+              documentId: 'q-1',
+              documentNumber: 'QT-1',
+              to: 'client@example.com',
+              subject: 'Quote QT-1',
+              textBody: 'Attached.',
+            },
+          ],
+        },
+      }),
+      smtpAfterDelete.res,
+      deps
+    );
+    assert.equal(smtpAfterDelete.statusCode, 400);
+    assert.equal(smtpAfterDelete.json().code, 'SMTP_NOT_CONFIGURED');
+    assert.equal(sentViaGmail.length, 2, 'SMTP failure must NEVER silently fall back to Gmail');
+
+    // Crypto helper sanity
+    const cipher = encryptSecret('hello-secret', TEST_CONFIG.tokenEncryptionKey);
+    assert.equal(decryptSecret(cipher, TEST_CONFIG.tokenEncryptionKey), 'hello-secret');
+
+    // Auth status endpoint reflects connected flags accurately
+    const authStatusRes = createMockRes();
+    await handleAuthStatus(createReq({ method: 'GET', cookies: fullCookiesWithGmail }), authStatusRes.res, deps);
+    assert.equal(authStatusRes.statusCode, 200);
+    assert.equal(authStatusRes.json().authenticated, true);
+    assert.equal(authStatusRes.json().user.driveConnected, true);
+    assert.equal(authStatusRes.json().user.gmailConnected, true);
+    assert.equal(authStatusRes.json().user.smtpConfigured, false);
   });
 });

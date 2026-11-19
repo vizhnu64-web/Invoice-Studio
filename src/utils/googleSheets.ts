@@ -40,9 +40,9 @@ export interface GoogleAccountUser {
 
 export interface IntegrationDiagnostics {
   googleOAuthConfigured: boolean;
-  databaseConfigured: boolean;
   encryptionConfigured: boolean;
   sessionConfigured: boolean;
+  storageProvider?: 'google-drive';
   redirectUri: string;
   missingEnvVars: string[];
   readyForGoogleSync: boolean;

@@ -1360,8 +1360,9 @@ describe('Invoice Studio - Automated Logic & PDF Generation Test Suite', () => {
     const { storage } = await import('./storage');
     const { createDefaultManualInvoice } = await import('./manualInvoice');
 
+    storage.clearAllUserWorkspaceCaches();
     const initialCustomers = storage.loadCustomers();
-    assert.ok(initialCustomers.length >= 2);
+    assert.strictEqual(initialCustomers.length, 0);
 
     storage.saveCustomer({
       id: 'cust_test_new',
@@ -1380,6 +1381,8 @@ describe('Invoice Studio - Automated Logic & PDF Generation Test Suite', () => {
 
     const customersAfterSave = storage.loadCustomers();
     assert.ok(customersAfterSave.some((c) => c.customerName === 'Zenith Labs Pvt Ltd'));
+    storage.deleteCustomer('cust_test_new');
+    assert.strictEqual(storage.loadCustomers().some((c) => c.id === 'cust_test_new'), false);
 
     const draftData = createDefaultManualInvoice(defaultCompanySettings, defaultFieldCatalog, []);
     draftData.customerName = 'Zenith Labs Pvt Ltd';

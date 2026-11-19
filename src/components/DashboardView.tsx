@@ -243,10 +243,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </label>
 
               <button
+                type="button"
                 onClick={() => onStartGuidedWorkflow('source')}
                 className="bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold py-3 px-4 rounded-xl transition-all flex items-center space-x-1.5 cursor-pointer"
               >
-                <span>Use Current Data</span>
+                <span>{totalRows > 0 ? 'Use Current Data' : 'Open Import Guide'}</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
             </div>
@@ -367,8 +368,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
           <div>
             <p className="text-xs font-medium text-slate-500 uppercase">Worksheets Loaded</p>
-            <p className="text-2xl font-bold text-slate-900">{spreadsheetData.worksheets.length} Sheets</p>
-            <p className="text-xs text-slate-500">Active: {spreadsheetData.activeSheetName}</p>
+            <p className="text-2xl font-bold text-slate-900 tabular-nums">{spreadsheetData.worksheets.length} Sheets</p>
+            <p className="text-xs text-slate-500">Active: {spreadsheetData.activeSheetName || 'None'}</p>
           </div>
         </div>
 

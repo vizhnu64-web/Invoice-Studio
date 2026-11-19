@@ -17,6 +17,7 @@ import {
   handleDriveUploadPdf,
   handleEmailHistory,
   handleEmailSend,
+  handleEmailTestSend,
   handleGoogleAuthCallback,
   handleGoogleAuthStart,
   handleHealth,
@@ -49,7 +50,7 @@ async function startServer() {
   app.all('/api/auth/status', (req, res) => void handleAuthStatus(req, res));
   app.all('/api/auth/disconnect', (req, res) => void handleAuthDisconnect(req, res));
 
-  // Workspace, Onboarding & Customers
+  // Workspace, Onboarding & Customers (Google Drive backed)
   app.all('/api/workspace', (req, res) => void handleWorkspace(req, res));
 
   // Quotations (with status transitions & strict approval-gated conversion)
@@ -70,15 +71,16 @@ async function startServer() {
   app.all('/api/drive/restore', (req, res) => void handleDriveRestore(req, res));
   app.all('/api/drive/backup', (req, res) => void handleDriveBackup(req, res));
 
-  // Google Sheets Sync
+  // Google Sheets Import & Sync
   app.all('/api/sheets/metadata', (req, res) => void handleSheetsMetadata(req, res));
   app.all('/api/sheets/values', (req, res) => void handleSheetsValues(req, res));
   app.all('/api/sheets/sync', (req, res) => void handleSheetsSync(req, res));
   app.all('/api/sheets/data', (req, res) => void handleSheetsData(req, res));
 
-  // Dual Email Delivery (Gmail API + Backend SMTP)
+  // Dual Email Delivery (Gmail API + Per-User Encrypted SMTP)
   app.all('/api/email/smtp-config', (req, res) => void handleSmtpConfig(req, res));
   app.all('/api/email/smtp-test', (req, res) => void handleSmtpTest(req, res));
+  app.all('/api/email/test-send', (req, res) => void handleEmailTestSend(req, res));
   app.all('/api/email/send', (req, res) => void handleEmailSend(req, res));
   app.all('/api/email/history', (req, res) => void handleEmailHistory(req, res));
 

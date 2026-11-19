@@ -334,13 +334,13 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
 
   const validateDeliveryMethodReady = (): string | null => {
     if (!authUser?.userId) {
-      return 'Sign in with your Google Account in Google Integrations to send real emails via Gmail API or encrypted Backend SMTP.';
+      return 'Sign in with your Google Account in Account & Integrations to send real emails via Gmail API or encrypted Backend SMTP.';
     }
     if (deliveryMethod === 'gmail' && !authUser.gmailConnected) {
       return 'Connected Gmail Account is selected, but Gmail send permission is not yet authorized. Click "Connect Gmail" or explicitly choose "Company / User SMTP Account".';
     }
     if (deliveryMethod === 'smtp' && !smtpConfig.configured) {
-      return 'Company / User SMTP Account is selected, but SMTP settings are not configured yet. Configure SMTP in Google Integrations or explicitly choose "Connected Gmail Account".';
+      return 'Company / User SMTP Account is selected, but SMTP settings are not configured yet. Configure SMTP in Account & Integrations or explicitly choose "Connected Gmail Account".';
     }
     return null;
   };
@@ -359,7 +359,7 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
     } catch (err: any) {
       setActionNotification({
         type: 'error',
-        text: err?.message || 'Could not authorize Gmail right now. Check Google Integrations.',
+        text: err?.message || 'Could not authorize Gmail right now. Check Account & Integrations.',
       });
     } finally {
       setIsConnectingGmail(false);
@@ -694,7 +694,7 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
             className="text-xs font-bold text-indigo-700 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-3 py-1.5 rounded-xl inline-flex items-center space-x-1.5 cursor-pointer self-start sm:self-auto"
           >
             <Cloud className="w-3.5 h-3.5" />
-            <span>Manage Gmail & SMTP in Google Integrations</span>
+            <span>Manage Gmail & SMTP in Account &amp; Integrations</span>
           </button>
         </div>
 
@@ -785,7 +785,7 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
                   </p>
                 ) : (
                   <p className="text-xs text-slate-500">
-                    Not configured yet. Store encrypted SMTP credentials per user in Google Integrations.
+                    Not configured yet. Store encrypted SMTP credentials in your Google Drive workspace via Account &amp; Integrations.
                   </p>
                 )}
               </div>

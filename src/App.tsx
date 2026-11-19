@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   BackendSmtpConfig,
   CalculationSettings,
@@ -19,9 +19,15 @@ import {
   QuotationRecord,
   SpreadsheetData,
 } from './types';
-import { defaultMappingProfiles, sampleSpreadsheetData } from './mockData';
+import {
+  defaultCalculationSettings,
+  defaultCompanySettings,
+  defaultFieldCatalog,
+  defaultMappingProfiles,
+} from './mockData';
 import { Navbar } from './components/Navbar';
 import { DashboardView } from './components/DashboardView';
+import { CustomersView } from './components/CustomersView';
 import { FieldCatalogView } from './components/FieldCatalogView';
 import { DataSourceView } from './components/DataSourceView';
 import { LayoutDesigner } from './components/LayoutDesigner';
@@ -38,7 +44,7 @@ import {
 } from './components/AuthOnboardingOverlay';
 import { GuidedWorkflow } from './components/workflow/GuidedWorkflow';
 import { EmailSendStatus } from './utils/emailService';
-import { storage } from './utils/storage';
+import { EMPTY_SPREADSHEET_DATA, storage } from './utils/storage';
 import {
   fetchAuthStatus,
   fetchPersistedGoogleSheets,
@@ -47,21 +53,10 @@ import {
   syncedPayloadToSpreadsheetData,
 } from './utils/googleSheets';
 import { workspaceApi } from './utils/workspaceApi';
-import { useFirebase } from './components/FirebaseProvider';
-import {
-  convertQuotationAtomicallyInFirestore,
-  deleteInvoiceFromFirestore,
-  deleteQuotationFromFirestore,
-  saveCustomerToFirestore,
-  saveEmailLogToFirestore,
-  saveInvoiceToFirestore,
-  saveQuotationToFirestore,
-  saveWorkspaceSettingsToFirestore,
-  subscribeToUserWorkspace,
-} from './utils/firebaseSync';
 
 const VALID_TABS = new Set([
   'dashboard',
+  'customers',
   'workflow',
   'fields',
   'datasource',
@@ -140,15 +135,7 @@ export default function App() {
     storage.loadEmailLogs()
   );
 
-  // Firebase Auth & Cloud Firestore state
-  const {
-    firebaseUser,
-    isAuthReady,
-    markCloudSynced,
-    setCloudSyncState,
-  } = useFirebase();
-
-  // Multi-user Auth, Integrations & Onboarding state
+  // Google OAuth + Google Drive Workspace state
   const [authUser, setAuthUser] = useState<GoogleAccountUser | null>(null);
   const [diagnostics, setDiagnostics] = useState<IntegrationDiagnostics | null>(null);
   const [smtpConfig, setSmtpConfig] = useState<BackendSmtpConfig>(DEFAULT_SMTP_CONFIG);
@@ -156,23 +143,7 @@ export default function App() {
     () => !shouldSkipInitialAuthGate()
   );
   const [showOnboarding, setShowOnboarding] = useState<boolean>(false);
-
-  // Unified user identity: merges backend OAuth workspace user with active Firebase Auth user
-  const effectiveAuthUser: GoogleAccountUser | null = authUser
-    ? authUser
-    : firebaseUser
-      ? {
-          userId: firebaseUser.uid,
-          email: firebaseUser.email || '',
-          name: firebaseUser.displayName || firebaseUser.email || 'Google User',
-          picture: firebaseUser.photoURL || null,
-          driveConnected: false,
-          sheetsConnected: false,
-          gmailConnected: false,
-          smtpConfigured: false,
-          onboardingCompleted: true,
-        }
-      : null;
+  const activeUserIdRef = useRef<string | null>(null);
 
   // Cross-tab handoff state
   const [preselectedEmailRecordId, setPreselectedEmailRecordId] = useState<string | null>(null);
@@ -181,6 +152,32 @@ export default function App() {
   );
   const [incomingConvertedInvoice, setIncomingConvertedInvoice] =
     useState<ManualInvoiceData | null>(null);
+
+  const resetWorkspaceToCleanDefaults = useCallback(() => {
+    setCompany(defaultCompanySettings);
+    setFields(defaultFieldCatalog);
+    setTemplate(storage.loadTemplate());
+    setCalculationSettings(defaultCalculationSettings);
+    setSpreadsheetData(EMPTY_SPREADSHEET_DATA);
+    setGenerationHistory([]);
+    setQuotations([]);
+    setCustomers([]);
+    setEmailStatuses({});
+    setEmailLogs([]);
+    setSmtpConfig(DEFAULT_SMTP_CONFIG);
+    setShowOnboarding(false);
+    setPreselectedEmailRecordId(null);
+    setPreselectedEmailQuotationId(null);
+    setIncomingConvertedInvoice(null);
+  }, []);
+
+  const handleSignOutComplete = useCallback(() => {
+    storage.clearAllUserWorkspaceCaches();
+    storage.setActiveStorageUser(null);
+    activeUserIdRef.current = null;
+    setAuthUser(null);
+    resetWorkspaceToCleanDefaults();
+  }, [resetWorkspaceToCleanDefaults]);
 
   const setActiveTab = useCallback((tab: string) => {
     const target = VALID_TABS.has(tab) ? tab : 'dashboard';
@@ -207,15 +204,28 @@ export default function App() {
       setDiagnostics(status.diagnostics || null);
 
       if (status.authenticated && status.user) {
+        const nextUid = status.user.userId || status.user.email;
+        const switchedAccount =
+          activeUserIdRef.current !== null && activeUserIdRef.current !== nextUid;
+
+        if (switchedAccount) {
+          storage.clearAllUserWorkspaceCaches();
+          resetWorkspaceToCleanDefaults();
+        }
+
+        activeUserIdRef.current = nextUid;
+        storage.setActiveStorageUser(nextUid);
         setAuthUser(status.user);
         setShowAuthGate(false);
 
-        // Hydrate strictly isolated per-user cloud workspace
+        // Hydrate strictly isolated per-user workspace from Google Drive
         try {
           const ws = await workspaceApi.fetchWorkspace();
           if (ws.workspace?.companySettings) {
             setCompany(ws.workspace.companySettings);
             storage.saveCompanySettings(ws.workspace.companySettings);
+          } else {
+            setCompany(defaultCompanySettings);
           }
           if (ws.workspace?.template) {
             setTemplate(ws.workspace.template);
@@ -224,44 +234,54 @@ export default function App() {
           if (Array.isArray(ws.workspace?.fields) && ws.workspace.fields.length > 0) {
             setFields(ws.workspace.fields);
             storage.saveFields(ws.workspace.fields);
+          } else {
+            setFields(defaultFieldCatalog);
           }
           if (ws.workspace?.calculationSettings) {
             setCalculationSettings(ws.workspace.calculationSettings);
             storage.saveCalculationSettings(ws.workspace.calculationSettings);
+          } else {
+            setCalculationSettings(defaultCalculationSettings);
           }
-          setCustomers(ws.customers || []);
-          setQuotations(ws.quotations || []);
-          storage.saveQuotations(ws.quotations || []);
-          setGenerationHistory(ws.invoices || []);
-          storage.saveHistory(ws.invoices || []);
+          const remoteCustomers = ws.customers || [];
+          const remoteQuotations = ws.quotations || [];
+          const remoteInvoices = ws.invoices || [];
+          const remoteEmailLogs = ws.emailLogs || [];
+
+          setCustomers(remoteCustomers);
+          storage.saveCustomers(remoteCustomers);
+          setQuotations(remoteQuotations);
+          storage.saveQuotations(remoteQuotations);
+          setGenerationHistory(remoteInvoices);
+          storage.saveHistory(remoteInvoices);
           setSmtpConfig(ws.smtpConfig || DEFAULT_SMTP_CONFIG);
-          setEmailLogs(ws.emailLogs || []);
-          storage.saveEmailLogs(ws.emailLogs || []);
+          setEmailLogs(remoteEmailLogs);
+          storage.saveEmailLogs(remoteEmailLogs);
           setShowOnboarding(!ws.onboardingCompleted);
         } catch {
-          // Keep current state if workspace endpoint fails transiently
+          // Keep current state if Drive read fails transiently
         }
 
-        // Hydrate user's persisted Google Sheets
+        // Hydrate user's persisted Google Sheets metadata/data from Drive
         try {
           const res = await fetchPersistedGoogleSheets();
           if (res?.spreadsheet && res.spreadsheet.totalRows > 0) {
             const hydrated = syncedPayloadToSpreadsheetData(res.spreadsheet);
-            setSpreadsheetData((prev) => {
-              const isDefaultOrEmpty =
-                prev.fileName === sampleSpreadsheetData.fileName ||
-                prev.fileName === 'No file uploaded' ||
-                prev.fileName.toLowerCase().endsWith('.gsheet') ||
-                prev.worksheets.length === 0;
-              if (!isDefaultOrEmpty) return prev;
-              storage.saveSpreadsheetData(hydrated);
-              return hydrated;
-            });
+            setSpreadsheetData(hydrated);
+            storage.saveSpreadsheetData(hydrated);
+          } else if (switchedAccount) {
+            setSpreadsheetData(EMPTY_SPREADSHEET_DATA);
           }
         } catch {
           // Silent when no synced spreadsheet exists yet
         }
       } else {
+        if (activeUserIdRef.current !== null) {
+          storage.clearAllUserWorkspaceCaches();
+          storage.setActiveStorageUser(null);
+          activeUserIdRef.current = null;
+          resetWorkspaceToCleanDefaults();
+        }
         setAuthUser(null);
         setSmtpConfig(DEFAULT_SMTP_CONFIG);
         setShowOnboarding(false);
@@ -269,7 +289,7 @@ export default function App() {
     } catch {
       // Offline / local preview fallback
     }
-  }, []);
+  }, [resetWorkspaceToCleanDefaults]);
 
   useEffect(() => {
     void refreshAuthAndWorkspace();
@@ -290,106 +310,6 @@ export default function App() {
     }
   }, [refreshAuthAndWorkspace]);
 
-  // Real-time Cloud Firestore listeners (attached strictly after auth is ready & user is signed in)
-  useEffect(() => {
-    if (!isAuthReady || !firebaseUser) {
-      return;
-    }
-    setShowAuthGate(false);
-
-    const unsubscribe = subscribeToUserWorkspace(firebaseUser.uid, {
-      onWorkspaceSettings: (ws) => {
-        if (ws.companySettings) {
-          setCompany(ws.companySettings);
-          storage.saveCompanySettings(ws.companySettings);
-        }
-        if (ws.template) {
-          setTemplate(ws.template);
-          storage.saveTemplate(ws.template);
-        }
-        if (ws.calculationSettings) {
-          setCalculationSettings(ws.calculationSettings);
-          storage.saveCalculationSettings(ws.calculationSettings);
-        }
-        if (ws.fields && ws.fields.length > 0) {
-          setFields(ws.fields);
-          storage.saveFields(ws.fields);
-        }
-      },
-      onCustomers: (remoteCustomers) => {
-        if (remoteCustomers.length > 0) {
-          setCustomers(remoteCustomers);
-          storage.saveCustomers(remoteCustomers);
-        }
-      },
-      onQuotations: (remoteQuotations) => {
-        if (remoteQuotations.length > 0) {
-          setQuotations(remoteQuotations);
-          storage.saveQuotations(remoteQuotations);
-        }
-      },
-      onInvoices: (remoteInvoices) => {
-        if (remoteInvoices.length > 0) {
-          setGenerationHistory(remoteInvoices);
-          storage.saveHistory(remoteInvoices);
-        }
-      },
-      onEmailLogs: (remoteLogs) => {
-        if (remoteLogs.length > 0) {
-          setEmailLogs(remoteLogs);
-          storage.saveEmailLogs(remoteLogs);
-        }
-      },
-      onSyncActivity: () => {
-        markCloudSynced();
-      },
-      onError: () => {
-        setCloudSyncState('error');
-      },
-    });
-
-    return () => {
-      unsubscribe();
-    };
-  }, [isAuthReady, firebaseUser, markCloudSynced, setCloudSyncState]);
-
-  const handleSyncLocalWorkspaceToFirestore = useCallback(async () => {
-    if (!firebaseUser) {
-      throw new Error('Sign in with Google (Firebase) first to sync your workspace to Cloud Firestore.');
-    }
-    await saveWorkspaceSettingsToFirestore(
-      firebaseUser.uid,
-      company,
-      template,
-      calculationSettings,
-      fields
-    );
-    for (const customer of customers) {
-      await saveCustomerToFirestore(firebaseUser.uid, customer);
-    }
-    for (const quotation of quotations) {
-      await saveQuotationToFirestore(firebaseUser.uid, quotation);
-    }
-    for (const invoice of generationHistory) {
-      await saveInvoiceToFirestore(firebaseUser.uid, invoice);
-    }
-    for (const log of emailLogs) {
-      await saveEmailLogToFirestore(firebaseUser.uid, log);
-    }
-    markCloudSynced();
-  }, [
-    firebaseUser,
-    company,
-    template,
-    calculationSettings,
-    fields,
-    customers,
-    quotations,
-    generationHistory,
-    emailLogs,
-    markCloudSynced,
-  ]);
-
   const handleContinueLocalPreview = () => {
     try {
       window.sessionStorage.setItem('invoice_studio_local_preview', '1');
@@ -397,6 +317,42 @@ export default function App() {
       // Ignore storage error
     }
     setShowAuthGate(false);
+  };
+
+  const handleSaveCustomer = async (customer: CustomerRecord) => {
+    setCustomers((prev) => {
+      const filtered = prev.filter((c) => c.id !== customer.id);
+      const next = [customer, ...filtered];
+      storage.saveCustomers(next);
+      return next;
+    });
+    if (authUser?.userId) {
+      await workspaceApi.saveCustomer(customer);
+    }
+  };
+
+  const handleDeleteCustomer = async (customerId: string) => {
+    setCustomers((prev) => {
+      const next = prev.filter((c) => c.id !== customerId);
+      storage.saveCustomers(next);
+      return next;
+    });
+    if (authUser?.userId) {
+      await workspaceApi.deleteCustomer(customerId);
+    }
+  };
+
+  const handleSyncWorkspaceSnapshot = async () => {
+    return workspaceApi.syncDrive({
+      companySettings: company,
+      template,
+      fields,
+      calculationSettings,
+      customers,
+      quotations,
+      invoices: generationHistory,
+      emailLogs,
+    });
   };
 
   const handleUpdateEmailStatuses = (
@@ -413,13 +369,6 @@ export default function App() {
     setEmailLogs((prev) => {
       const next = typeof action === 'function' ? action(prev) : action;
       storage.saveEmailLogs(next);
-      if (firebaseUser) {
-        const prevIds = new Set(prev.map((l) => l.id));
-        const added = next.filter((l) => !prevIds.has(l.id));
-        for (const entry of added) {
-          void saveEmailLogToFirestore(firebaseUser.uid, entry).catch(() => {});
-        }
-      }
       return next;
     });
   };
@@ -428,18 +377,18 @@ export default function App() {
     setQuotations((prev) => {
       const next = typeof action === 'function' ? action(prev) : action;
       storage.saveQuotations(next);
-      if (firebaseUser) {
+      if (authUser?.userId) {
         const prevMap = new Map(prev.map((q) => [q.id, q]));
         const nextIds = new Set(next.map((q) => q.id));
         for (const q of next) {
           const old = prevMap.get(q.id);
           if ((!old || old.updatedAt !== q.updatedAt) && q.status !== 'Converted to Invoice') {
-            void saveQuotationToFirestore(firebaseUser.uid, q).catch(() => {});
+            void workspaceApi.saveQuotation(q).catch(() => {});
           }
         }
         for (const old of prev) {
           if (!nextIds.has(old.id) && old.status !== 'Converted to Invoice') {
-            void deleteQuotationFromFirestore(firebaseUser.uid, old.id).catch(() => {});
+            void workspaceApi.deleteQuotation(old.id).catch(() => {});
           }
         }
       }
@@ -465,15 +414,6 @@ export default function App() {
     storage.saveCalculationSettings(settings);
     if (authUser?.userId) {
       void workspaceApi.saveWorkspace({ calculationSettings: settings }).catch(() => {});
-    }
-    if (firebaseUser) {
-      void saveWorkspaceSettingsToFirestore(
-        firebaseUser.uid,
-        company,
-        template,
-        settings,
-        fields
-      ).catch(() => {});
     }
   };
 
@@ -509,15 +449,6 @@ export default function App() {
         })
         .catch(() => {});
     }
-    if (firebaseUser) {
-      void saveWorkspaceSettingsToFirestore(
-        firebaseUser.uid,
-        updatedCompany,
-        template,
-        calculationSettings,
-        nextFields || fields
-      ).catch(() => {});
-    }
   };
 
   const handleUpdateFields = (action: React.SetStateAction<InvoiceFieldConfig[]>) => {
@@ -526,15 +457,6 @@ export default function App() {
       storage.saveFields(next);
       if (authUser?.userId) {
         void workspaceApi.saveWorkspace({ fields: next }).catch(() => {});
-      }
-      if (firebaseUser) {
-        void saveWorkspaceSettingsToFirestore(
-          firebaseUser.uid,
-          company,
-          template,
-          calculationSettings,
-          next
-        ).catch(() => {});
       }
       return next;
     });
@@ -547,15 +469,6 @@ export default function App() {
       if (authUser?.userId) {
         void workspaceApi.saveWorkspace({ template: next }).catch(() => {});
       }
-      if (firebaseUser) {
-        void saveWorkspaceSettingsToFirestore(
-          firebaseUser.uid,
-          company,
-          next,
-          calculationSettings,
-          fields
-        ).catch(() => {});
-      }
       return next;
     });
   };
@@ -564,18 +477,18 @@ export default function App() {
     setGenerationHistory((prev) => {
       const next = typeof action === 'function' ? action(prev) : action;
       storage.saveHistory(next);
-      if (firebaseUser) {
+      if (authUser?.userId) {
         const prevMap = new Map(prev.map((r) => [r.id, r]));
         const nextIds = new Set(next.map((r) => r.id));
         for (const rec of next) {
           const old = prevMap.get(rec.id);
           if (!old || old.updatedAt !== rec.updatedAt || old.revisionNumber !== rec.revisionNumber) {
-            void saveInvoiceToFirestore(firebaseUser.uid, rec).catch(() => {});
+            void workspaceApi.saveInvoice(rec).catch(() => {});
           }
         }
         for (const old of prev) {
           if (!nextIds.has(old.id)) {
-            void deleteInvoiceFromFirestore(firebaseUser.uid, old.id).catch(() => {});
+            void workspaceApi.deleteInvoice(old.id).catch(() => {});
           }
         }
       }
@@ -586,9 +499,6 @@ export default function App() {
   const handlePersistSingleInvoice = (record: GenerationRecord) => {
     if (authUser?.userId) {
       void workspaceApi.saveInvoice(record).catch(() => {});
-    }
-    if (firebaseUser) {
-      void saveInvoiceToFirestore(firebaseUser.uid, record).catch(() => {});
     }
   };
 
@@ -627,13 +537,6 @@ export default function App() {
       storage.saveHistory(next);
       return next;
     });
-    if (firebaseUser) {
-      void convertQuotationAtomicallyInFirestore(
-        firebaseUser.uid,
-        updatedQuotation,
-        createdInvoice
-      ).catch(() => {});
-    }
     setIncomingConvertedInvoice(manualInvoiceData);
     setActiveTab('manual');
   };
@@ -647,7 +550,7 @@ export default function App() {
     0
   );
 
-  if (showAuthGate && !effectiveAuthUser) {
+  if (showAuthGate && !authUser) {
     return (
       <AuthGateScreen
         diagnostics={diagnostics}
@@ -665,7 +568,7 @@ export default function App() {
         activeDataSourceName={spreadsheetData.fileName}
         totalRecordsCount={totalRecordsCount}
         onStartGuidedWorkflow={() => handleStartGuidedWorkflow('source')}
-        authUser={effectiveAuthUser}
+        authUser={authUser}
         onOpenAuthGate={() => setShowAuthGate(true)}
       />
 
@@ -693,6 +596,14 @@ export default function App() {
             onStartGuidedWorkflow={handleStartGuidedWorkflow}
           />
         )}
+        {activeTab === 'customers' && (
+          <CustomersView
+            customers={customers}
+            onSaveCustomer={handleSaveCustomer}
+            onDeleteCustomer={handleDeleteCustomer}
+            isCloudConnected={Boolean(authUser?.driveConnected)}
+          />
+        )}
         {activeTab === 'manual' && (
           <ManualEntryView
             company={company}
@@ -716,7 +627,7 @@ export default function App() {
             quotations={quotations}
             setQuotations={handleUpdateQuotations}
             generationHistory={generationHistory}
-            authUser={effectiveAuthUser}
+            authUser={authUser}
             onConvertedToInvoice={handleConvertedToInvoice}
             onEmailQuotation={handleEmailQuotation}
             onNavigateTab={setActiveTab}
@@ -729,8 +640,9 @@ export default function App() {
             smtpConfig={smtpConfig}
             setSmtpConfig={setSmtpConfig}
             onRefreshAuthAndWorkspace={refreshAuthAndWorkspace}
+            onSignOutComplete={handleSignOutComplete}
+            onSyncWorkspaceSnapshot={handleSyncWorkspaceSnapshot}
             onNavigateTab={setActiveTab}
-            onSyncLocalToFirestore={handleSyncLocalWorkspaceToFirestore}
             localCounts={{
               quotations: quotations.length,
               invoices: generationHistory.length,
@@ -810,7 +722,7 @@ export default function App() {
             setEmailStatuses={handleUpdateEmailStatuses}
             emailLogs={emailLogs}
             setEmailLogs={handleUpdateEmailLogs}
-            authUser={effectiveAuthUser}
+            authUser={authUser}
             smtpConfig={smtpConfig}
             initialSelectedRecordId={preselectedEmailRecordId}
             initialSelectedQuotationId={preselectedEmailQuotationId}

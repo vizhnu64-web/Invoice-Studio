@@ -385,7 +385,7 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
     if (!authUser?.driveConnected) {
       setBanner({
         type: 'info',
-        text: 'Connect Google Drive in Google Integrations to save generated PDFs to your Drive.',
+        text: 'Connect Google Drive in Account & Integrations to save generated PDFs to your Drive.',
       });
       return;
     }

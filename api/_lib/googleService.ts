@@ -17,13 +17,9 @@ import {
   hasGmailSendScope,
   hasSheetsScope,
 } from './config.js';
-import { decryptSecret, encryptSecret, generateRandomId } from './crypto.js';
-import {
-  PersistedSpreadsheetRecord,
-  PersistenceStore,
-  StoredAppUser,
-  StoredOAuthConnection,
-} from './db.js';
+import { generateRandomId } from './crypto.js';
+import { GoogleDriveStore, PersistedSpreadsheetRecord } from './driveStore.js';
+import { EncryptedSessionData } from './http.js';
 import {
   buildSheetRange,
   computeSyncDiff,
@@ -113,7 +109,7 @@ export function mapGoogleApiError(err: any, fallbackMessage: string): HttpApiErr
     return new HttpApiError(
       401,
       'GOOGLE_REAUTH_REQUIRED',
-      'Google authorization expired or was revoked. Please reconnect your Google Account.',
+      'Google authorization expired or was revoked. Please sign in with Google again.',
       true
     );
   }
@@ -121,7 +117,7 @@ export function mapGoogleApiError(err: any, fallbackMessage: string): HttpApiErr
     return new HttpApiError(
       401,
       'GOOGLE_UNAUTHORIZED',
-      'Google authentication expired or is invalid. Please reconnect your Google Account.',
+      'Google authentication expired or is invalid. Please sign in with Google again.',
       true
     );
   }
@@ -129,7 +125,7 @@ export function mapGoogleApiError(err: any, fallbackMessage: string): HttpApiErr
     return new HttpApiError(
       403,
       'GOOGLE_PERMISSION_DENIED',
-      `Permission denied by Google API: ${apiMsg}. Ensure the required Google permission is granted and the resource is accessible to your signed-in account.`
+      `Permission denied by Google API: ${apiMsg}. Ensure the required Google permission is granted and the file is accessible to your signed-in account.`
     );
   }
   if (status === 404) {
@@ -208,7 +204,7 @@ export const defaultGoogleTransport: GoogleTransportAdapter = {
         throw new HttpApiError(
           401,
           'IDENTITY_VERIFICATION_FAILED',
-          'Google authentication succeeded but user identity could not be verified (missing email/sub scope).'
+          'Google authentication succeeded but user identity could not be verified.'
         );
       }
 
@@ -237,7 +233,7 @@ export const defaultGoogleTransport: GoogleTransportAdapter = {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       });
     } catch {
-      // Best-effort revocation; local session deletion always proceeds
+      // Best-effort revocation; local cookie clearing always proceeds
     }
   },
 
@@ -341,15 +337,12 @@ export function buildGoogleAuthorizeUrl(
 export async function completeOAuthCodeExchange(params: {
   code: string;
   redirectUri: string;
-  sessionId: string;
   feature?: GoogleOAuthFeature;
+  existingSession?: EncryptedSessionData | null;
   config: AppServerConfig;
-  store: PersistenceStore;
   transport?: GoogleTransportAdapter;
 }): Promise<{
-  userId: string;
-  appUser: StoredAppUser;
-  user: { userId: string; email: string; name: string | null; picture: string | null };
+  session: EncryptedSessionData;
   scopes: string[];
 }> {
   assertGoogleOAuthConfig(params.config);
@@ -374,26 +367,19 @@ export async function completeOAuthCodeExchange(params: {
     );
   }
 
-  // Upsert verified user account keyed strictly by Google Account ID (sub)
-  const appUser = await params.store.upsertAppUser({
-    userId: identity.sub,
-    email: identity.email,
-    name: identity.name,
-    picture: identity.picture,
-  });
-
-  const existingConn = await params.store.getOAuthConnection(identity.sub);
-  const existingScopes = existingConn ? existingConn.scopes.split(/\s+/).filter(Boolean) : [];
+  // Only merge existing scopes/refreshToken if the signed-in Google sub matches the existing session!
+  const isSameAccount = params.existingSession && params.existingSession.uid === identity.sub;
+  const existingScopes = isSameAccount
+    ? params.existingSession!.sc.split(/\s+/).filter(Boolean)
+    : [];
   const returnedScopes = (tokens.scope || getScopesForFeature(feature).join(' '))
     .split(/\s+/)
     .filter(Boolean);
 
-  // Merge previously granted scopes with newly granted scopes (incremental authorization)
   const mergedScopes = Array.from(
     new Set([...BASE_GOOGLE_SCOPES, ...existingScopes, ...returnedScopes])
   );
 
-  // Verify explicitly requested feature permission was actually granted
   if (feature === 'sheets' && !hasSheetsScope(returnedScopes) && !hasSheetsScope(mergedScopes)) {
     throw new HttpApiError(
       403,
@@ -416,110 +402,69 @@ export async function completeOAuthCodeExchange(params: {
     );
   }
 
-  const encryptedAccessToken = encryptSecret(tokens.access_token, params.config.tokenEncryptionKey);
-  const encryptedRefreshToken = tokens.refresh_token
-    ? encryptSecret(tokens.refresh_token, params.config.tokenEncryptionKey)
-    : existingConn?.encryptedRefreshToken || null;
+  const refreshToken = tokens.refresh_token || (isSameAccount ? params.existingSession!.rt : null);
+  const expiresAtMs = tokens.expiry_date || Date.now() + 3500 * 1000;
 
-  const expiresAtIso = tokens.expiry_date
-    ? new Date(tokens.expiry_date).toISOString()
-    : new Date(Date.now() + 3500 * 1000).toISOString();
-
-  await params.store.upsertOAuthConnection({
-    userId: identity.sub,
-    googleSub: identity.sub,
-    email: identity.email,
-    name: identity.name,
-    picture: identity.picture,
-    scopes: mergedScopes.join(' '),
-    encryptedRefreshToken,
-    encryptedAccessToken,
-    accessTokenExpiresAt: expiresAtIso,
-  });
-
-  // Create persistent server-side session binding sessionId -> verified userId
-  const sessionExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-  await params.store.createSession(params.sessionId, identity.sub, sessionExpiry);
-
-  return {
-    userId: identity.sub,
-    appUser,
-    user: {
-      userId: identity.sub,
-      email: identity.email,
-      name: identity.name,
-      picture: identity.picture,
-    },
-    scopes: mergedScopes,
+  const session: EncryptedSessionData = {
+    uid: identity.sub,
+    em: identity.email,
+    nm: identity.name,
+    pic: identity.picture,
+    sc: mergedScopes.join(' '),
+    rt: refreshToken,
+    at: tokens.access_token,
+    exp: expiresAtMs,
+    df: isSameAccount ? params.existingSession!.df || null : null,
+    cat: isSameAccount ? params.existingSession!.cat || new Date().toISOString() : new Date().toISOString(),
   };
+
+  return { session, scopes: mergedScopes };
 }
 
-export async function getValidAccessTokenForUser(params: {
-  userId: string;
+export async function ensureFreshAccessToken(params: {
+  session: EncryptedSessionData;
   requiredFeature?: 'drive' | 'sheets' | 'gmail';
   config: AppServerConfig;
-  store: PersistenceStore;
   transport?: GoogleTransportAdapter;
   forceRefresh?: boolean;
-}): Promise<{ accessToken: string; connection: StoredOAuthConnection }> {
+}): Promise<{ accessToken: string; session: EncryptedSessionData; refreshed: boolean }> {
   assertGoogleOAuthConfig(params.config);
   const transport = params.transport || defaultGoogleTransport;
+  const grantedScopes = params.session.sc.split(/\s+/).filter(Boolean);
 
-  const conn = await params.store.getOAuthConnection(params.userId);
-  if (!conn) {
-    throw new HttpApiError(
-      401,
-      'GOOGLE_NOT_CONNECTED',
-      'No Google account is connected for this user. Sign in with Google first.',
-      true
-    );
-  }
-
-  const grantedScopes = conn.scopes.split(/\s+/).filter(Boolean);
   if (params.requiredFeature === 'drive' && !hasDriveScope(grantedScopes)) {
     throw new HttpApiError(
       403,
       'DRIVE_SCOPE_REQUIRED',
-      'Google Drive storage is not authorized yet. Connect Google Drive in Google Integrations first.'
+      'Google Drive storage permission (drive.file) is required. Reconnect Google Drive in Account Settings.'
     );
   }
   if (params.requiredFeature === 'sheets' && !hasSheetsScope(grantedScopes)) {
     throw new HttpApiError(
       403,
       'SHEETS_SCOPE_REQUIRED',
-      'Google Sheets read permission is not authorized yet. Connect Google Sheets first.'
+      'Google Sheets read permission is not authorized yet. Click Connect Google Sheets first.'
     );
   }
   if (params.requiredFeature === 'gmail' && !hasGmailSendScope(grantedScopes)) {
     throw new HttpApiError(
       403,
       'GMAIL_SCOPE_REQUIRED',
-      'Gmail sending permission is not authorized yet. Enable Gmail Sending in Google Integrations or Email Settings.'
+      'Gmail sending permission is not authorized yet. Connect Gmail in Account & Email Settings.'
     );
   }
 
-  let currentAccessToken: string | null = null;
-  if (conn.encryptedAccessToken) {
-    try {
-      currentAccessToken = decryptSecret(conn.encryptedAccessToken, params.config.tokenEncryptionKey);
-    } catch {
-      currentAccessToken = null;
-    }
-  }
-
-  const expiresAtMs = conn.accessTokenExpiresAt ? Date.parse(conn.accessTokenExpiresAt) : 0;
   const needsRefresh =
     Boolean(params.forceRefresh) ||
-    !currentAccessToken ||
-    !expiresAtMs ||
-    expiresAtMs - Date.now() < 90 * 1000;
+    !params.session.at ||
+    !params.session.exp ||
+    params.session.exp - Date.now() < 90 * 1000;
 
-  if (!needsRefresh && currentAccessToken) {
-    return { accessToken: currentAccessToken, connection: conn };
+  if (!needsRefresh && params.session.at) {
+    return { accessToken: params.session.at, session: params.session, refreshed: false };
   }
 
-  if (!conn.encryptedRefreshToken) {
-    await params.store.deleteOAuthConnection(params.userId);
+  if (!params.session.rt) {
     throw new HttpApiError(
       401,
       'GOOGLE_REAUTH_REQUIRED',
@@ -528,142 +473,94 @@ export async function getValidAccessTokenForUser(params: {
     );
   }
 
-  let refreshToken: string;
-  try {
-    refreshToken = decryptSecret(conn.encryptedRefreshToken, params.config.tokenEncryptionKey);
-  } catch {
-    await params.store.deleteOAuthConnection(params.userId);
+  const refreshedTokens = await transport.refreshAccessToken({
+    refreshToken: params.session.rt,
+    config: params.config,
+  });
+
+  if (!refreshedTokens.access_token) {
     throw new HttpApiError(
       401,
-      'CREDENTIAL_DECRYPT_FAILED',
-      'Stored Google credential could not be decrypted with the current server key. Please reconnect your Google Account.',
+      'GOOGLE_REAUTH_REQUIRED',
+      'Google failed to issue a fresh access token. Please sign in with Google again.',
       true
     );
   }
 
-  try {
-    const refreshed = await transport.refreshAccessToken({
-      refreshToken,
-      config: params.config,
-    });
+  const updatedSession: EncryptedSessionData = {
+    ...params.session,
+    at: refreshedTokens.access_token,
+    rt: refreshedTokens.refresh_token || params.session.rt,
+    exp: refreshedTokens.expiry_date || Date.now() + 3500 * 1000,
+  };
 
-    if (!refreshed.access_token) {
-      throw new HttpApiError(
-        401,
-        'GOOGLE_REAUTH_REQUIRED',
-        'Google failed to issue a fresh access token. Please reconnect your Google Account.',
-        true
-      );
-    }
-
-    const updatedConn = await params.store.upsertOAuthConnection({
-      userId: conn.userId,
-      googleSub: conn.googleSub,
-      email: conn.email,
-      name: conn.name,
-      picture: conn.picture,
-      scopes: conn.scopes,
-      encryptedRefreshToken: refreshed.refresh_token
-        ? encryptSecret(refreshed.refresh_token, params.config.tokenEncryptionKey)
-        : conn.encryptedRefreshToken,
-      encryptedAccessToken: encryptSecret(refreshed.access_token, params.config.tokenEncryptionKey),
-      accessTokenExpiresAt: refreshed.expiry_date
-        ? new Date(refreshed.expiry_date).toISOString()
-        : new Date(Date.now() + 3500 * 1000).toISOString(),
-    });
-
-    return { accessToken: refreshed.access_token, connection: updatedConn };
-  } catch (err: any) {
-    if (err instanceof HttpApiError && err.requiresReauth) {
-      await params.store.deleteOAuthConnection(params.userId);
-    }
-    throw err;
-  }
+  return {
+    accessToken: refreshedTokens.access_token,
+    session: updatedSession,
+    refreshed: true,
+  };
 }
 
-export async function disconnectGoogleIntegration(params: {
-  userId: string;
-  sessionId?: string;
-  feature?: 'all' | 'drive' | 'sheets' | 'gmail';
-  config: AppServerConfig;
-  store: PersistenceStore;
-  transport?: GoogleTransportAdapter;
-}): Promise<{ disconnectedFeature: string; signedOut: boolean }> {
-  const feature = params.feature || 'all';
-  const transport = params.transport || defaultGoogleTransport;
-  const conn = await params.store.getOAuthConnection(params.userId);
-
-  if (feature !== 'all' && conn) {
-    const scopeList = conn.scopes.split(/\s+/).filter(Boolean);
-    const filtered = scopeList.filter((s) => {
-      if (feature === 'drive') return s !== GOOGLE_DRIVE_SCOPE && s !== 'https://www.googleapis.com/auth/drive';
-      if (feature === 'sheets')
-        return s !== GOOGLE_SHEETS_SCOPE && s !== 'https://www.googleapis.com/auth/spreadsheets';
-      if (feature === 'gmail')
-        return (
-          s !== GOOGLE_GMAIL_SEND_SCOPE &&
-          s !== 'https://mail.google.com/' &&
-          s !== 'https://www.googleapis.com/auth/gmail.compose'
-        );
-      return true;
-    });
-    await params.store.updateOAuthScopes(params.userId, filtered.join(' '));
-    if (feature === 'drive') {
-      await params.store.updateAppUserDriveState(params.userId, {
-        driveSyncStatus: 'disconnected',
-      });
-    }
-    return { disconnectedFeature: feature, signedOut: false };
-  }
-
-  // Full sign-out: revoke Google token best-effort and clear sessions/tokens while preserving user business records
-  if (conn && params.config.tokenEncryptionKey.length >= 16) {
-    const encryptedTarget = conn.encryptedRefreshToken || conn.encryptedAccessToken;
-    if (encryptedTarget) {
-      try {
-        const plain = decryptSecret(encryptedTarget, params.config.tokenEncryptionKey);
-        await transport.revokeToken(plain);
-      } catch {
-        // Proceed with local sign-out even if remote revoke fails
-      }
-    }
-  }
-
-  await params.store.deleteOAuthConnection(params.userId);
-  if (params.sessionId) {
-    await params.store.deleteSession(params.sessionId);
-  }
-  return { disconnectedFeature: 'all', signedOut: true };
-}
-
-export async function runWithUserTokenRetry<T>(
+export async function runWithSessionTokenRetry<T>(
   params: {
-    userId: string;
+    session: EncryptedSessionData;
     requiredFeature?: 'drive' | 'sheets' | 'gmail';
     config: AppServerConfig;
-    store: PersistenceStore;
     transport?: GoogleTransportAdapter;
+    onSessionUpdated?: (next: EncryptedSessionData) => void;
   },
-  fn: (accessToken: string, connection: StoredOAuthConnection) => Promise<T>
+  fn: (accessToken: string, session: EncryptedSessionData) => Promise<T>
 ): Promise<T> {
-  const { accessToken, connection } = await getValidAccessTokenForUser(params);
+  const first = await ensureFreshAccessToken(params);
+  if (first.refreshed) {
+    params.onSessionUpdated?.(first.session);
+  }
   try {
-    return await fn(accessToken, connection);
+    return await fn(first.accessToken, first.session);
   } catch (err: any) {
-    if (err instanceof HttpApiError && err.statusCode === 401) {
-      const refreshed = await getValidAccessTokenForUser({ ...params, forceRefresh: true });
-      return await fn(refreshed.accessToken, refreshed.connection);
+    if (err instanceof HttpApiError && err.statusCode === 401 && first.session.rt) {
+      const retry = await ensureFreshAccessToken({
+        ...params,
+        session: first.session,
+        forceRefresh: true,
+      });
+      params.onSessionUpdated?.(retry.session);
+      return await fn(retry.accessToken, retry.session);
     }
     throw err;
   }
+}
+
+export function stripFeatureScopeFromSession(
+  session: EncryptedSessionData,
+  feature: 'drive' | 'sheets' | 'gmail'
+): EncryptedSessionData {
+  const scopeList = session.sc.split(/\s+/).filter(Boolean);
+  const filtered = scopeList.filter((s) => {
+    if (feature === 'drive') {
+      return s !== GOOGLE_DRIVE_SCOPE && s !== 'https://www.googleapis.com/auth/drive';
+    }
+    if (feature === 'sheets') {
+      return s !== GOOGLE_SHEETS_SCOPE && s !== 'https://www.googleapis.com/auth/spreadsheets';
+    }
+    if (feature === 'gmail') {
+      return (
+        s !== GOOGLE_GMAIL_SEND_SCOPE &&
+        s !== 'https://mail.google.com/' &&
+        s !== 'https://www.googleapis.com/auth/gmail.compose'
+      );
+    }
+    return true;
+  });
+  return { ...session, sc: filtered.join(' ') };
 }
 
 export async function validateAndFetchSpreadsheetMetadata(params: {
-  userId: string;
+  session: EncryptedSessionData;
   spreadsheetUrl: string;
   config: AppServerConfig;
-  store: PersistenceStore;
   transport?: GoogleTransportAdapter;
+  onSessionUpdated?: (next: EncryptedSessionData) => void;
 }): Promise<{
   spreadsheetId: string;
   title: string;
@@ -672,13 +569,13 @@ export async function validateAndFetchSpreadsheetMetadata(params: {
   const transport = params.transport || defaultGoogleTransport;
   const spreadsheetId = extractSpreadsheetId(params.spreadsheetUrl);
 
-  const meta = await runWithUserTokenRetry(
+  const meta = await runWithSessionTokenRetry(
     {
-      userId: params.userId,
+      session: params.session,
       requiredFeature: 'sheets',
       config: params.config,
-      store: params.store,
       transport,
+      onSessionUpdated: params.onSessionUpdated,
     },
     (accessToken) =>
       transport.fetchSpreadsheetMetadata({
@@ -763,31 +660,38 @@ async function fetchAllSheetRows(params: {
 }
 
 export async function performSpreadsheetSync(params: {
-  userId: string;
+  session: EncryptedSessionData;
   spreadsheetUrl: string;
   sheetName?: string;
   range?: string;
   headerRowIndex?: number | 'auto';
   syncAllSheets?: boolean;
   config: AppServerConfig;
-  store: PersistenceStore;
+  driveStore: GoogleDriveStore | null;
   transport?: GoogleTransportAdapter;
+  onSessionUpdated?: (next: EncryptedSessionData) => void;
 }): Promise<PersistedSpreadsheetRecord> {
   const transport = params.transport || defaultGoogleTransport;
   const spreadsheetId = extractSpreadsheetId(params.spreadsheetUrl);
   const logId = `sync_${Date.now()}_${generateRandomId(6)}`;
 
+  let currentSession = params.session;
+  const handleSessionUpdate = (next: EncryptedSessionData) => {
+    currentSession = next;
+    params.onSessionUpdated?.(next);
+  };
+
   let spreadsheetTitle = '';
   const selectedSheetInput = (params.sheetName || '').trim();
 
   try {
-    const metadata = await runWithUserTokenRetry(
+    const metadata = await runWithSessionTokenRetry(
       {
-        userId: params.userId,
+        session: currentSession,
         requiredFeature: 'sheets',
         config: params.config,
-        store: params.store,
         transport,
+        onSessionUpdated: handleSessionUpdate,
       },
       (accessToken) =>
         transport.fetchSpreadsheetMetadata({
@@ -829,13 +733,13 @@ export async function performSpreadsheetSync(params: {
       const useCustomRange =
         !params.syncAllSheets || sheetMeta.title === selectedSheetInput ? params.range : undefined;
 
-      const { values, rangeUsed } = await runWithUserTokenRetry(
+      const { values, rangeUsed } = await runWithSessionTokenRetry(
         {
-          userId: params.userId,
+          session: currentSession,
           requiredFeature: 'sheets',
           config: params.config,
-          store: params.store,
           transport,
+          onSessionUpdated: handleSessionUpdate,
         },
         (accessToken) =>
           fetchAllSheetRows({
@@ -866,27 +770,25 @@ export async function performSpreadsheetSync(params: {
     if (totalValidRows === 0) {
       const errMsg =
         'Google Sheet was reached, but 0 valid data rows were found in the selected sheet/range. Check the selected worksheet tab, range, and header row.';
-      await params.store
-        .recordSyncFailureLog({
+      if (params.driveStore) {
+        await params.driveStore.recordSyncFailureLog({
           logId,
-          userId: params.userId,
           spreadsheetId,
           spreadsheetTitle,
           sheetName: sheetsToFetch[0]?.title || '',
           errorMessage: errMsg,
-        })
-        .catch(() => {});
+        });
+      }
       throw new HttpApiError(422, 'NO_ROWS_IMPORTED', errMsg);
     }
 
-    const existingHashes = await params.store.getRowHashesForSpreadsheet(
-      params.userId,
-      spreadsheetId
-    );
+    const existingHashes = params.driveStore
+      ? await params.driveStore.getRowHashesForSpreadsheet(spreadsheetId)
+      : new Map<string, string>();
 
     const incomingForDiff = syncedRowRecords.flatMap((group) =>
       group.records.map((rec) => ({
-        compositeKey: `${params.userId}::${spreadsheetId}::${group.sheetName}::${rec.rowKey}`,
+        compositeKey: `${params.session.uid}::${spreadsheetId}::${group.sheetName}::${rec.rowKey}`,
         rowHash: rec.rowHash,
       }))
     );
@@ -905,8 +807,29 @@ export async function performSpreadsheetSync(params: {
       worksheets[0]?.name ||
       '';
 
-    return await params.store.saveSyncedSpreadsheetTransaction({
-      userId: params.userId,
+    if (params.driveStore) {
+      return await params.driveStore.saveSyncedSpreadsheetTransaction({
+        spreadsheetId,
+        spreadsheetUrl: params.spreadsheetUrl,
+        title: metadata.title,
+        selectedSheetName: activeSheetName,
+        selectedRange: (params.range || '').trim(),
+        headerRowIndex:
+          typeof params.headerRowIndex === 'number' && params.headerRowIndex >= 0
+            ? params.headerRowIndex
+            : worksheets[0]?.headerRowIndex ?? 0,
+        sheetsMeta: metadata.sheets,
+        worksheets,
+        syncedRowRecords,
+        stats,
+        syncStatus,
+        logId,
+      });
+    }
+
+    return {
+      id: `${params.session.uid}::${spreadsheetId}`,
+      userId: params.session.uid,
       spreadsheetId,
       spreadsheetUrl: params.spreadsheetUrl,
       title: metadata.title,
@@ -918,36 +841,25 @@ export async function performSpreadsheetSync(params: {
           : worksheets[0]?.headerRowIndex ?? 0,
       sheetsMeta: metadata.sheets,
       worksheets,
-      syncedRowRecords,
-      stats,
-      syncStatus,
-      logId,
-    });
+      totalRows: totalValidRows,
+      lastSyncAt: new Date().toISOString(),
+      lastSyncStatus: syncStatus,
+      lastSyncStats: stats,
+    };
   } catch (err: any) {
-    if (err instanceof HttpApiError) {
-      await params.store
-        .recordSyncFailureLog({
-          logId,
-          userId: params.userId,
-          spreadsheetId,
-          spreadsheetTitle,
-          sheetName: selectedSheetInput,
-          errorMessage: err.message,
-        })
-        .catch(() => {});
-      throw err;
-    }
-    const wrapped = mapGoogleApiError(err, 'Google Sheets synchronization failed.');
-    await params.store
-      .recordSyncFailureLog({
+    const wrapped =
+      err instanceof HttpApiError
+        ? err
+        : mapGoogleApiError(err, 'Google Sheets synchronization failed.');
+    if (params.driveStore) {
+      await params.driveStore.recordSyncFailureLog({
         logId,
-        userId: params.userId,
         spreadsheetId,
         spreadsheetTitle,
         sheetName: selectedSheetInput,
         errorMessage: wrapped.message,
-      })
-      .catch(() => {});
+      });
+    }
     throw wrapped;
   }
 }

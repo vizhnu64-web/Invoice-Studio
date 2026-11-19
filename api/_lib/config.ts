@@ -9,19 +9,18 @@ export interface AppServerConfig {
   googleRedirectUri: string;
   sessionSecret: string;
   tokenEncryptionKey: string;
-  databaseUrl: string;
   appUrl: string;
   isProduction: boolean;
 }
 
 export interface IntegrationDiagnostics {
   googleOAuthConfigured: boolean;
-  databaseConfigured: boolean;
   encryptionConfigured: boolean;
   sessionConfigured: boolean;
   redirectUri: string;
   missingEnvVars: string[];
   readyForGoogleSync: boolean;
+  storageProvider: 'google-drive';
 }
 
 export type GoogleOAuthFeature = 'signin' | 'drive' | 'sheets' | 'gmail';
@@ -31,9 +30,12 @@ export const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 export const GOOGLE_SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly';
 export const GOOGLE_GMAIL_SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send';
 
-// Backwards-compatible constant for Sheets-specific checks
+// Default sign-in includes Drive app-folder storage so user data persists immediately in Google Drive
+export const SIGNIN_GOOGLE_SCOPES = [...BASE_GOOGLE_SCOPES, GOOGLE_DRIVE_SCOPE] as const;
+
 export const REQUIRED_GOOGLE_SCOPES = [
   ...BASE_GOOGLE_SCOPES,
+  GOOGLE_DRIVE_SCOPE,
   GOOGLE_SHEETS_SCOPE,
 ] as const;
 
@@ -41,7 +43,11 @@ export function getScopesForFeature(
   feature: GoogleOAuthFeature,
   existingScopes: string[] = []
 ): string[] {
-  const scopeSet = new Set<string>([...BASE_GOOGLE_SCOPES, ...existingScopes.filter(Boolean)]);
+  const scopeSet = new Set<string>([
+    ...BASE_GOOGLE_SCOPES,
+    GOOGLE_DRIVE_SCOPE,
+    ...existingScopes.filter(Boolean),
+  ]);
   if (feature === 'drive') {
     scopeSet.add(GOOGLE_DRIVE_SCOPE);
   } else if (feature === 'sheets') {
@@ -104,7 +110,6 @@ export function getServerConfig(requestOrigin?: string): AppServerConfig {
     googleRedirectUri,
     sessionSecret: (process.env.SESSION_SECRET || '').trim(),
     tokenEncryptionKey: (process.env.TOKEN_ENCRYPTION_KEY || '').trim(),
-    databaseUrl: (process.env.DATABASE_URL || '').trim(),
     appUrl,
     isProduction: process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL),
   };
@@ -118,21 +123,18 @@ export function getIntegrationDiagnostics(requestOrigin?: string): IntegrationDi
   if (!cfg.googleClientSecret) missingEnvVars.push('GOOGLE_CLIENT_SECRET');
   if (!cfg.sessionSecret) missingEnvVars.push('SESSION_SECRET');
   if (!cfg.tokenEncryptionKey) missingEnvVars.push('TOKEN_ENCRYPTION_KEY');
-  if (!cfg.databaseUrl) missingEnvVars.push('DATABASE_URL');
 
   const googleOAuthConfigured = Boolean(cfg.googleClientId && cfg.googleClientSecret);
-  const databaseConfigured = Boolean(cfg.databaseUrl);
   const encryptionConfigured = cfg.tokenEncryptionKey.length >= 16;
   const sessionConfigured = cfg.sessionSecret.length >= 16;
 
   return {
     googleOAuthConfigured,
-    databaseConfigured,
     encryptionConfigured,
     sessionConfigured,
     redirectUri: cfg.googleRedirectUri,
     missingEnvVars,
-    readyForGoogleSync:
-      googleOAuthConfigured && databaseConfigured && encryptionConfigured && sessionConfigured,
+    readyForGoogleSync: googleOAuthConfigured && encryptionConfigured && sessionConfigured,
+    storageProvider: 'google-drive',
   };
 }

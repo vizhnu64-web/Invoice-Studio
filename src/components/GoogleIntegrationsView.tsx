@@ -8,7 +8,6 @@ import {
   AlertCircle,
   CheckCircle2,
   Cloud,
-  Database,
   DownloadCloud,
   FolderTree,
   HardDrive,
@@ -16,9 +15,11 @@ import {
   LogOut,
   Mail,
   RefreshCw,
+  Send,
   Server,
   ShieldCheck,
   Table2,
+  Trash2,
   UserCheck,
 } from 'lucide-react';
 import { BackendSmtpConfig } from '../types';
@@ -27,7 +28,6 @@ import {
   IntegrationDiagnostics,
 } from '../utils/googleSheets';
 import { DriveStatusPayload, workspaceApi } from '../utils/workspaceApi';
-import { useFirebase } from './FirebaseProvider';
 
 interface GoogleIntegrationsViewProps {
   authUser: GoogleAccountUser | null;
@@ -35,8 +35,14 @@ interface GoogleIntegrationsViewProps {
   smtpConfig: BackendSmtpConfig;
   setSmtpConfig: React.Dispatch<React.SetStateAction<BackendSmtpConfig>>;
   onRefreshAuthAndWorkspace: () => Promise<void>;
+  onSignOutComplete: () => void;
+  onSyncWorkspaceSnapshot: () => Promise<{
+    filesSynced: number;
+    quotationsSynced: number;
+    invoicesSynced: number;
+    customersSynced: number;
+  }>;
   onNavigateTab: (tab: string) => void;
-  onSyncLocalToFirestore?: () => Promise<void>;
   localCounts?: {
     quotations: number;
     invoices: number;
@@ -45,15 +51,12 @@ interface GoogleIntegrationsViewProps {
   };
 }
 
-const STANDARD_DRIVE_FOLDERS = [
-  'App Data',
-  'Company Settings',
-  'Customers',
-  'Quotations',
-  'Invoices',
-  'Generated PDFs',
-  'Email Records',
-  'Backups',
+const DRIVE_SUBFOLDERS = [
+  { name: 'Application Data', detail: 'workspace-state.json, customers, quotations, invoices, smtp-config.enc.json' },
+  { name: 'Company Assets', detail: 'Logos, signatures, and brand files' },
+  { name: 'Generated PDFs', detail: 'Exported quotation & invoice PDFs' },
+  { name: 'Email Records', detail: 'email-logs.json delivery history' },
+  { name: 'Backups', detail: 'Timestamped full-workspace JSON snapshots' },
 ];
 
 export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
@@ -62,20 +65,11 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
   smtpConfig,
   setSmtpConfig,
   onRefreshAuthAndWorkspace,
+  onSignOutComplete,
+  onSyncWorkspaceSnapshot,
   onNavigateTab,
-  onSyncLocalToFirestore,
   localCounts,
 }) => {
-  const {
-    firebaseUser,
-    isSigningIn,
-    cloudSyncState,
-    lastCloudSyncAt,
-    projectId,
-    firestoreDatabaseId,
-    signInWithFirebaseGoogle,
-    signOutFirebase,
-  } = useFirebase();
   const [driveStatus, setDriveStatus] = useState<DriveStatusPayload | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [notice, setNotice] = useState<{
@@ -83,7 +77,12 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
     text: string;
   } | null>(null);
 
-  // SMTP form state (password is write-only, never hydrated or stored in localStorage)
+  // Gmail & SMTP test email inputs
+  const [gmailTestTo, setGmailTestTo] = useState(authUser?.email || '');
+  const [smtpTestTo, setSmtpTestTo] = useState(authUser?.email || smtpConfig.senderEmail || '');
+  const [confirmDeleteSmtp, setConfirmDeleteSmtp] = useState(false);
+
+  // SMTP form state (password is write-only, never prefilled or saved in browser storage)
   const [smtpHost, setSmtpHost] = useState(smtpConfig.host || '');
   const [smtpPort, setSmtpPort] = useState(String(smtpConfig.port || 587));
   const [smtpSecurity, setSmtpSecurity] = useState<'SSL' | 'STARTTLS' | 'NONE'>(
@@ -101,7 +100,17 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
     setSmtpUsername(smtpConfig.username || '');
     setSmtpSenderName(smtpConfig.senderName || '');
     setSmtpSenderEmail(smtpConfig.senderEmail || '');
+    if (smtpConfig.senderEmail && !smtpTestTo) {
+      setSmtpTestTo(smtpConfig.senderEmail);
+    }
   }, [smtpConfig]);
+
+  useEffect(() => {
+    if (authUser?.email) {
+      setGmailTestTo((prev) => prev || authUser.email);
+      setSmtpTestTo((prev) => prev || authUser.email);
+    }
+  }, [authUser?.email]);
 
   useEffect(() => {
     if (!authUser?.userId) {
@@ -129,11 +138,14 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
     }
   };
 
-  const handleConnectFeature = (feature: 'signin' | 'drive' | 'sheets' | 'gmail') =>
+  const handleConnectFeature = (
+    feature: 'signin' | 'drive' | 'sheets' | 'gmail',
+    preferRedirect: boolean = false
+  ) =>
     runAction(`connect_${feature}`, async () => {
-      await workspaceApi.connectGoogle(feature);
+      await workspaceApi.connectGoogle(feature, preferRedirect);
       await onRefreshAuthAndWorkspace();
-      if (feature === 'drive') {
+      if (feature === 'signin' || feature === 'drive') {
         const st = await workspaceApi.getDriveStatus().catch(() => null);
         if (st) setDriveStatus(st);
       }
@@ -141,7 +153,7 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
         type: 'success',
         text:
           feature === 'signin'
-            ? 'Signed in with your Google Account.'
+            ? 'Signed in with your Google Account and connected your Google Drive workspace.'
             : `Connected ${feature.toUpperCase()} permission cleanly.`,
       });
     });
@@ -149,25 +161,31 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
   const handleDisconnectFeature = (feature: 'all' | 'drive' | 'sheets' | 'gmail') =>
     runAction(`disconnect_${feature}`, async () => {
       await workspaceApi.disconnectGoogle(feature);
-      await onRefreshAuthAndWorkspace();
-      setNotice({
-        type: 'info',
-        text:
-          feature === 'all'
-            ? 'Signed out of your Google Account. Your saved business records remain safely stored.'
-            : `Disconnected ${feature.toUpperCase()} integration.`,
-      });
+      if (feature === 'all') {
+        setDriveStatus(null);
+        onSignOutComplete();
+        setNotice({
+          type: 'info',
+          text: 'Signed out cleanly and cleared local workspace cache. Your files remain safely stored in your Google Drive.',
+        });
+      } else {
+        await onRefreshAuthAndWorkspace();
+        setNotice({
+          type: 'info',
+          text: `Disconnected ${feature.toUpperCase()} permission.`,
+        });
+      }
     });
 
   const handleSyncDrive = () =>
     runAction('drive_sync', async () => {
-      const res = await workspaceApi.syncDrive();
+      const res = await onSyncWorkspaceSnapshot();
       const st = await workspaceApi.getDriveStatus().catch(() => null);
       if (st) setDriveStatus(st);
       await onRefreshAuthAndWorkspace();
       setNotice({
         type: 'success',
-        text: `Synced ${res.filesSynced} files to your Google Drive (${res.quotationsSynced} quotations, ${res.invoicesSynced} invoices, ${res.customersSynced} customers).`,
+        text: `Synced ${res.filesSynced} files to Google Drive (${res.customersSynced} customers, ${res.quotationsSynced} quotations, ${res.invoicesSynced} invoices).`,
       });
     });
 
@@ -186,7 +204,27 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
       await onRefreshAuthAndWorkspace();
       setNotice({
         type: 'success',
-        text: `Restored from Google Drive: ${res.quotationsRestored} quotations, ${res.invoicesRestored} invoices, ${res.customersRestored} customers (${res.conflictsResolved} newer remote records merged).`,
+        text: `Restored from Google Drive: ${res.customersRestored} customers, ${res.quotationsRestored} quotations, ${res.invoicesRestored} invoices.`,
+      });
+    });
+
+  const handleSendTestEmail = (method: 'gmail' | 'smtp') =>
+    runAction(`test_email_${method}`, async () => {
+      if (!authUser?.userId) {
+        throw new Error('Sign in with Google first to send a test email via the backend server.');
+      }
+      const targetEmail = (method === 'gmail' ? gmailTestTo : smtpTestTo).trim();
+      if (!targetEmail) {
+        throw new Error('Enter a recipient email address for the test email.');
+      }
+      const res = await workspaceApi.sendTestEmail({
+        method,
+        to: targetEmail,
+      });
+      await onRefreshAuthAndWorkspace();
+      setNotice({
+        type: 'success',
+        text: `Test email delivered via ${method.toUpperCase()} from ${res.senderEmail} to ${res.recipientEmail}.`,
       });
     });
 
@@ -195,7 +233,7 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
     void runAction('save_smtp', async () => {
       if (!authUser?.userId) {
         throw new Error(
-          'Sign in with Google first to store encrypted SMTP credentials securely on the backend database.'
+          'Sign in with Google first so your encrypted SMTP configuration can be saved to your private Google Drive.'
         );
       }
       const res = await workspaceApi.saveSmtpConfig({
@@ -209,18 +247,19 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
       });
       setSmtpConfig(res.smtpConfig);
       setSmtpPassword('');
+      setConfirmDeleteSmtp(false);
       await onRefreshAuthAndWorkspace();
       setNotice({
         type: 'success',
-        text: 'SMTP configuration saved with AES-256-GCM server-side password encryption.',
+        text: 'SMTP configuration encrypted with AES-256-GCM and saved to Invoice Studio/Application Data/smtp-config.enc.json.',
       });
     });
   };
 
-  const handleTestSmtp = () =>
+  const handleTestSmtpConnection = () =>
     runAction('test_smtp', async () => {
       if (!authUser?.userId) {
-        throw new Error('Sign in with Google first to test SMTP delivery via the backend server.');
+        throw new Error('Sign in with Google first to test your SMTP server connection.');
       }
       const res = await workspaceApi.testSmtpConnection({
         host: smtpHost,
@@ -232,201 +271,85 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
       setSmtpConfig((prev) => ({ ...prev, verifiedAt: res.verifiedAt }));
       setNotice({
         type: 'success',
-        text: `SMTP connection verified cleanly at ${new Date(res.verifiedAt).toLocaleTimeString()}.`,
+        text: `SMTP handshake verified cleanly at ${new Date(res.verifiedAt).toLocaleTimeString()}.`,
+      });
+    });
+
+  const handleDeleteSmtp = () =>
+    runAction('delete_smtp', async () => {
+      const res = await workspaceApi.deleteSmtpConfig();
+      setSmtpConfig(res.smtpConfig);
+      setSmtpHost('');
+      setSmtpPort('587');
+      setSmtpSecurity('STARTTLS');
+      setSmtpUsername('');
+      setSmtpPassword('');
+      setSmtpSenderName('');
+      setSmtpSenderEmail('');
+      setConfirmDeleteSmtp(false);
+      await onRefreshAuthAndWorkspace();
+      setNotice({
+        type: 'info',
+        text: 'Removed saved SMTP configuration from your Google Drive.',
       });
     });
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
       {/* Header */}
-      <div className="bg-white p-6 rounded-2xl border border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900 flex items-center space-x-2.5">
-            <Cloud className="w-7 h-7 text-indigo-600 shrink-0" />
-            <span>Firebase Cloud & Google Integrations</span>
+      <div className="bg-white p-6 rounded-2xl border border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-bold text-slate-900 flex items-start sm:items-center gap-2.5">
+            <Cloud className="w-6 h-6 text-indigo-600 shrink-0 mt-1 sm:mt-0" />
+            <span>Account, Google Drive &amp; Email Settings</span>
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            Sync your workspace in real time with Firebase Cloud Firestore, or connect Google Drive storage, Google Sheets import, Gmail delivery, and encrypted SMTP.
+            Manage Google OAuth sign-in, your private Google Drive storage folder, Google Sheets
+            import access, Gmail sending, and encrypted SMTP credentials.
           </p>
         </div>
 
-        <div className="flex items-center space-x-2 text-xs">
-          <span
-            className={`inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border font-semibold whitespace-nowrap ${
-              firebaseUser || authUser
-                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                : 'bg-slate-100 text-slate-600 border-slate-200'
-            }`}
-          >
-            <UserCheck className="w-4 h-4 shrink-0" />
-            <span>{firebaseUser?.email || authUser?.email || 'Local Preview Mode'}</span>
-          </span>
+        <div className="flex flex-col lg:items-end gap-1.5 text-xs shrink-0">
+          <div className="inline-flex items-center gap-1.5 font-semibold text-slate-800 whitespace-nowrap">
+            <UserCheck
+              className={`w-4 h-4 shrink-0 ${
+                authUser ? 'text-emerald-600' : 'text-slate-400'
+              }`}
+            />
+            <span className="font-mono">{authUser?.email || 'Local Workspace Mode'}</span>
+          </div>
+          {localCounts && (
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500 font-mono tabular-nums">
+              <span className="whitespace-nowrap">{localCounts.customers} customers</span>
+              <span aria-hidden="true">·</span>
+              <span className="whitespace-nowrap">{localCounts.quotations} quotations</span>
+              <span aria-hidden="true">·</span>
+              <span className="whitespace-nowrap">{localCounts.invoices} invoices</span>
+              <span aria-hidden="true">·</span>
+              <span className="whitespace-nowrap">{localCounts.emailLogs} email logs</span>
+            </div>
+          )}
         </div>
       </div>
-
-      {/* Firebase Authentication & Cloud Firestore Card */}
-      <section className="bg-white p-6 rounded-2xl border border-indigo-200 shadow-sm space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
-          <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-600 border border-amber-200 flex items-center justify-center shrink-0">
-              <Database className="w-5 h-5" />
-            </div>
-            <div>
-              <h2 className="text-sm font-bold text-slate-900">
-                Firebase Authentication & Cloud Firestore Persistence
-              </h2>
-              <p className="text-[11px] text-slate-500">
-                Project <span className="font-mono font-semibold text-slate-700">{projectId}</span> • Real-time owner-isolated Firestore sync
-              </p>
-            </div>
-          </div>
-
-          <span
-            className={`px-2.5 py-1 rounded-md text-[11px] font-bold border whitespace-nowrap shrink-0 w-fit ${
-              firebaseUser
-                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                : 'bg-slate-100 text-slate-600 border-slate-200'
-            }`}
-          >
-            {firebaseUser
-              ? cloudSyncState === 'synced'
-                ? 'Connected & Synced'
-                : cloudSyncState === 'error'
-                  ? 'Sync Attention Needed'
-                  : 'Syncing...'
-              : 'Not Signed In'}
-          </span>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-center">
-          <div className="lg:col-span-7 space-y-2 text-xs text-slate-600">
-            {firebaseUser ? (
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
-                <p className="font-bold text-slate-900">
-                  {firebaseUser.displayName || 'Google Account'} ({firebaseUser.email})
-                </p>
-                <p className="text-[11px] text-slate-500 font-mono">
-                  UID: {firebaseUser.uid} • DB: {firestoreDatabaseId}
-                </p>
-                <p className="text-[11px] text-emerald-700">
-                  {lastCloudSyncAt
-                    ? `Last real-time sync: ${new Date(lastCloudSyncAt).toLocaleString()}`
-                    : 'Listening for real-time updates across devices.'}
-                </p>
-              </div>
-            ) : (
-              <p>
-                Sign in with your Google account via Firebase Authentication to automatically sync your company settings, templates, customers, quotations, invoices, and email logs to Cloud Firestore with strict per-user security rules.
-              </p>
-            )}
-
-            {localCounts && (
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
-                <div className="px-3 py-2 rounded-lg bg-slate-50 border border-slate-200">
-                  <p className="text-[10px] uppercase font-bold text-slate-400">Quotations</p>
-                  <p className="text-sm font-bold text-slate-900 font-mono">{localCounts.quotations}</p>
-                </div>
-                <div className="px-3 py-2 rounded-lg bg-slate-50 border border-slate-200">
-                  <p className="text-[10px] uppercase font-bold text-slate-400">Invoices</p>
-                  <p className="text-sm font-bold text-slate-900 font-mono">{localCounts.invoices}</p>
-                </div>
-                <div className="px-3 py-2 rounded-lg bg-slate-50 border border-slate-200">
-                  <p className="text-[10px] uppercase font-bold text-slate-400">Customers</p>
-                  <p className="text-sm font-bold text-slate-900 font-mono">{localCounts.customers}</p>
-                </div>
-                <div className="px-3 py-2 rounded-lg bg-slate-50 border border-slate-200">
-                  <p className="text-[10px] uppercase font-bold text-slate-400">Email Logs</p>
-                  <p className="text-sm font-bold text-slate-900 font-mono">{localCounts.emailLogs}</p>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="lg:col-span-5 flex flex-wrap lg:justify-end gap-2">
-            {!firebaseUser ? (
-              <button
-                type="button"
-                disabled={busyAction !== null || isSigningIn}
-                onClick={() =>
-                  void runAction('firebase_signin', async () => {
-                    await signInWithFirebaseGoogle();
-                    setNotice({
-                      type: 'success',
-                      text: 'Signed in with Google via Firebase. Real-time Firestore cloud sync is active.',
-                    });
-                  })
-                }
-                className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold inline-flex items-center space-x-2 cursor-pointer"
-              >
-                <ShieldCheck className="w-4 h-4" />
-                <span>
-                  {busyAction === 'firebase_signin' || isSigningIn
-                    ? 'Signing in...'
-                    : 'Sign in with Google (Firebase)'}
-                </span>
-              </button>
-            ) : (
-              <>
-                {onSyncLocalToFirestore && (
-                  <button
-                    type="button"
-                    disabled={busyAction !== null}
-                    onClick={() =>
-                      void runAction('firebase_push', async () => {
-                        await onSyncLocalToFirestore();
-                        setNotice({
-                          type: 'success',
-                          text: 'Synced workspace settings, customers, quotations, invoices, and email logs to Cloud Firestore.',
-                        });
-                      })
-                    }
-                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold inline-flex items-center space-x-1.5 cursor-pointer"
-                  >
-                    <RefreshCw
-                      className={`w-3.5 h-3.5 ${busyAction === 'firebase_push' ? 'animate-spin' : ''}`}
-                    />
-                    <span>Sync Workspace to Firestore</span>
-                  </button>
-                )}
-                <button
-                  type="button"
-                  disabled={busyAction !== null}
-                  onClick={() =>
-                    void runAction('firebase_signout', async () => {
-                      await signOutFirebase();
-                      setNotice({
-                        type: 'info',
-                        text: 'Signed out of Firebase Authentication.',
-                      });
-                    })
-                  }
-                  className="px-4 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold inline-flex items-center space-x-1.5 cursor-pointer"
-                >
-                  <LogOut className="w-3.5 h-3.5" />
-                  <span>Sign Out</span>
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-      </section>
 
       {/* Environment Diagnostics Notice (only when server env vars are missing) */}
       {diagnostics && !diagnostics.readyForGoogleSync && (
         <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1.5">
-          <div className="flex items-center space-x-2 font-bold">
-            <Database className="w-4 h-4 text-amber-600 shrink-0" />
-            <span>Optional Vercel Server OAuth Credentials Not Provisioned in This Preview Runtime</span>
+          <div className="flex items-center gap-2 font-bold">
+            <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>Google OAuth Environment Variables Needed for Live Cloud Connections</span>
           </div>
           <p className="text-amber-800">
-            Firebase Authentication & Cloud Firestore above are active immediately. For optional server-side Google Drive, Sheets, and Gmail/SMTP APIs on Vercel, configure:{' '}
+            Missing server environment variable(s):{' '}
             <span className="font-mono font-semibold">
               {diagnostics.missingEnvVars.join(', ')}
             </span>
-            .
+            . Set these in your Vercel Project Settings (or local <span className="font-mono">.env</span>)
+            to enable live Google Sign-In, Drive storage, Sheets import, Gmail delivery, and
+            encrypted SMTP persistence.
           </p>
           <p className="text-[11px] text-amber-700 font-mono">
-            Authorized Callback URI: {diagnostics.redirectUri}
+            Authorized OAuth Redirect URI: {diagnostics.redirectUri}
           </p>
         </div>
       )}
@@ -434,7 +357,7 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
       {notice && (
         <div
           role="status"
-          className={`p-4 rounded-xl border text-xs font-medium flex items-center space-x-2 ${
+          className={`p-4 rounded-xl border text-xs font-medium flex items-center gap-2 ${
             notice.type === 'success'
               ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
               : notice.type === 'error'
@@ -451,28 +374,26 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
         </div>
       )}
 
-      {/* 4 Google Workspace Cards */}
+      {/* 4 Core Google Integration Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* 1. Google Account */}
         <section className="bg-white p-6 rounded-2xl border border-slate-200 flex flex-col justify-between space-y-4">
           <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
                   <ShieldCheck className="w-5 h-5" />
                 </div>
                 <div>
                   <h2 className="text-sm font-bold text-slate-900">1. Google Account</h2>
                   <p className="text-[11px] text-slate-500">
-                    Scopes: openid, email, profile (Strict per-user data isolation)
+                    OAuth 2.0 encrypted HttpOnly session · Strict per-user isolation
                   </p>
                 </div>
               </div>
               <span
-                className={`px-2.5 py-1 rounded-md text-[11px] font-bold border whitespace-nowrap shrink-0 ${
-                  authUser
-                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                    : 'bg-slate-100 text-slate-600 border-slate-200'
+                className={`text-xs font-bold whitespace-nowrap shrink-0 ${
+                  authUser ? 'text-emerald-700' : 'text-slate-500'
                 }`}
               >
                 {authUser ? 'Signed In' : 'Not Signed In'}
@@ -480,39 +401,51 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
             </div>
 
             {authUser ? (
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1">
-                <p className="font-bold text-slate-900">{authUser.name || 'Google User'}</p>
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1">
+                <p className="font-bold text-slate-900">{authUser.name || 'Google Account'}</p>
                 <p className="font-mono text-slate-600">{authUser.email}</p>
                 <p className="text-[11px] text-slate-500">
-                  Verified Google ID isolates your quotations, invoices, settings, and SMTP config from all other users.
+                  All records are stored strictly in this user&apos;s personal Google Drive. Signing
+                  out immediately clears local browser state and session cookies.
                 </p>
               </div>
             ) : (
-              <p className="text-xs text-slate-600">
-                Sign in with your own Gmail or Google Workspace account to store and retrieve your workspace securely across devices.
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Sign in with your Google Account to persist customers, quotations, invoices, PDFs,
+                and settings directly in your own Google Drive across sessions and devices.
               </p>
             )}
           </div>
 
-          <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
+          <div className="flex flex-wrap gap-2 pt-3 border-t border-slate-100">
             <button
               type="button"
               disabled={busyAction !== null}
-              onClick={() => void handleConnectFeature('signin')}
+              onClick={() => void handleConnectFeature('signin', false)}
               className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold cursor-pointer"
             >
               {busyAction === 'connect_signin'
                 ? 'Connecting...'
                 : authUser
                   ? 'Switch Google Account'
-                  : 'Continue with Google'}
+                  : 'Sign in with Google'}
             </button>
+            {!authUser && (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => void handleConnectFeature('signin', true)}
+                className="px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold cursor-pointer"
+              >
+                Redirect Sign-In
+              </button>
+            )}
             {authUser && (
               <button
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleDisconnectFeature('all')}
-                className="px-4 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold inline-flex items-center space-x-1.5 cursor-pointer"
+                className="px-4 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
               >
                 <LogOut className="w-3.5 h-3.5" />
                 <span>Sign Out</span>
@@ -521,55 +454,56 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
           </div>
         </section>
 
-        {/* 2. Google Drive Storage */}
+        {/* 2. Google Drive Storage (Sole Persistent Storage) */}
         <section className="bg-white p-6 rounded-2xl border border-slate-200 flex flex-col justify-between space-y-4">
           <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0">
                   <HardDrive className="w-5 h-5" />
                 </div>
                 <div>
                   <h2 className="text-sm font-bold text-slate-900">2. Google Drive Storage</h2>
                   <p className="text-[11px] text-slate-500">
-                    Scope: drive.file (Only files created by Invoice Studio)
+                    Scope: drive.file · Sole persistent storage for your workspace
                   </p>
                 </div>
               </div>
               <span
-                className={`px-2.5 py-1 rounded-md text-[11px] font-bold border whitespace-nowrap shrink-0 ${
-                  authUser?.driveConnected
-                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                    : 'bg-slate-100 text-slate-600 border-slate-200'
+                className={`text-xs font-bold whitespace-nowrap shrink-0 ${
+                  authUser?.driveConnected ? 'text-emerald-700' : 'text-slate-500'
                 }`}
               >
                 {authUser?.driveConnected ? 'Connected' : 'Not Connected'}
               </span>
             </div>
 
-            <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="font-bold text-slate-800 inline-flex items-center space-x-1.5">
-                  <FolderTree className="w-3.5 h-3.5 text-emerald-600" />
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-bold text-slate-800 inline-flex items-center gap-1.5 font-mono">
+                  <FolderTree className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                   <span>Invoice Studio/</span>
                 </span>
-                <span className="text-[11px] text-slate-500 font-mono">
+                <span className="text-[11px] text-slate-500 font-mono tabular-nums">
                   {driveStatus?.lastSyncAt
                     ? `Synced ${new Date(driveStatus.lastSyncAt).toLocaleString()}`
-                    : 'Not synced yet'}
+                    : 'Ready to sync'}
                 </span>
               </div>
-              <div className="grid grid-cols-2 gap-1 text-[11px] text-slate-600 font-mono">
-                {STANDARD_DRIVE_FOLDERS.map((folder) => (
-                  <span key={folder} className="truncate">
-                    └ {folder}/
-                  </span>
+              <ul className="space-y-1 text-[11px] text-slate-600">
+                {DRIVE_SUBFOLDERS.map((folder) => (
+                  <li key={folder.name} className="flex items-baseline justify-between gap-2">
+                    <span className="font-mono font-semibold text-slate-800 shrink-0">
+                      └ {folder.name}/
+                    </span>
+                    <span className="text-slate-500 truncate text-right">{folder.detail}</span>
+                  </li>
                 ))}
-              </div>
+              </ul>
             </div>
           </div>
 
-          <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
+          <div className="flex flex-wrap gap-2 pt-3 border-t border-slate-100">
             {!authUser?.driveConnected ? (
               <button
                 type="button"
@@ -585,9 +519,11 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
                   type="button"
                   disabled={busyAction !== null}
                   onClick={() => void handleSyncDrive()}
-                  className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold inline-flex items-center space-x-1.5 cursor-pointer"
+                  className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${busyAction === 'drive_sync' ? 'animate-spin' : ''}`} />
+                  <RefreshCw
+                    className={`w-3.5 h-3.5 ${busyAction === 'drive_sync' ? 'animate-spin' : ''}`}
+                  />
                   <span>Sync Now</span>
                 </button>
                 <button
@@ -596,13 +532,13 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
                   onClick={() => void handleBackupDrive()}
                   className="px-3 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold cursor-pointer"
                 >
-                  Backup Now
+                  Create Backup
                 </button>
                 <button
                   type="button"
                   disabled={busyAction !== null}
                   onClick={() => void handleRestoreDrive()}
-                  className="px-3 py-2 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 text-xs font-bold inline-flex items-center space-x-1 cursor-pointer"
+                  className="px-3 py-2 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
                 >
                   <DownloadCloud className="w-3.5 h-3.5" />
                   <span>Restore</span>
@@ -620,37 +556,36 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
           </div>
         </section>
 
-        {/* 3. Google Sheets */}
+        {/* 3. Google Sheets Import */}
         <section className="bg-white p-6 rounded-2xl border border-slate-200 flex flex-col justify-between space-y-4">
           <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <div className="w-10 h-10 rounded-xl bg-cyan-50 text-cyan-700 flex items-center justify-center">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-cyan-50 text-cyan-700 flex items-center justify-center shrink-0">
                   <Table2 className="w-5 h-5" />
                 </div>
                 <div>
-                  <h2 className="text-sm font-bold text-slate-900">3. Google Sheets Sync</h2>
+                  <h2 className="text-sm font-bold text-slate-900">3. Google Sheets Import</h2>
                   <p className="text-[11px] text-slate-500">
-                    Scope: spreadsheets.readonly (Private sheets owned/shared with you)
+                    Scope: spreadsheets.readonly · Read-only pasted URL import
                   </p>
                 </div>
               </div>
               <span
-                className={`px-2.5 py-1 rounded-md text-[11px] font-bold border whitespace-nowrap shrink-0 ${
-                  authUser?.sheetsConnected
-                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                    : 'bg-slate-100 text-slate-600 border-slate-200'
+                className={`text-xs font-bold whitespace-nowrap shrink-0 ${
+                  authUser?.sheetsConnected ? 'text-emerald-700' : 'text-slate-500'
                 }`}
               >
                 {authUser?.sheetsConnected ? 'Connected' : 'Not Connected'}
               </span>
             </div>
-            <p className="text-xs text-slate-600">
-              Import and synchronize your own spreadsheets into Invoice Studio. Synced records are stored strictly under your verified Google Account ID.
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Grant read-only Sheets access to validate tabs, auto-detect header rows, and import
+              private spreadsheets directly from any pasted Google Sheets URL.
             </p>
           </div>
 
-          <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
+          <div className="flex flex-wrap gap-2 pt-3 border-t border-slate-100">
             {!authUser?.sheetsConnected ? (
               <button
                 type="button"
@@ -682,39 +617,62 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
           </div>
         </section>
 
-        {/* 4. Gmail Delivery */}
+        {/* 4. Email Method A — Gmail API */}
         <section className="bg-white p-6 rounded-2xl border border-slate-200 flex flex-col justify-between space-y-4">
           <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-700 flex items-center justify-center">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-700 flex items-center justify-center shrink-0">
                   <Mail className="w-5 h-5" />
                 </div>
                 <div>
-                  <h2 className="text-sm font-bold text-slate-900">4. Gmail Sending</h2>
+                  <h2 className="text-sm font-bold text-slate-900">4. Gmail Sending (Method A)</h2>
                   <p className="text-[11px] text-slate-500">
-                    Scope: gmail.send (Send PDF quotations & invoices from your Gmail)
+                    Scope: gmail.send · Sends invoices &amp; quotations from your Gmail
                   </p>
                 </div>
               </div>
               <span
-                className={`px-2.5 py-1 rounded-md text-[11px] font-bold border whitespace-nowrap shrink-0 ${
-                  authUser?.gmailConnected
-                    ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                    : 'bg-slate-100 text-slate-600 border-slate-200'
+                className={`text-xs font-bold whitespace-nowrap shrink-0 ${
+                  authUser?.gmailConnected ? 'text-emerald-700' : 'text-slate-500'
                 }`}
               >
-                {authUser?.gmailConnected ? 'Enabled' : 'Not Connected'}
+                {authUser?.gmailConnected ? 'Connected' : 'Not Connected'}
               </span>
             </div>
-            <p className="text-xs text-slate-600">
+
+            <p className="text-xs text-slate-600 leading-relaxed">
               {authUser?.gmailConnected
-                ? `Emails sent via Gmail will be delivered directly from ${authUser.email} with attached PDF documents.`
-                : 'Enable incremental gmail.send permission to send quotations and invoices directly through your connected Gmail address.'}
+                ? `Connected Gmail sender: ${authUser.email}. Emails include your generated PDF attachments and are logged in Invoice Studio/Email Records.`
+                : 'Enable Gmail sending permission to dispatch quotations and invoices directly from your connected Gmail account.'}
             </p>
+
+            {authUser?.gmailConnected && (
+              <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                <input
+                  type="email"
+                  aria-label="Gmail test recipient email"
+                  placeholder="Recipient for Gmail test email"
+                  value={gmailTestTo}
+                  onChange={(e) => setGmailTestTo(e.target.value)}
+                  className="flex-1 px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 text-xs font-mono"
+                />
+                <button
+                  type="button"
+                  disabled={busyAction !== null || !gmailTestTo.trim()}
+                  onClick={() => void handleSendTestEmail('gmail')}
+                  className="px-3.5 py-2 rounded-lg border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-50 text-indigo-800 text-xs font-bold inline-flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>
+                    {busyAction === 'test_email_gmail' ? 'Sending...' : 'Send Test Email'}
+                  </span>
+                </button>
+              </div>
+            )}
           </div>
 
-          <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
+          <div className="flex flex-wrap gap-2 pt-3 border-t border-slate-100">
             {!authUser?.gmailConnected ? (
               <button
                 type="button"
@@ -722,7 +680,7 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
                 onClick={() => void handleConnectFeature('gmail')}
                 className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white text-xs font-bold cursor-pointer"
               >
-                {busyAction === 'connect_gmail' ? 'Authorizing...' : 'Enable Gmail Sending'}
+                {busyAction === 'connect_gmail' ? 'Authorizing...' : 'Connect Gmail Sending'}
               </button>
             ) : (
               <>
@@ -747,33 +705,33 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
         </section>
       </div>
 
-      {/* 5. Encrypted Backend SMTP Account Card */}
+      {/* 5. Email Method B — Encrypted User SMTP Account */}
       <section className="bg-white p-6 rounded-2xl border border-slate-200 space-y-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
-          <div className="flex items-center space-x-2.5">
-            <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center">
+          <div className="flex items-center gap-2.5">
+            <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
               <Server className="w-5 h-5" />
             </div>
             <div>
               <h2 className="text-sm font-bold text-slate-900">
-                5. Company / User SMTP Email Account
+                5. SMTP Email Configuration (Method B)
               </h2>
               <p className="text-[11px] text-slate-500">
-                Credentials are encrypted at rest with AES-256-GCM on the server and never stored in browser storage.
+                Encrypted with AES-256-GCM on the server and saved in your private Google Drive (
+                <span className="font-mono">smtp-config.enc.json</span>). Passwords are never
+                returned to the browser.
               </p>
             </div>
           </div>
 
           <span
-            className={`px-2.5 py-1 rounded-md text-[11px] font-bold border w-fit ${
-              smtpConfig.configured
-                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                : 'bg-slate-100 text-slate-600 border-slate-200'
+            className={`text-xs font-bold whitespace-nowrap shrink-0 ${
+              smtpConfig.configured ? 'text-emerald-700' : 'text-slate-500'
             }`}
           >
             {smtpConfig.configured
               ? smtpConfig.verifiedAt
-                ? 'Configured & Verified'
+                ? 'Configured · Verified'
                 : 'Configured'
               : 'Not Configured'}
           </span>
@@ -803,7 +761,7 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
               type="number"
               value={smtpPort}
               onChange={(e) => setSmtpPort(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono"
+              className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono tabular-nums"
             />
           </div>
 
@@ -851,7 +809,7 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
                 autoComplete="new-password"
                 placeholder={
                   smtpConfig.hasPassword
-                    ? '•••••••• (saved encrypted — enter to replace)'
+                    ? 'Saved encrypted — enter to replace'
                     : 'Enter SMTP password'
                 }
                 value={smtpPassword}
@@ -889,24 +847,85 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
             />
           </div>
 
-          <div className="flex items-end space-x-2">
+          <div className="flex items-end gap-2">
             <button
               type="submit"
               disabled={busyAction !== null}
-              className="flex-1 py-2 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold cursor-pointer"
+              className="flex-1 py-2 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold cursor-pointer whitespace-nowrap"
             >
               {busyAction === 'save_smtp' ? 'Saving...' : 'Save SMTP'}
             </button>
             <button
               type="button"
               disabled={busyAction !== null}
-              onClick={() => void handleTestSmtp()}
-              className="py-2 px-3.5 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 font-bold cursor-pointer"
+              onClick={() => void handleTestSmtpConnection()}
+              className="py-2 px-3.5 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 font-bold cursor-pointer whitespace-nowrap"
             >
-              {busyAction === 'test_smtp' ? 'Testing...' : 'Test'}
+              {busyAction === 'test_smtp' ? 'Testing...' : 'Test Connection'}
             </button>
           </div>
         </form>
+
+        {/* Send Test Email via SMTP & Delete SMTP Controls */}
+        <div className="pt-4 border-t border-slate-100 flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 flex-1 max-w-xl">
+            <label htmlFor="smtp-test-recipient" className="font-semibold text-slate-700 whitespace-nowrap">
+              Send SMTP Test Email:
+            </label>
+            <input
+              id="smtp-test-recipient"
+              type="email"
+              placeholder="recipient@example.com"
+              value={smtpTestTo}
+              onChange={(e) => setSmtpTestTo(e.target.value)}
+              className="flex-1 px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono"
+            />
+            <button
+              type="button"
+              disabled={busyAction !== null || !smtpConfig.configured || !smtpTestTo.trim()}
+              onClick={() => void handleSendTestEmail('smtp')}
+              className="px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold inline-flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+            >
+              <Send className="w-3.5 h-3.5" />
+              <span>{busyAction === 'test_email_smtp' ? 'Sending...' : 'Send Test Email'}</span>
+            </button>
+          </div>
+
+          {smtpConfig.configured && (
+            <div className="flex items-center gap-2">
+              {!confirmDeleteSmtp ? (
+                <button
+                  type="button"
+                  disabled={busyAction !== null}
+                  onClick={() => setConfirmDeleteSmtp(true)}
+                  className="px-3.5 py-2 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Delete SMTP Config</span>
+                </button>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <span className="text-rose-700 font-semibold">Confirm delete?</span>
+                  <button
+                    type="button"
+                    disabled={busyAction !== null}
+                    onClick={() => void handleDeleteSmtp()}
+                    className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold cursor-pointer"
+                  >
+                    Yes, Delete
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDeleteSmtp(false)}
+                    className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-700 font-semibold cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </section>
     </div>
   );

@@ -400,7 +400,7 @@ export const GoogleSheetsConnectorCard: React.FC<GoogleSheetsConnectorCardProps>
           <p className="text-amber-800 leading-relaxed">
             Missing server environment variable(s):{' '}
             <span className="font-mono font-semibold">{diagnostics.missingEnvVars.join(', ')}</span>.
-            Configure these in Vercel Project Settings (or local <span className="font-mono">.env</span>) to enable live OAuth and persistent refresh-token storage.
+            Configure these in Vercel Project Settings (or local <span className="font-mono">.env</span>) to enable live Google OAuth and Google Drive storage.
           </p>
         </div>
       )}

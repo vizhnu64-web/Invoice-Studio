@@ -8,13 +8,14 @@ import { OAuth2Client } from 'google-auth-library';
 import { google } from 'googleapis';
 import { AppServerConfig } from './config.js';
 import { decryptSecret, encryptSecret, generateRandomId } from './crypto.js';
-import { PersistenceStore, StoredEmailLog, StoredSmtpConfig } from './db.js';
+import { GoogleDriveStore, StoredEmailLog, StoredSmtpConfig } from './driveStore.js';
 import {
   GoogleTransportAdapter,
   HttpApiError,
   mapGoogleApiError,
-  runWithUserTokenRetry,
+  runWithSessionTokenRetry,
 } from './googleService.js';
+import { EncryptedSessionData } from './http.js';
 
 export interface EmailAttachmentPayload {
   filename: string;
@@ -23,7 +24,7 @@ export interface EmailAttachmentPayload {
 }
 
 export interface EmailSendItem {
-  documentType: 'invoice' | 'quotation';
+  documentType: 'invoice' | 'quotation' | 'test';
   documentId: string;
   documentNumber: string;
   to: string;
@@ -145,7 +146,6 @@ export function buildGmailRawMimeMessage(params: {
 
   const lines: string[] = [...headers, ''];
 
-  // Alternative text + HTML body part
   lines.push(`--${mixedBoundary}`);
   lines.push(`Content-Type: multipart/alternative; boundary="${altBoundary}"`, '');
 
@@ -310,7 +310,7 @@ export const defaultEmailTransport: EmailTransportAdapter = {
 };
 
 export function toPublicSmtpConfig(cfg: StoredSmtpConfig | null) {
-  if (!cfg) {
+  if (!cfg || !cfg.host) {
     return {
       configured: false,
       host: '',
@@ -337,7 +337,6 @@ export function toPublicSmtpConfig(cfg: StoredSmtpConfig | null) {
 }
 
 export async function saveUserSmtpConfig(params: {
-  userId: string;
   host: string;
   port: number;
   securityMode: 'SSL' | 'STARTTLS' | 'NONE';
@@ -346,7 +345,7 @@ export async function saveUserSmtpConfig(params: {
   senderName: string;
   senderEmail: string;
   config: AppServerConfig;
-  store: PersistenceStore;
+  driveStore: GoogleDriveStore;
 }): Promise<ReturnType<typeof toPublicSmtpConfig>> {
   const host = params.host.trim();
   const senderEmail = params.senderEmail.trim();
@@ -374,8 +373,7 @@ export async function saveUserSmtpConfig(params: {
     encryptedPassword = encryptSecret(params.password, params.config.tokenEncryptionKey);
   }
 
-  const saved = await params.store.upsertSmtpConfig({
-    userId: params.userId,
+  const saved = await params.driveStore.upsertSmtpConfig({
     host,
     port,
     securityMode: params.securityMode || 'STARTTLS',
@@ -389,7 +387,6 @@ export async function saveUserSmtpConfig(params: {
 }
 
 export async function testUserSmtpConnection(params: {
-  userId: string;
   override?: {
     host?: string;
     port?: number;
@@ -398,11 +395,11 @@ export async function testUserSmtpConnection(params: {
     password?: string;
   };
   config: AppServerConfig;
-  store: PersistenceStore;
+  driveStore: GoogleDriveStore;
   emailTransport?: EmailTransportAdapter;
 }): Promise<{ ok: true; verifiedAt: string }> {
   const transport = params.emailTransport || defaultEmailTransport;
-  const saved = await params.store.getSmtpConfig(params.userId);
+  const saved = await params.driveStore.getSmtpConfig();
 
   const host = (params.override?.host || saved?.host || '').trim();
   const port = Number(params.override?.port || saved?.port || 587);
@@ -422,8 +419,7 @@ export async function testUserSmtpConnection(params: {
 
   const verifiedAt = new Date().toISOString();
   if (saved) {
-    await params.store.upsertSmtpConfig({
-      userId: params.userId,
+    await params.driveStore.upsertSmtpConfig({
       host: saved.host,
       port: saved.port,
       securityMode: saved.securityMode,
@@ -438,17 +434,18 @@ export async function testUserSmtpConnection(params: {
 }
 
 /**
- * Dispatches one or more invoice/quotation emails using the EXPLICIT user-selected delivery method
- * ('gmail' or 'smtp'). Never silently switches delivery methods. Isolates per-recipient errors.
+ * Dispatches one or more emails using the EXPLICIT user-selected method ('gmail' or 'smtp').
+ * Never silently falls back between Gmail and SMTP.
  */
 export async function dispatchUserEmails(params: {
-  userId: string;
+  session: EncryptedSessionData;
   method: 'gmail' | 'smtp';
   items: EmailSendItem[];
   config: AppServerConfig;
-  store: PersistenceStore;
+  driveStore: GoogleDriveStore;
   googleTransport?: GoogleTransportAdapter;
   emailTransport?: EmailTransportAdapter;
+  onSessionUpdated?: (next: EncryptedSessionData) => void;
 }): Promise<{
   method: 'gmail' | 'smtp';
   sentCount: number;
@@ -470,7 +467,6 @@ export async function dispatchUserEmails(params: {
   const emailTransport = params.emailTransport || defaultEmailTransport;
   const results: EmailDeliveryResultItem[] = [];
 
-  // Pre-verify method readiness (NEVER silently fallback to the other method!)
   let smtpCreds: {
     host: string;
     port: number;
@@ -482,7 +478,7 @@ export async function dispatchUserEmails(params: {
   } | null = null;
 
   if (params.method === 'smtp') {
-    const savedSmtp = await params.store.getSmtpConfig(params.userId);
+    const savedSmtp = await params.driveStore.getSmtpConfig();
     if (!savedSmtp || !savedSmtp.host || !savedSmtp.senderEmail) {
       throw new HttpApiError(
         400,
@@ -519,7 +515,12 @@ export async function dispatchUserEmails(params: {
   for (const item of params.items) {
     const docId = String(item.documentId || '').trim();
     const docNumber = String(item.documentNumber || '').trim();
-    const docType = item.documentType === 'quotation' ? 'quotation' : 'invoice';
+    const docType: 'invoice' | 'quotation' | 'test' =
+      item.documentType === 'quotation'
+        ? 'quotation'
+        : item.documentType === 'test'
+        ? 'test'
+        : 'invoice';
     const logId = `emlog_${Date.now()}_${generateRandomId(6)}`;
 
     const toParsed = parseAndValidateEmailList(item.to);
@@ -531,9 +532,9 @@ export async function dispatchUserEmails(params: {
         toParsed.invalid.length > 0
           ? `Invalid recipient email(s): ${toParsed.invalid.join(', ')}`
           : 'Recipient email address is missing or invalid.';
-      const log = await params.store.insertEmailLog({
+      const log = await params.driveStore.insertEmailLog({
         id: logId,
-        userId: params.userId,
+        userId: params.session.uid,
         documentType: docType,
         documentId: docId,
         documentNumber: docNumber,
@@ -541,7 +542,7 @@ export async function dispatchUserEmails(params: {
         cc: item.cc || '',
         bcc: item.bcc || '',
         deliveryMethod: params.method,
-        senderEmail: smtpCreds?.senderEmail || '',
+        senderEmail: smtpCreds?.senderEmail || params.session.em,
         subject: item.subject || '',
         status: 'failed',
         providerMessageId: null,
@@ -563,9 +564,9 @@ export async function dispatchUserEmails(params: {
 
     if (ccParsed.invalid.length > 0 || bccParsed.invalid.length > 0) {
       const errMsg = `Invalid CC/BCC email(s): ${[...ccParsed.invalid, ...bccParsed.invalid].join(', ')}`;
-      const log = await params.store.insertEmailLog({
+      const log = await params.driveStore.insertEmailLog({
         id: logId,
-        userId: params.userId,
+        userId: params.session.uid,
         documentType: docType,
         documentId: docId,
         documentNumber: docNumber,
@@ -573,7 +574,7 @@ export async function dispatchUserEmails(params: {
         cc: item.cc || '',
         bcc: item.bcc || '',
         deliveryMethod: params.method,
-        senderEmail: smtpCreds?.senderEmail || '',
+        senderEmail: smtpCreds?.senderEmail || params.session.em,
         subject: item.subject || '',
         status: 'failed',
         providerMessageId: null,
@@ -599,24 +600,24 @@ export async function dispatchUserEmails(params: {
     }
     seenKeys.add(dedupeKey);
 
-    let senderEmail = smtpCreds?.senderEmail || '';
+    let senderEmail = smtpCreds?.senderEmail || params.session.em;
     try {
       let providerMessageId = '';
 
       if (params.method === 'gmail') {
-        const sendRes = await runWithUserTokenRetry(
+        const sendRes = await runWithSessionTokenRetry(
           {
-            userId: params.userId,
+            session: params.session,
             requiredFeature: 'gmail',
             config: params.config,
-            store: params.store,
             transport: params.googleTransport,
+            onSessionUpdated: params.onSessionUpdated,
           },
-          async (accessToken, connection) => {
-            senderEmail = connection.email;
-            const fromHeader = connection.name
-              ? `"${sanitizeHeaderValue(connection.name)}" <${connection.email}>`
-              : connection.email;
+          async (accessToken, sess) => {
+            senderEmail = sess.em;
+            const fromHeader = sess.nm
+              ? `"${sanitizeHeaderValue(sess.nm)}" <${sess.em}>`
+              : sess.em;
             return await emailTransport.sendViaGmail({
               accessToken,
               config: params.config,
@@ -652,9 +653,9 @@ export async function dispatchUserEmails(params: {
         providerMessageId = sendRes.messageId;
       }
 
-      const log: StoredEmailLog = await params.store.insertEmailLog({
+      const log: StoredEmailLog = await params.driveStore.insertEmailLog({
         id: logId,
-        userId: params.userId,
+        userId: params.session.uid,
         documentType: docType,
         documentId: docId,
         documentNumber: docNumber,
@@ -681,7 +682,6 @@ export async function dispatchUserEmails(params: {
         logId: log.id,
       });
     } catch (err: any) {
-      // Propagate top-level auth/scope errors when single item fails due to missing Gmail permission
       if (
         err instanceof HttpApiError &&
         (err.code === 'GMAIL_SCOPE_REQUIRED' ||
@@ -692,9 +692,9 @@ export async function dispatchUserEmails(params: {
       }
 
       const errMsg = err?.message || 'Failed to send email.';
-      const log = await params.store.insertEmailLog({
+      const log = await params.driveStore.insertEmailLog({
         id: logId,
-        userId: params.userId,
+        userId: params.session.uid,
         documentType: docType,
         documentId: docId,
         documentNumber: docNumber,

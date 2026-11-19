@@ -5,14 +5,10 @@
 
 import React from 'react';
 import { AlertTriangle, RefreshCw } from 'lucide-react';
-import { firebaseProjectInfo } from '../firebase';
 
 interface ErrorBoundaryState {
   hasError: boolean;
   errorMessage: string;
-  isQuotaError: boolean;
-  isDailyReadQuotaError: boolean;
-  operationContext: string | null;
 }
 
 export class ErrorBoundary extends React.Component<
@@ -24,42 +20,13 @@ export class ErrorBoundary extends React.Component<
     this.state = {
       hasError: false,
       errorMessage: '',
-      isQuotaError: false,
-      isDailyReadQuotaError: false,
-      operationContext: null,
     };
   }
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    const raw = error?.message || 'An unexpected application error occurred.';
-    let parsedMessage = raw;
-    let operationContext: string | null = null;
-
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object' && 'error' in parsed) {
-        parsedMessage = String(parsed.error || raw);
-        if (parsed.operationType || parsed.path) {
-          operationContext = `${String(parsed.operationType || 'operation').toUpperCase()} ${String(
-            parsed.path || ''
-          )}`.trim();
-        }
-      }
-    } catch {
-      // Non-JSON error message
-    }
-
-    const isQuotaError = parsedMessage.includes('Quota exceeded');
-    const isDailyReadQuotaError = parsedMessage.includes(
-      "Quota exceeded for quota metric 'Free daily read units per project (free tier database)'"
-    );
-
     return {
       hasError: true,
-      errorMessage: parsedMessage,
-      isQuotaError,
-      isDailyReadQuotaError,
-      operationContext,
+      errorMessage: error?.message || 'An unexpected application error occurred.',
     };
   }
 
@@ -71,9 +38,6 @@ export class ErrorBoundary extends React.Component<
     this.setState({
       hasError: false,
       errorMessage: '',
-      isQuotaError: false,
-      isDailyReadQuotaError: false,
-      operationContext: null,
     });
   };
 
@@ -81,8 +45,6 @@ export class ErrorBoundary extends React.Component<
     if (!this.state.hasError) {
       return this.props.children;
     }
-
-    const upgradeUrl = `https://console.firebase.google.com/project/${firebaseProjectInfo.projectId}/firestore/databases/${firebaseProjectInfo.firestoreDatabaseId}/data?openUpgradeDialog=true`;
 
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
@@ -96,47 +58,11 @@ export class ErrorBoundary extends React.Component<
             </div>
             <div className="space-y-1 min-w-0">
               <h1 className="text-base font-bold text-slate-900">
-                {this.state.isQuotaError
-                  ? 'Firestore Usage Quota Reached'
-                  : 'Something went wrong in Invoice Studio'}
+                Something went wrong in Invoice Studio
               </h1>
-              {this.state.operationContext && (
-                <p className="text-xs font-mono text-slate-500">{this.state.operationContext}</p>
-              )}
               <p className="text-xs text-slate-600 break-words">{this.state.errorMessage}</p>
             </div>
           </div>
-
-          {this.state.isQuotaError && (
-            <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1.5">
-              <p>
-                Your Firestore free-tier daily quota will reset tomorrow. See the{' '}
-                <a
-                  href="https://firebase.google.com/pricing#cloud-firestore"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="underline font-semibold"
-                >
-                  Spark plan (Enterprise edition)
-                </a>{' '}
-                pricing details for daily limits.
-              </p>
-              {this.state.isDailyReadQuotaError && (
-                <p>
-                  To upgrade this database immediately, visit{' '}
-                  <a
-                    href={upgradeUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="underline font-semibold break-all"
-                  >
-                    Firebase Console Database Settings
-                  </a>
-                  .
-                </p>
-              )}
-            </div>
-          )}
 
           <div className="flex items-center justify-end space-x-2 pt-2 border-t border-slate-100">
             <button

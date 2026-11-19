@@ -4,12 +4,14 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { signPayload, verifySignedPayload } from './crypto.js';
+import { AppServerConfig } from './config.js';
+import { decryptSecret, encryptSecret, signPayload, verifySignedPayload } from './crypto.js';
 
 export const SESSION_COOKIE_NAME = 'invstudio_session';
 export const OAUTH_STATE_COOKIE_NAME = 'invstudio_oauth_state';
 export const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 export const OAUTH_STATE_TTL_SECONDS = 60 * 10; // 10 minutes
+const MAX_COOKIE_VALUE_BYTES = 3750; // Safe margin under browser 4096-byte cookie limit
 
 export interface NormalizedRequest extends IncomingMessage {
   query?: Record<string, any>;
@@ -20,6 +22,23 @@ export interface NormalizedRequest extends IncomingMessage {
 export interface NormalizedResponse extends ServerResponse {
   status?: (code: number) => NormalizedResponse;
   json?: (data: any) => void;
+}
+
+/**
+ * Compact encrypted session payload stored inside an HttpOnly cookie.
+ * Enables fully stateless Vercel serverless execution with zero external database.
+ */
+export interface EncryptedSessionData {
+  uid: string;
+  em: string;
+  nm: string | null;
+  pic: string | null;
+  sc: string;
+  rt: string | null;
+  at: string | null;
+  exp: number;
+  df?: string | null;
+  cat?: string;
 }
 
 export function parseCookies(cookieHeader: string | undefined): Record<string, string> {
@@ -101,23 +120,96 @@ export function serializeCookie(
   return parts.join('; ');
 }
 
-export function setSessionCookie(
+export function encodeEncryptedSessionCookie(
+  session: EncryptedSessionData,
+  config: Pick<AppServerConfig, 'sessionSecret' | 'tokenEncryptionKey'>
+): string {
+  const compact: EncryptedSessionData = {
+    uid: session.uid,
+    em: session.em,
+    nm: session.nm ? session.nm.slice(0, 120) : null,
+    pic: session.pic ? session.pic.slice(0, 300) : null,
+    sc: session.sc,
+    rt: session.rt,
+    at: session.at,
+    exp: session.exp,
+    df: session.df || null,
+    cat: session.cat || new Date().toISOString(),
+  };
+
+  let ciphertext = encryptSecret(JSON.stringify(compact), config.tokenEncryptionKey);
+  let signed = signPayload({ d: ciphertext }, config.sessionSecret, SESSION_TTL_SECONDS);
+
+  // If access token pushes cookie close to the 4KB limit and a refresh token exists, drop access token
+  if (signed.length > MAX_COOKIE_VALUE_BYTES && compact.rt) {
+    compact.at = null;
+    compact.exp = 0;
+    ciphertext = encryptSecret(JSON.stringify(compact), config.tokenEncryptionKey);
+    signed = signPayload({ d: ciphertext }, config.sessionSecret, SESSION_TTL_SECONDS);
+  }
+  return signed;
+}
+
+export function decodeEncryptedSessionCookie(
+  rawCookieValue: string | undefined | null,
+  config: Pick<AppServerConfig, 'sessionSecret' | 'tokenEncryptionKey'>
+): EncryptedSessionData | null {
+  if (!rawCookieValue) return null;
+  if (!config.sessionSecret || config.sessionSecret.length < 16) return null;
+  if (!config.tokenEncryptionKey || config.tokenEncryptionKey.length < 16) return null;
+
+  const verified = verifySignedPayload<{ d?: string }>(rawCookieValue, config.sessionSecret);
+  if (!verified?.d) return null;
+
+  try {
+    const plaintext = decryptSecret(verified.d, config.tokenEncryptionKey);
+    const parsed = JSON.parse(plaintext);
+    if (!parsed || typeof parsed.uid !== 'string' || typeof parsed.em !== 'string') {
+      return null;
+    }
+    return {
+      uid: parsed.uid,
+      em: parsed.em,
+      nm: parsed.nm ?? null,
+      pic: parsed.pic ?? null,
+      sc: String(parsed.sc || ''),
+      rt: parsed.rt ?? null,
+      at: parsed.at ?? null,
+      exp: typeof parsed.exp === 'number' ? parsed.exp : 0,
+      df: parsed.df ?? null,
+      cat: parsed.cat || undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function setEncryptedSessionCookie(
   req: NormalizedRequest,
   res: NormalizedResponse,
-  sessionId: string,
-  sessionSecret: string
+  session: EncryptedSessionData,
+  config: Pick<AppServerConfig, 'sessionSecret' | 'tokenEncryptionKey'>
 ): void {
-  const signed = signPayload({ sid: sessionId }, sessionSecret, SESSION_TTL_SECONDS);
+  const value = encodeEncryptedSessionCookie(session, config);
   const secure = isHttpsRequest(req);
   appendSetCookie(
     res,
-    serializeCookie(SESSION_COOKIE_NAME, signed, {
+    serializeCookie(SESSION_COOKIE_NAME, value, {
       maxAgeSeconds: SESSION_TTL_SECONDS,
       secure,
       sameSite: secure ? 'None' : 'Lax',
       partitioned: secure,
     })
   );
+}
+
+export function readEncryptedSessionFromRequest(
+  req: NormalizedRequest,
+  config: Pick<AppServerConfig, 'sessionSecret' | 'tokenEncryptionKey'>
+): EncryptedSessionData | null {
+  const cookies = getRequestCookies(req);
+  const raw = cookies[SESSION_COOKIE_NAME];
+  return decodeEncryptedSessionCookie(raw, config);
 }
 
 export function clearSessionCookie(req: NormalizedRequest, res: NormalizedResponse): void {
@@ -136,7 +228,7 @@ export function clearSessionCookie(req: NormalizedRequest, res: NormalizedRespon
 export function setOAuthStateCookie(
   req: NormalizedRequest,
   res: NormalizedResponse,
-  statePayload: { nonce: string; sid: string; feature?: string; returnTo?: string },
+  statePayload: { nonce: string; feature?: string; returnTo?: string },
   sessionSecret: string
 ): string {
   const signed = signPayload(statePayload, sessionSecret, OAUTH_STATE_TTL_SECONDS);
@@ -166,17 +258,6 @@ export function clearOAuthStateCookie(req: NormalizedRequest, res: NormalizedRes
   );
 }
 
-export function readSessionIdFromRequest(
-  req: NormalizedRequest,
-  sessionSecret: string
-): string | null {
-  if (!sessionSecret || sessionSecret.length < 16) return null;
-  const cookies = getRequestCookies(req);
-  const raw = cookies[SESSION_COOKIE_NAME];
-  const verified = verifySignedPayload<{ sid: string }>(raw, sessionSecret);
-  return verified?.sid || null;
-}
-
 export async function readJsonBody(req: NormalizedRequest): Promise<any> {
   if (req.body !== undefined) {
     if (typeof req.body === 'string') {
@@ -198,7 +279,7 @@ export async function readJsonBody(req: NormalizedRequest): Promise<any> {
       if (!raw) return resolve({});
       try {
         resolve(JSON.parse(raw));
-      } catch (err) {
+      } catch {
         reject(new Error('Invalid JSON request body.'));
       }
     });

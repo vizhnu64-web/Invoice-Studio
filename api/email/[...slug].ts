@@ -6,6 +6,7 @@
 import {
   handleEmailHistory,
   handleEmailSend,
+  handleEmailTestSend,
   handleSmtpConfig,
   handleSmtpTest,
 } from '../_lib/handlers.js';
@@ -23,6 +24,7 @@ export default async function handler(req: NormalizedRequest, res: NormalizedRes
   const route = extractEmailPath(req);
   if (route === 'smtp-config') return handleSmtpConfig(req, res);
   if (route === 'smtp-test') return handleSmtpTest(req, res);
+  if (route === 'test-send') return handleEmailTestSend(req, res);
   if (route === 'send') return handleEmailSend(req, res);
   if (route === 'history') return handleEmailHistory(req, res);
   return sendJson(res, 404, { error: `Unknown email endpoint: /api/email/${route}` });

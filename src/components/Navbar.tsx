@@ -22,6 +22,7 @@ import {
   Menu,
   SlidersHorizontal,
   UserCheck,
+  Users,
   X,
 } from 'lucide-react';
 import { GoogleAccountUser } from '../utils/googleSheets';
@@ -47,9 +48,15 @@ const PRIMARY_NAV_ITEMS = [
 
 const SECONDARY_NAV_ITEMS = [
   {
+    id: 'customers',
+    label: 'Customers',
+    description: 'Manage client contacts, billing addresses & GSTIN directory',
+    icon: Users,
+  },
+  {
     id: 'integrations',
-    label: 'Cloud & Integrations',
-    description: 'Firebase Auth, Cloud Firestore, Drive, Sheets, Gmail & SMTP',
+    label: 'Account & Integrations',
+    description: 'Google Account, Drive Storage, Sheets, Gmail & SMTP',
     icon: Cloud,
   },
   {

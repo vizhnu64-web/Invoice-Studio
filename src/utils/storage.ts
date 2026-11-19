@@ -19,7 +19,7 @@ import {
   QuotationRecord,
   EmailDeliveryLogEntry
 } from '../types';
-import { defaultCompanySettings, defaultFieldCatalog, sampleSpreadsheetData, defaultCalculationSettings } from '../mockData';
+import { defaultCompanySettings, defaultFieldCatalog, defaultCalculationSettings } from '../mockData';
 import { EmailConfig, EmailSendStatus, EmailService } from './emailService';
 
 const STORAGE_KEYS = {
@@ -41,40 +41,58 @@ const STORAGE_KEYS = {
   EMAIL_LOGS: 'invoice_studio_email_logs_v2',
 };
 
+export const EMPTY_SPREADSHEET_DATA: SpreadsheetData = {
+  fileName: 'No file loaded',
+  worksheets: [],
+  activeSheetName: '',
+};
+
+// Active user namespace so cached browser storage is strictly isolated per Google account
+let activeStorageUserId: string | null = null;
+
+function resolveScopedKey(baseKey: string): string {
+  if (!activeStorageUserId) return baseKey;
+  const safeUid = activeStorageUserId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `u_${safeUid}__${baseKey}`;
+}
+
 // Fallback in-memory storage for non-browser / Node.js test environments
 const memoryStore: Record<string, string> = {};
 
 function safeGetItem(key: string): string | null {
+  const scoped = resolveScopedKey(key);
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
-      return window.localStorage.getItem(key);
+      return window.localStorage.getItem(scoped);
     }
   } catch (e) {
     // Ignore and fallback
   }
-  return memoryStore[key] ?? null;
+  return memoryStore[scoped] ?? null;
 }
 
 function safeSetItem(key: string, value: string): void {
+  const scoped = resolveScopedKey(key);
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
-      window.localStorage.setItem(key, value);
+      window.localStorage.setItem(scoped, value);
     }
   } catch (e) {
     // Ignore and fallback
   }
-  memoryStore[key] = value;
+  memoryStore[scoped] = value;
 }
 
 function safeRemoveItem(key: string): void {
+  const scoped = resolveScopedKey(key);
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
-      window.localStorage.removeItem(key);
+      window.localStorage.removeItem(scoped);
     }
   } catch (e) {
     // Ignore and fallback
   }
-  delete memoryStore[key];
+  delete memoryStore[scoped];
 }
 
 export const defaultAdvancedAmountSettings: AdvancedAmountCalculationSettings = {
@@ -97,6 +115,44 @@ export const defaultGstSettings: GstConfigurationSettings = {
 };
 
 export const storage = {
+  setActiveStorageUser(userId: string | null): void {
+    activeStorageUserId = userId ? userId.trim() || null : null;
+  },
+
+  getActiveStorageUser(): string | null {
+    return activeStorageUserId;
+  },
+
+  clearAllUserWorkspaceCaches(): void {
+    const allBaseKeys = Object.values(STORAGE_KEYS);
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const toRemove: string[] = [];
+        for (let i = 0; i < window.localStorage.length; i++) {
+          const k = window.localStorage.key(i);
+          if (!k) continue;
+          if (
+            k.startsWith('invoice_studio_') ||
+            k.startsWith('u_') && k.includes('__invoice_studio_')
+          ) {
+            toRemove.push(k);
+          }
+        }
+        toRemove.forEach((k) => window.localStorage.removeItem(k));
+      }
+    } catch {
+      // Ignore storage access errors
+    }
+    for (const k of Object.keys(memoryStore)) {
+      if (
+        k.startsWith('invoice_studio_') ||
+        (k.startsWith('u_') && k.includes('__invoice_studio_')) ||
+        allBaseKeys.includes(k)
+      ) {
+        delete memoryStore[k];
+      }
+    }
+  },
 
   loadCompanySettings(): CompanySettings {
     try {
@@ -289,7 +345,7 @@ export const storage = {
     } catch (e) {
       console.warn('Failed to load spreadsheet data from storage:', e);
     }
-    return sampleSpreadsheetData;
+    return EMPTY_SPREADSHEET_DATA;
   },
 
   saveSpreadsheetData(data: SpreadsheetData): boolean {
@@ -545,42 +601,7 @@ export const storage = {
     } catch (e) {
       console.warn('Failed to load customer directory from storage:', e);
     }
-    return [
-      {
-        id: 'cust_seed_1',
-        customerName: 'Sharma Enterprises Pvt Ltd',
-        contactPerson: 'Aarav Sharma',
-        email: 'accounts@sharmaenterprises.test',
-        phone: '+91 98110 22334',
-        billingAddress: 'Plot 12, Industrial Area, Phase 2',
-        shippingAddress: 'Plot 12, Industrial Area, Phase 2',
-        city: 'Gurugram',
-        state: 'Haryana',
-        postalCode: '122001',
-        country: 'India',
-        gstin: '06AABCS1234Q1ZU',
-        pan: 'AABCS1234Q',
-        referenceNumber: 'CUST-001',
-        updatedAt: '2026-11-01T09:00:00.000Z'
-      },
-      {
-        id: 'cust_seed_2',
-        customerName: 'Apex Digital Solutions',
-        contactPerson: 'Priya Nair',
-        email: 'finance@apexdigital.test',
-        phone: '+91 98450 55667',
-        billingAddress: '45 MG Road, Indiranagar',
-        shippingAddress: '45 MG Road, Indiranagar',
-        city: 'Bengaluru',
-        state: 'Karnataka',
-        postalCode: '560038',
-        country: 'India',
-        gstin: '29AABCA5678R1Z5',
-        pan: 'AABCA5678R',
-        referenceNumber: 'CUST-002',
-        updatedAt: '2026-11-01T09:00:00.000Z'
-      }
-    ];
+    return [];
   },
 
   saveCustomer(customer: CustomerRecord): boolean {

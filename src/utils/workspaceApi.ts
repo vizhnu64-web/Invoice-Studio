@@ -167,7 +167,16 @@ export const workspaceApi = {
     return apiJson<DriveStatusPayload>('/api/drive/status', { method: 'GET' });
   },
 
-  syncDrive(): Promise<{
+  syncDrive(snapshot?: {
+    companySettings?: any;
+    template?: any;
+    fields?: any[];
+    calculationSettings?: any;
+    customers?: CustomerRecord[];
+    quotations?: QuotationRecord[];
+    invoices?: GenerationRecord[];
+    emailLogs?: EmailDeliveryLogEntry[];
+  }): Promise<{
     ok: boolean;
     rootFolderId: string;
     filesSynced: number;
@@ -177,7 +186,10 @@ export const workspaceApi = {
     emailLogsSynced: number;
     syncedAt: string;
   }> {
-    return apiJson('/api/drive/sync', { method: 'POST', body: JSON.stringify({}) });
+    return apiJson('/api/drive/sync', {
+      method: 'POST',
+      body: JSON.stringify(snapshot || {}),
+    });
   },
 
   uploadPdfToDrive(params: {
@@ -228,6 +240,12 @@ export const workspaceApi = {
     });
   },
 
+  deleteSmtpConfig(): Promise<{ deleted: boolean; smtpConfig: BackendSmtpConfig }> {
+    return apiJson('/api/email/smtp-config', {
+      method: 'DELETE',
+    });
+  },
+
   testSmtpConnection(override?: {
     host?: string;
     port?: number;
@@ -238,6 +256,25 @@ export const workspaceApi = {
     return apiJson('/api/email/smtp-test', {
       method: 'POST',
       body: JSON.stringify(override || {}),
+    });
+  },
+
+  sendTestEmail(payload: {
+    method: EmailDeliveryMethod;
+    to?: string;
+    subject?: string;
+    textBody?: string;
+  }): Promise<{
+    ok: boolean;
+    method: EmailDeliveryMethod;
+    recipientEmail: string;
+    senderEmail: string;
+    providerMessageId: string | null;
+    sentAt: string;
+  }> {
+    return apiJson('/api/email/test-send', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     });
   },
 

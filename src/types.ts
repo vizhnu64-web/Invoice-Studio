@@ -287,6 +287,11 @@ export interface GenerationRecord {
   paymentReference?: string;
   paymentAmount?: number;
   paymentNotes?: string;
+  sourceQuotationId?: string;
+  sourceQuotationNumber?: string;
+  driveFileId?: string;
+  pdfDriveFileId?: string;
+  updatedAt?: string;
 }
 
 export interface CustomerRecord {
@@ -382,6 +387,8 @@ export interface ManualInvoiceData {
   deliveryInstructions: string;
   additionalRemarks: string;
   customFooterText: string;
+  sourceQuotationId?: string;
+  sourceQuotationNumber?: string;
 }
 
 export interface ManualInvoiceDraft {
@@ -470,4 +477,151 @@ export interface WorkflowSessionState {
   customEditedRows?: Record<number, Record<string, any>>;
   updatedAt: string;
 }
+
+export type QuotationStatus =
+  | 'Draft'
+  | 'Pending Approval'
+  | 'Approved'
+  | 'Not Approved'
+  | 'Expired'
+  | 'Converted to Invoice';
+
+export interface QuotationApprovalHistoryEntry {
+  id: string;
+  status: QuotationStatus;
+  previousStatus?: QuotationStatus;
+  timestamp: string;
+  actorName: string;
+  actorEmail?: string;
+  notes?: string;
+  rejectionReason?: string;
+}
+
+export interface QuotationData {
+  id?: string;
+  quotationNumber: string;
+  autoNumbering: boolean;
+  quotationDate: string;
+  validUntilDate: string;
+  referenceNumber: string;
+  subject: string;
+  projectName: string;
+  salesperson: string;
+  currencyCode: string;
+
+  selectedCustomerId?: string;
+  customerName: string;
+  contactPerson: string;
+  customerEmail: string;
+  customerPhone: string;
+  billingAddress: string;
+  customerCity: string;
+  customerState: string;
+  customerPostalCode: string;
+  customerCountry: string;
+  customerGstin: string;
+
+  items: ManualInvoiceLineItem[];
+
+  gstEnabled: boolean;
+  pricingType: 'exclusive' | 'inclusive';
+  transactionType: 'IGST' | 'CGST_SGST' | 'NONE';
+  defaultGstRate: number;
+  additionalDiscount: number;
+  additionalDiscountType: 'fixed' | 'percentage';
+  additionalCharges: number;
+  roundOffEnabled: boolean;
+  manualRoundOffOverride?: number | null;
+
+  notes: string;
+  terms: string;
+  paymentTerms: string;
+  deliveryTerms: string;
+  validityConditions: string;
+  customFooterText: string;
+  includeBankDetails: boolean;
+}
+
+export interface QuotationRecord {
+  id: string;
+  ownerUserId?: string;
+  quotationNumber: string;
+  quotationDate: string;
+  validUntilDate: string;
+  customerName: string;
+  customerEmail?: string;
+  projectName?: string;
+  salesperson?: string;
+  currencyCode: string;
+  status: QuotationStatus;
+  subtotal: number;
+  taxableAmount: number;
+  totalTax: number;
+  discountAmount: number;
+  totalAmount: number;
+  amountInWords: string;
+  data: QuotationData;
+  approvalHistory: QuotationApprovalHistoryEntry[];
+  approvedAt?: string;
+  approvedBy?: string;
+  approvalNotes?: string;
+  rejectionReason?: string;
+  convertedInvoiceId?: string;
+  convertedInvoiceNumber?: string;
+  convertedAt?: string;
+  driveFileId?: string;
+  pdfDriveFileId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type EmailDeliveryMethod = 'gmail' | 'smtp';
+
+export interface BackendSmtpConfig {
+  configured: boolean;
+  host: string;
+  port: number;
+  securityMode: 'SSL' | 'STARTTLS' | 'NONE';
+  username: string;
+  hasPassword: boolean;
+  senderName: string;
+  senderEmail: string;
+  verifiedAt?: string | null;
+}
+
+export interface EmailDeliveryLogEntry {
+  id: string;
+  userId?: string;
+  documentType: 'invoice' | 'quotation';
+  documentId: string;
+  documentNumber: string;
+  recipientEmail: string;
+  cc?: string;
+  bcc?: string;
+  deliveryMethod: EmailDeliveryMethod;
+  senderEmail: string;
+  subject: string;
+  status: 'sent' | 'failed';
+  providerMessageId?: string | null;
+  errorMessage?: string | null;
+  createdAt: string;
+}
+
+export interface AuthenticatedUserProfile {
+  userId: string;
+  email: string;
+  name: string | null;
+  picture: string | null;
+  createdAt: string;
+  lastLoginAt: string;
+  onboardingCompleted: boolean;
+  driveConnected: boolean;
+  sheetsConnected: boolean;
+  gmailConnected: boolean;
+  smtpConfigured: boolean;
+  driveRootFolderId?: string | null;
+  driveLastSyncAt?: string | null;
+  driveSyncStatus?: string | null;
+}
+
 

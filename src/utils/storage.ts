@@ -15,7 +15,9 @@ import {
   WorkflowSessionState,
   ManualInvoiceDraft,
   ManualInvoiceData,
-  CustomerRecord
+  CustomerRecord,
+  QuotationRecord,
+  EmailDeliveryLogEntry
 } from '../types';
 import { defaultCompanySettings, defaultFieldCatalog, sampleSpreadsheetData, defaultCalculationSettings } from '../mockData';
 import { EmailConfig, EmailSendStatus, EmailService } from './emailService';
@@ -35,6 +37,8 @@ const STORAGE_KEYS = {
   MANUAL_DRAFTS: 'invoice_studio_manual_drafts_v2',
   MANUAL_WORKING: 'invoice_studio_manual_working_v2',
   CUSTOMERS: 'invoice_studio_customers_v2',
+  QUOTATIONS: 'invoice_studio_quotations_v2',
+  EMAIL_LOGS: 'invoice_studio_email_logs_v2',
 };
 
 // Fallback in-memory storage for non-browser / Node.js test environments
@@ -591,6 +595,16 @@ export const storage = {
     }
   },
 
+  saveCustomers(customers: CustomerRecord[]): boolean {
+    try {
+      safeSetItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(customers));
+      return true;
+    } catch (e) {
+      console.error('Failed to save customers to directory:', e);
+      return false;
+    }
+  },
+
   deleteCustomer(id: string): boolean {
     try {
       const existing = this.loadCustomers();
@@ -599,6 +613,52 @@ export const storage = {
       return true;
     } catch (e) {
       console.error('Failed to delete customer from directory:', e);
+      return false;
+    }
+  },
+
+  loadQuotations(): QuotationRecord[] {
+    try {
+      const data = safeGetItem(STORAGE_KEYS.QUOTATIONS);
+      if (data) {
+        const parsed = JSON.parse(data);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {
+      console.warn('Failed to load quotations from storage:', e);
+    }
+    return [];
+  },
+
+  saveQuotations(quotations: QuotationRecord[]): boolean {
+    try {
+      safeSetItem(STORAGE_KEYS.QUOTATIONS, JSON.stringify(quotations));
+      return true;
+    } catch (e) {
+      console.error('Failed to save quotations to storage:', e);
+      return false;
+    }
+  },
+
+  loadEmailLogs(): EmailDeliveryLogEntry[] {
+    try {
+      const data = safeGetItem(STORAGE_KEYS.EMAIL_LOGS);
+      if (data) {
+        const parsed = JSON.parse(data);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {
+      console.warn('Failed to load email logs from storage:', e);
+    }
+    return [];
+  },
+
+  saveEmailLogs(logs: EmailDeliveryLogEntry[]): boolean {
+    try {
+      safeSetItem(STORAGE_KEYS.EMAIL_LOGS, JSON.stringify(logs));
+      return true;
+    } catch (e) {
+      console.error('Failed to save email logs to storage:', e);
       return false;
     }
   }

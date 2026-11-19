@@ -158,17 +158,37 @@ export const InvoicePreviewSheet: React.FC<InvoicePreviewSheetProps> = ({
                   className="text-sm sm:text-base font-extrabold tracking-tight uppercase"
                   style={{ color: brandPrimary }}
                 >
-                  {rowFields['invoice_title'] || template.labels?.['invoice_title'] || 'TAX INVOICE'}
+                  {rowFields['invoice_title'] ||
+                    template.labels?.['invoice_title'] ||
+                    (rowFields['document_type'] === 'quotation' ? 'QUOTATION' : 'TAX INVOICE')}
                 </h3>
                 <p className="font-bold text-slate-900 text-xs">
-                  Invoice No: <span className="font-mono">{rowFields['invoice_number'] || '—'}</span>
+                  {rowFields['document_type'] === 'quotation' ? 'Quotation No:' : 'Invoice No:'}{' '}
+                  <span className="font-mono">
+                    {rowFields['quotation_number'] || rowFields['invoice_number'] || '—'}
+                  </span>
                 </p>
                 <p className="text-slate-500 text-[11px]">
                   Date: <span className="font-mono">{rowFields['invoice_date'] || '—'}</span>
                 </p>
-                {rowFields['due_date'] && (
+                {rowFields['valid_until'] && (
+                  <p className="text-slate-500 text-[11px]">
+                    Valid Until: <span className="font-mono">{rowFields['valid_until']}</span>
+                  </p>
+                )}
+                {rowFields['due_date'] && rowFields['document_type'] !== 'quotation' && (
                   <p className="text-slate-500 text-[11px]">
                     Due Date: <span className="font-mono">{rowFields['due_date']}</span>
+                  </p>
+                )}
+                {rowFields['project_name'] && (
+                  <p className="text-slate-500 text-[10px]">
+                    Project: <span className="font-medium text-slate-700">{rowFields['project_name']}</span>
+                  </p>
+                )}
+                {rowFields['salesperson'] && (
+                  <p className="text-slate-500 text-[10px]">
+                    Prepared By: <span className="font-medium text-slate-700">{rowFields['salesperson']}</span>
                   </p>
                 )}
                 {rowFields['place_of_supply'] && (
@@ -318,7 +338,7 @@ export const InvoicePreviewSheet: React.FC<InvoicePreviewSheetProps> = ({
                 </div>
               )}
 
-              {showBankDetails && activeBank && (
+              {showBankDetails && rowFields['include_bank_details'] !== false && activeBank && (
                 <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-0.5 text-[11px]">
                   <p className="font-bold text-slate-900">Bank Details for Transfer:</p>
                   <p className="text-slate-600">
@@ -439,23 +459,31 @@ export const InvoicePreviewSheet: React.FC<InvoicePreviewSheetProps> = ({
                 </div>
               )}
               <div className="border-t border-slate-300 pt-2 flex justify-between font-bold text-xs sm:text-sm">
-                <span style={{ color: brandHighlight }}>Total Invoice Amount:</span>
+                <span style={{ color: brandHighlight }}>
+                  {rowFields['document_type'] === 'quotation'
+                    ? 'Total Quoted Amount:'
+                    : 'Total Invoice Amount:'}
+                </span>
                 <span className="font-mono tabular-nums" style={{ color: brandHighlight }}>
                   {formatCurrency(summary.totalInvoiceAmount, company.currency)}
                 </span>
               </div>
-              <div className="flex justify-between text-slate-600 text-[11px]">
-                <span>Payment Received:</span>
-                <span className="font-mono tabular-nums text-emerald-600">
-                  {formatCurrency(summary.paymentMade, company.currency)}
-                </span>
-              </div>
-              <div className="flex justify-between font-bold text-xs text-slate-900">
-                <span>Balance Due:</span>
-                <span className="font-mono tabular-nums">
-                  {formatCurrency(summary.balanceDue, company.currency)}
-                </span>
-              </div>
+              {rowFields['document_type'] !== 'quotation' && (
+                <>
+                  <div className="flex justify-between text-slate-600 text-[11px]">
+                    <span>Payment Received:</span>
+                    <span className="font-mono tabular-nums text-emerald-600">
+                      {formatCurrency(summary.paymentMade, company.currency)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between font-bold text-xs text-slate-900">
+                    <span>Balance Due:</span>
+                    <span className="font-mono tabular-nums">
+                      {formatCurrency(summary.balanceDue, company.currency)}
+                    </span>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )}

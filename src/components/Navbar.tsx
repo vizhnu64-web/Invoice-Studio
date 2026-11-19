@@ -8,18 +8,23 @@ import {
   Building2,
   CheckCircle2,
   ChevronDown,
+  Cloud,
   Cpu,
   DownloadCloud,
+  FileCheck2,
   FilePlus2,
   History,
   Home,
   Layout,
   ListChecks,
+  LogIn,
   Mail,
   Menu,
   SlidersHorizontal,
+  UserCheck,
   X,
 } from 'lucide-react';
+import { GoogleAccountUser } from '../utils/googleSheets';
 
 interface NavbarProps {
   activeTab: string;
@@ -27,17 +32,26 @@ interface NavbarProps {
   activeDataSourceName: string;
   totalRecordsCount: number;
   onStartGuidedWorkflow?: () => void;
+  authUser?: GoogleAccountUser | null;
+  onOpenAuthGate?: () => void;
 }
 
 const PRIMARY_NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: Home },
   { id: 'datasource', label: 'Import Data', icon: DownloadCloud },
   { id: 'manual', label: 'Manual Entry', icon: FilePlus2 },
+  { id: 'quotations', label: 'Quotations', icon: FileCheck2 },
   { id: 'generation', label: 'Invoice Generator', icon: Cpu },
   { id: 'email', label: 'Emailing', icon: Mail },
 ];
 
 const SECONDARY_NAV_ITEMS = [
+  {
+    id: 'integrations',
+    label: 'Cloud & Integrations',
+    description: 'Firebase Auth, Cloud Firestore, Drive, Sheets, Gmail & SMTP',
+    icon: Cloud,
+  },
   {
     id: 'fields',
     label: 'Field Mapping',
@@ -75,6 +89,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   setActiveTab,
   activeDataSourceName,
   totalRecordsCount,
+  authUser,
+  onOpenAuthGate,
 }) => {
   const [isMoreOpen, setIsMoreOpen] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -112,12 +128,12 @@ export const Navbar: React.FC<NavbarProps> = ({
   return (
     <header className="bg-slate-900 border-b border-slate-800 text-white sticky top-0 z-50 shadow-md">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-16 gap-3">
+        <div className="flex items-center justify-between h-16 gap-2">
           {/* Brand Logo */}
           <button
             type="button"
             onClick={() => handleSelectTab('dashboard')}
-            className="flex items-center space-x-3 shrink-0 py-1 text-left cursor-pointer"
+            className="flex items-center space-x-2.5 shrink-0 py-1 text-left cursor-pointer"
           >
             <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center font-bold text-lg shadow-inner shrink-0">
               IS
@@ -127,15 +143,15 @@ export const Navbar: React.FC<NavbarProps> = ({
                 INVOICE STUDIO
               </span>
               <span className="hidden sm:block text-[10px] text-slate-400 truncate mt-0.5">
-                Advanced Invoice Generator
+                Quotations & Invoice Suite
               </span>
             </div>
           </button>
 
-          {/* Desktop Primary Navigation (5 tabs) + More Hamburger Menu */}
+          {/* Desktop Primary Navigation (6 tabs) + More Menu */}
           <nav
             aria-label="Main Navigation"
-            className="hidden lg:flex items-center space-x-1.5 bg-slate-800/70 p-1.5 rounded-2xl border border-slate-800"
+            className="hidden lg:flex items-center space-x-1 bg-slate-800/70 p-1.5 rounded-2xl border border-slate-800"
           >
             {PRIMARY_NAV_ITEMS.map((item) => {
               const Icon = item.icon;
@@ -146,13 +162,13 @@ export const Navbar: React.FC<NavbarProps> = ({
                   type="button"
                   data-tab={item.id}
                   onClick={() => handleSelectTab(item.id)}
-                  className={`flex items-center space-x-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`flex items-center space-x-1.5 px-2.5 py-2 rounded-xl text-xs font-semibold transition-all whitespace-nowrap shrink-0 cursor-pointer ${
                     isActive
                       ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
                       : 'text-slate-300 hover:bg-slate-800 hover:text-white'
                   }`}
                 >
-                  <Icon className="w-4 h-4 shrink-0" />
+                  <Icon className="w-3.5 h-3.5 shrink-0" />
                   <span>{item.label}</span>
                 </button>
               );
@@ -166,7 +182,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 aria-expanded={isMoreOpen}
                 aria-haspopup="menu"
                 onClick={() => setIsMoreOpen((prev) => !prev)}
-                className={`flex items-center space-x-1.5 px-3 py-2 rounded-xl text-xs font-semibold transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+                className={`flex items-center space-x-1.5 px-2.5 py-2 rounded-xl text-xs font-semibold transition-all whitespace-nowrap shrink-0 cursor-pointer ${
                   activeSecondaryItem
                     ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
                     : isMoreOpen
@@ -174,7 +190,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                       : 'text-slate-300 hover:bg-slate-800 hover:text-white'
                 }`}
               >
-                <Menu className="w-4 h-4 shrink-0" />
+                <Menu className="w-3.5 h-3.5 shrink-0" />
                 <span>{activeSecondaryItem ? activeSecondaryItem.label : 'More'}</span>
                 <ChevronDown
                   className={`w-3.5 h-3.5 shrink-0 transition-transform ${
@@ -191,7 +207,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 >
                   <div className="px-3.5 py-1.5 border-b border-slate-100">
                     <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                      Workspace & Configuration
+                      Workspace & Integrations
                     </p>
                   </div>
                   <div className="p-1.5 space-y-0.5">
@@ -235,17 +251,47 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </nav>
 
-          {/* Right Status Badge (Wide Desktop) + Mobile/Tablet Hamburger Button */}
-          <div className="flex items-center space-x-3 shrink-0">
-            <div className="hidden xl:flex items-center space-x-2 bg-slate-800/80 px-3 py-1.5 rounded-xl border border-slate-700 text-xs text-slate-300">
+          {/* Right Account Status + Dataset Pill (2xl) + Mobile Hamburger Button */}
+          <div className="flex items-center space-x-2 shrink-0">
+            <div className="hidden 2xl:flex items-center space-x-1.5 bg-slate-800/80 px-2.5 py-1.5 rounded-xl border border-slate-700 text-xs text-slate-300">
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              <span className="truncate max-w-[130px] font-medium" title={activeDataSourceName}>
+              <span className="truncate max-w-[110px] font-medium" title={activeDataSourceName}>
                 {activeDataSourceName}
               </span>
-              <span className="bg-indigo-950 text-indigo-300 px-2 py-0.5 rounded-md font-mono text-[11px] font-bold">
-                {totalRecordsCount} recs
+              <span className="bg-indigo-950 text-indigo-300 px-1.5 py-0.5 rounded-md font-mono text-[10px] font-bold">
+                {totalRecordsCount}
               </span>
             </div>
+
+            {authUser?.email ? (
+              <button
+                type="button"
+                onClick={() => handleSelectTab('integrations')}
+                title={`Signed in as ${authUser.email}`}
+                className="hidden sm:inline-flex items-center space-x-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2.5 py-1.5 rounded-xl text-xs font-semibold text-slate-200 transition-colors cursor-pointer"
+              >
+                {authUser.picture ? (
+                  <img
+                    src={authUser.picture}
+                    alt={authUser.name || authUser.email}
+                    className="w-5 h-5 rounded-full object-cover"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <UserCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                )}
+                <span className="max-w-[100px] truncate">{authUser.name || authUser.email}</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => (onOpenAuthGate ? onOpenAuthGate() : handleSelectTab('integrations'))}
+                className="hidden sm:inline-flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-200 transition-colors cursor-pointer"
+              >
+                <LogIn className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                <span>Sign In</span>
+              </button>
+            )}
 
             <button
               type="button"

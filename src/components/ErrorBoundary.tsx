@@ -1,0 +1,162 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React from 'react';
+import { AlertTriangle, RefreshCw } from 'lucide-react';
+import { firebaseProjectInfo } from '../firebase';
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  errorMessage: string;
+  isQuotaError: boolean;
+  isDailyReadQuotaError: boolean;
+  operationContext: string | null;
+}
+
+export class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  ErrorBoundaryState
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = {
+      hasError: false,
+      errorMessage: '',
+      isQuotaError: false,
+      isDailyReadQuotaError: false,
+      operationContext: null,
+    };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    const raw = error?.message || 'An unexpected application error occurred.';
+    let parsedMessage = raw;
+    let operationContext: string | null = null;
+
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && 'error' in parsed) {
+        parsedMessage = String(parsed.error || raw);
+        if (parsed.operationType || parsed.path) {
+          operationContext = `${String(parsed.operationType || 'operation').toUpperCase()} ${String(
+            parsed.path || ''
+          )}`.trim();
+        }
+      }
+    } catch {
+      // Non-JSON error message
+    }
+
+    const isQuotaError = parsedMessage.includes('Quota exceeded');
+    const isDailyReadQuotaError = parsedMessage.includes(
+      "Quota exceeded for quota metric 'Free daily read units per project (free tier database)'"
+    );
+
+    return {
+      hasError: true,
+      errorMessage: parsedMessage,
+      isQuotaError,
+      isDailyReadQuotaError,
+      operationContext,
+    };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error('Invoice Studio ErrorBoundary caught:', error, errorInfo);
+  }
+
+  handleReset = () => {
+    this.setState({
+      hasError: false,
+      errorMessage: '',
+      isQuotaError: false,
+      isDailyReadQuotaError: false,
+      operationContext: null,
+    });
+  };
+
+  render() {
+    if (!this.state.hasError) {
+      return this.props.children;
+    }
+
+    const upgradeUrl = `https://console.firebase.google.com/project/${firebaseProjectInfo.projectId}/firestore/databases/${firebaseProjectInfo.firestoreDatabaseId}/data?openUpgradeDialog=true`;
+
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+        <div
+          role="alert"
+          className="max-w-lg w-full bg-white rounded-2xl border border-rose-200 shadow-lg p-6 space-y-4"
+        >
+          <div className="flex items-start space-x-3">
+            <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
+              <AlertTriangle className="w-5 h-5" />
+            </div>
+            <div className="space-y-1 min-w-0">
+              <h1 className="text-base font-bold text-slate-900">
+                {this.state.isQuotaError
+                  ? 'Firestore Usage Quota Reached'
+                  : 'Something went wrong in Invoice Studio'}
+              </h1>
+              {this.state.operationContext && (
+                <p className="text-xs font-mono text-slate-500">{this.state.operationContext}</p>
+              )}
+              <p className="text-xs text-slate-600 break-words">{this.state.errorMessage}</p>
+            </div>
+          </div>
+
+          {this.state.isQuotaError && (
+            <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1.5">
+              <p>
+                Your Firestore free-tier daily quota will reset tomorrow. See the{' '}
+                <a
+                  href="https://firebase.google.com/pricing#cloud-firestore"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline font-semibold"
+                >
+                  Spark plan (Enterprise edition)
+                </a>{' '}
+                pricing details for daily limits.
+              </p>
+              {this.state.isDailyReadQuotaError && (
+                <p>
+                  To upgrade this database immediately, visit{' '}
+                  <a
+                    href={upgradeUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline font-semibold break-all"
+                  >
+                    Firebase Console Database Settings
+                  </a>
+                  .
+                </p>
+              )}
+            </div>
+          )}
+
+          <div className="flex items-center justify-end space-x-2 pt-2 border-t border-slate-100">
+            <button
+              type="button"
+              onClick={this.handleReset}
+              className="px-4 py-2 rounded-xl border border-slate-300 text-xs font-bold text-slate-700 hover:bg-slate-50 cursor-pointer"
+            >
+              Try Again
+            </button>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold inline-flex items-center space-x-1.5 cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Reload App</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+}

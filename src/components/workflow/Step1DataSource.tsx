@@ -19,6 +19,7 @@ import {
 import * as XLSX from 'xlsx';
 import { deduplicateHeaders } from '../../utils/calculator';
 import { SpreadsheetData } from '../../types';
+import { GoogleSheetsConnectorCard } from '../GoogleSheetsConnectorCard';
 
 interface Step1DataSourceProps {
   spreadsheetData: SpreadsheetData;
@@ -51,9 +52,6 @@ export const Step1DataSource: React.FC<Step1DataSourceProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [googleConnected, setGoogleConnected] = useState(false);
-  const [googleSheetUrl, setGoogleSheetUrl] = useState('');
-  const [isConnectingGoogle, setIsConnectingGoogle] = useState(false);
 
   const activeWorksheet = spreadsheetData.worksheets.find(
     ws => ws.name === (selectedWorksheetName || spreadsheetData.activeSheetName)
@@ -122,27 +120,6 @@ export const Step1DataSource: React.FC<Step1DataSourceProps> = ({
       handleProcessWorkbook(workbook, file.name);
     };
     reader.readAsBinaryString(file);
-  };
-
-  const handleConnectGoogle = () => {
-    setIsConnectingGoogle(true);
-    setTimeout(() => {
-      setIsConnectingGoogle(false);
-      setGoogleConnected(true);
-      setUploadStatus('Connected to Google Sheets API.');
-      setTimeout(() => setUploadStatus(null), 4000);
-    }, 1200);
-  };
-
-  const handleSyncGoogleSheet = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!googleSheetUrl) return;
-    setIsConnectingGoogle(true);
-    setTimeout(() => {
-      setIsConnectingGoogle(false);
-      setUploadStatus('Synchronized Google Sheet rows.');
-      setTimeout(() => setUploadStatus(null), 4000);
-    }, 1000);
   };
 
   // Sliced rows for preview
@@ -285,60 +262,19 @@ export const Step1DataSource: React.FC<Step1DataSourceProps> = ({
           </div>
         </div>
       ) : (
-        /* Google Sheets Connector */
-        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-6">
-          <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold">
-              <Globe className="w-5 h-5" />
-            </div>
-            <div>
-              <h3 className="font-bold text-slate-900 text-base">Google Sheets Live Synchronization</h3>
-              <p className="text-xs text-slate-500">Connect your Google Workspace or personal Google account</p>
-            </div>
-          </div>
-
-          {!googleConnected ? (
-            <div className="p-6 bg-slate-50 rounded-xl border border-slate-200 flex flex-col items-center text-center space-y-3">
-              <p className="text-sm font-semibold text-slate-800">
-                Connect your Google Account to access your online spreadsheets
-              </p>
-              <p className="text-xs text-slate-500 max-w-md">
-                Invoice Studio accesses your spreadsheets securely in read-only mode to pull rows into the invoice generator.
-              </p>
-              <button
-                onClick={handleConnectGoogle}
-                disabled={isConnectingGoogle}
-                className="inline-flex items-center space-x-2 bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2.5 rounded-xl text-xs font-semibold transition-all shadow-sm"
-              >
-                {isConnectingGoogle ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Globe className="w-4 h-4" />}
-                <span>{isConnectingGoogle ? 'Connecting...' : 'Authorize Google Account'}</span>
-              </button>
-            </div>
-          ) : (
-            <form onSubmit={handleSyncGoogleSheet} className="space-y-4">
-              <div className="flex items-center space-x-2 text-xs text-emerald-700 bg-emerald-50 p-3 rounded-xl border border-emerald-200 font-semibold">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                <span>Google Account connected. Enter the Google Spreadsheet URL or ID below:</span>
-              </div>
-              <div className="flex space-x-2">
-                <input
-                  type="text"
-                  value={googleSheetUrl}
-                  onChange={(e) => setGoogleSheetUrl(e.target.value)}
-                  placeholder="https://docs.google.com/spreadsheets/d/your-spreadsheet-id/edit"
-                  className="flex-1 bg-white border border-slate-300 rounded-xl px-4 py-2.5 text-xs text-slate-800 outline-none focus:ring-2 focus:ring-indigo-500"
-                />
-                <button
-                  type="submit"
-                  disabled={isConnectingGoogle}
-                  className="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-xl text-xs font-semibold transition-all shadow-sm"
-                >
-                  {isConnectingGoogle ? 'Syncing...' : 'Sync Data'}
-                </button>
-              </div>
-            </form>
-          )}
-        </div>
+        /* Real Google Sheets Connector */
+        <GoogleSheetsConnectorCard
+          spreadsheetData={spreadsheetData}
+          setSpreadsheetData={setSpreadsheetData}
+          onSheetImported={(sheetName) => {
+            if (sheetName) setSelectedWorksheetName(sheetName);
+            setStartRowIndex(0);
+            setEndRowIndex(undefined);
+            setUploadStatus(`Synchronized Google Sheet worksheet "${sheetName}".`);
+            setTimeout(() => setUploadStatus(null), 4000);
+          }}
+          compact
+        />
       )}
 
       {/* Header Row & Range Selection Control Card */}

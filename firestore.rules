@@ -1,0 +1,547 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 0: Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // Global Hardened Primitives (Phase 3)
+    // =========================================================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isVerifiedOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOptionalString(data, key, maxLen) {
+      return !(key in data) || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    function isOptionalNumber(data, key) {
+      return !(key in data) || (data[key] is number);
+    }
+
+    function hasParentUser(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId));
+    }
+
+    // =========================================================================
+    // Validation Blueprints (Pillar 2 - Synchronized with firebase-blueprint.json)
+    // =========================================================================
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['userId', 'displayName', 'onboardingCompleted', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'displayName', 'photoURL', 'onboardingCompleted', 'createdAt', 'updatedAt'])
+        && isValidId(data.userId)
+        && data.userId == userId
+        && data.userId == request.auth.uid
+        && data.displayName is string
+        && data.displayName.size() <= 120
+        && isOptionalString(data, 'photoURL', 512)
+        && data.onboardingCompleted is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivateAccount(data, userId) {
+      return data.keys().hasAll(['userId', 'email', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'email', 'createdAt', 'updatedAt'])
+        && isValidId(data.userId)
+        && data.userId == userId
+        && data.userId == request.auth.uid
+        && data.email is string
+        && data.email.size() >= 3
+        && data.email.size() <= 254
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidWorkspaceSettings(data, userId) {
+      return data.keys().hasAll(['userId', 'companySettings', 'template', 'calculationSettings', 'fields', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'companySettings', 'template', 'calculationSettings', 'fields', 'createdAt', 'updatedAt'])
+        && isValidId(data.userId)
+        && data.userId == userId
+        && data.userId == request.auth.uid
+        && data.companySettings is map
+        && data.template is map
+        && data.calculationSettings is map
+        && data.fields is list
+        && data.fields.size() <= 150
+        && (data.fields.size() == 0 || data.fields[0] is map)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCustomerRecord(data, userId, customerId) {
+      return data.keys().hasAll(['userId', 'id', 'customerName', 'billingAddress', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'userId', 'id', 'customerName', 'contactPerson', 'email', 'phone',
+          'billingAddress', 'shippingAddress', 'city', 'state', 'postalCode',
+          'country', 'gstin', 'pan', 'referenceNumber', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.userId)
+        && data.userId == userId
+        && data.userId == request.auth.uid
+        && isValidId(data.id)
+        && data.id == customerId
+        && data.customerName is string
+        && data.customerName.size() >= 1
+        && data.customerName.size() <= 200
+        && isOptionalString(data, 'contactPerson', 150)
+        && isOptionalString(data, 'email', 254)
+        && isOptionalString(data, 'phone', 40)
+        && data.billingAddress is string
+        && data.billingAddress.size() <= 500
+        && isOptionalString(data, 'shippingAddress', 500)
+        && isOptionalString(data, 'city', 100)
+        && isOptionalString(data, 'state', 100)
+        && isOptionalString(data, 'postalCode', 30)
+        && isOptionalString(data, 'country', 100)
+        && isOptionalString(data, 'gstin', 40)
+        && isOptionalString(data, 'pan', 40)
+        && isOptionalString(data, 'referenceNumber', 80)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidQuotationStatus(status) {
+      return status in [
+        'Draft',
+        'Pending Approval',
+        'Approved',
+        'Not Approved',
+        'Expired',
+        'Converted to Invoice'
+      ];
+    }
+
+    function isValidQuotationRecord(data, userId, quotationId) {
+      return data.keys().hasAll([
+          'userId', 'id', 'quotationNumber', 'quotationDate', 'validUntilDate',
+          'customerName', 'currencyCode', 'status', 'subtotal', 'taxableAmount',
+          'totalTax', 'discountAmount', 'totalAmount', 'amountInWords',
+          'data', 'approvalHistory', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'userId', 'id', 'quotationNumber', 'quotationDate', 'validUntilDate',
+          'customerName', 'customerEmail', 'projectName', 'salesperson',
+          'currencyCode', 'status', 'subtotal', 'taxableAmount', 'totalTax',
+          'discountAmount', 'totalAmount', 'amountInWords', 'data',
+          'approvalHistory', 'approvedAt', 'approvedBy', 'approvalNotes',
+          'rejectionReason', 'convertedInvoiceId', 'convertedInvoiceNumber',
+          'convertedAt', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.userId)
+        && data.userId == userId
+        && data.userId == request.auth.uid
+        && isValidId(data.id)
+        && data.id == quotationId
+        && data.quotationNumber is string
+        && data.quotationNumber.size() >= 1
+        && data.quotationNumber.size() <= 80
+        && data.quotationDate is string
+        && data.quotationDate.size() <= 40
+        && data.validUntilDate is string
+        && data.validUntilDate.size() <= 40
+        && data.customerName is string
+        && data.customerName.size() >= 1
+        && data.customerName.size() <= 200
+        && isOptionalString(data, 'customerEmail', 254)
+        && isOptionalString(data, 'projectName', 200)
+        && isOptionalString(data, 'salesperson', 120)
+        && data.currencyCode is string
+        && data.currencyCode.size() >= 1
+        && data.currencyCode.size() <= 12
+        && data.status is string
+        && isValidQuotationStatus(data.status)
+        && data.subtotal is number
+        && data.taxableAmount is number
+        && data.totalTax is number
+        && data.discountAmount is number
+        && data.totalAmount is number
+        && data.amountInWords is string
+        && data.amountInWords.size() <= 500
+        && data.data is map
+        && data.approvalHistory is list
+        && data.approvalHistory.size() <= 100
+        && (data.approvalHistory.size() == 0 || data.approvalHistory[0] is map)
+        && isOptionalString(data, 'approvedAt', 64)
+        && isOptionalString(data, 'approvedBy', 150)
+        && isOptionalString(data, 'approvalNotes', 1000)
+        && isOptionalString(data, 'rejectionReason', 1000)
+        && isOptionalString(data, 'convertedInvoiceId', 128)
+        && isOptionalString(data, 'convertedInvoiceNumber', 80)
+        && isOptionalString(data, 'convertedAt', 64)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidInvoiceRecord(data, userId, invoiceId) {
+      return data.keys().hasAll([
+          'userId', 'id', 'invoiceNumber', 'customerName', 'sourceType',
+          'sourceName', 'worksheetName', 'generatedDate', 'totalAmount',
+          'gstAmount', 'templateId', 'profileId', 'revisionNumber',
+          'status', 'dataSnapshot', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'userId', 'id', 'invoiceNumber', 'customerName', 'sourceType',
+          'sourceName', 'worksheetName', 'generatedDate', 'totalAmount',
+          'gstAmount', 'templateId', 'profileId', 'revisionNumber',
+          'status', 'dataSnapshot', 'paymentMethod', 'paymentStatus',
+          'paymentDate', 'paymentReference', 'paymentAmount', 'paymentNotes',
+          'sourceQuotationId', 'sourceQuotationNumber', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.userId)
+        && data.userId == userId
+        && data.userId == request.auth.uid
+        && isValidId(data.id)
+        && data.id == invoiceId
+        && data.invoiceNumber is string
+        && data.invoiceNumber.size() >= 1
+        && data.invoiceNumber.size() <= 80
+        && data.customerName is string
+        && data.customerName.size() >= 1
+        && data.customerName.size() <= 200
+        && data.sourceType is string
+        && data.sourceType in ['excel', 'googlesheets', 'mock', 'manual']
+        && data.sourceName is string
+        && data.sourceName.size() <= 200
+        && data.worksheetName is string
+        && data.worksheetName.size() <= 120
+        && data.generatedDate is string
+        && data.generatedDate.size() <= 64
+        && data.totalAmount is number
+        && data.gstAmount is number
+        && data.templateId is string
+        && data.templateId.size() <= 128
+        && data.profileId is string
+        && data.profileId.size() <= 128
+        && data.revisionNumber is number
+        && data.status is string
+        && data.status in ['success', 'warning', 'error']
+        && data.dataSnapshot is map
+        && isOptionalString(data, 'paymentMethod', 80)
+        && isOptionalString(data, 'paymentStatus', 60)
+        && isOptionalString(data, 'paymentDate', 64)
+        && isOptionalString(data, 'paymentReference', 120)
+        && isOptionalNumber(data, 'paymentAmount')
+        && isOptionalString(data, 'paymentNotes', 1000)
+        && isOptionalString(data, 'sourceQuotationId', 128)
+        && isOptionalString(data, 'sourceQuotationNumber', 80)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidEmailLogRecord(data, userId, logId) {
+      return data.keys().hasAll([
+          'userId', 'id', 'documentType', 'documentId', 'documentNumber',
+          'recipientEmail', 'deliveryMethod', 'senderEmail', 'subject',
+          'status', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'userId', 'id', 'documentType', 'documentId', 'documentNumber',
+          'recipientEmail', 'cc', 'bcc', 'deliveryMethod', 'senderEmail',
+          'subject', 'status', 'providerMessageId', 'errorMessage', 'createdAt'
+        ])
+        && isValidId(data.userId)
+        && data.userId == userId
+        && data.userId == request.auth.uid
+        && isValidId(data.id)
+        && data.id == logId
+        && data.documentType is string
+        && data.documentType in ['invoice', 'quotation']
+        && data.documentId is string
+        && data.documentId.size() >= 1
+        && data.documentId.size() <= 128
+        && data.documentNumber is string
+        && data.documentNumber.size() >= 1
+        && data.documentNumber.size() <= 80
+        && data.recipientEmail is string
+        && data.recipientEmail.size() >= 3
+        && data.recipientEmail.size() <= 254
+        && isOptionalString(data, 'cc', 500)
+        && isOptionalString(data, 'bcc', 500)
+        && data.deliveryMethod is string
+        && data.deliveryMethod in ['gmail', 'smtp']
+        && data.senderEmail is string
+        && data.senderEmail.size() <= 254
+        && data.subject is string
+        && data.subject.size() >= 1
+        && data.subject.size() <= 300
+        && data.status is string
+        && data.status in ['sent', 'failed']
+        && isOptionalString(data, 'providerMessageId', 256)
+        && isOptionalString(data, 'errorMessage', 1000)
+        && data.createdAt is timestamp;
+    }
+
+    // =========================================================================
+    // Collection Rules
+    // =========================================================================
+
+    // 1. Master User Profile (/users/{userId}) - Strictly Owner-Only
+    match /users/{userId} {
+      allow get: if isVerifiedOwner(userId) && isValidId(userId);
+      allow list: if false;
+
+      allow create: if isVerifiedOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Update profile display / onboarding
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'displayName', 'photoURL', 'onboardingCompleted', 'updatedAt'
+          ])
+        );
+
+      allow delete: if isVerifiedOwner(userId) && isValidId(userId);
+
+      // 2. Private PII Subcollection (/users/{userId}/private/{docId})
+      match /private/{docId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(docId);
+        allow list: if false;
+
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(docId)
+          && docId == 'account'
+          && isValidUserPrivateAccount(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && hasParentUser(userId);
+
+        allow update: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(docId)
+          && docId == 'account'
+          && isValidUserPrivateAccount(incoming(), userId)
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt'])
+          && hasParentUser(userId);
+
+        allow delete: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(docId);
+      }
+
+      // 3. Workspace Settings (/users/{userId}/workspace/{docId})
+      match /workspace/{docId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(docId);
+        allow list: if false;
+
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(docId)
+          && docId == 'settings'
+          && isValidWorkspaceSettings(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && hasParentUser(userId);
+
+        allow update: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(docId)
+          && docId == 'settings'
+          && isValidWorkspaceSettings(incoming(), userId)
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            // Action: Update workspace configuration
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'companySettings', 'template', 'calculationSettings', 'fields', 'updatedAt'
+            ])
+          )
+          && hasParentUser(userId);
+
+        allow delete: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(docId);
+      }
+
+      // 4. Customer Directory (/users/{userId}/customers/{customerId})
+      match /customers/{customerId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(customerId);
+        allow list: if isVerifiedOwner(userId) && resource.data.userId == request.auth.uid;
+
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(customerId)
+          && isValidCustomerRecord(incoming(), userId, customerId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && hasParentUser(userId);
+
+        allow update: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(customerId)
+          && isValidCustomerRecord(incoming(), userId, customerId)
+          && incoming().userId == existing().userId
+          && incoming().id == existing().id
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            // Action: Edit customer details
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'customerName', 'contactPerson', 'email', 'phone',
+              'billingAddress', 'shippingAddress', 'city', 'state',
+              'postalCode', 'country', 'gstin', 'pan', 'referenceNumber', 'updatedAt'
+            ])
+          )
+          && hasParentUser(userId);
+
+        allow delete: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(customerId);
+      }
+
+      // 5. Quotations (/users/{userId}/quotations/{quotationId})
+      match /quotations/{quotationId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(quotationId);
+        allow list: if isVerifiedOwner(userId) && resource.data.userId == request.auth.uid;
+
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(quotationId)
+          && isValidQuotationRecord(incoming(), userId, quotationId)
+          && incoming().status != 'Converted to Invoice'
+          && !('convertedInvoiceId' in incoming())
+          && !('convertedInvoiceNumber' in incoming())
+          && !('convertedAt' in incoming())
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && hasParentUser(userId);
+
+        allow update: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(quotationId)
+          && isValidQuotationRecord(incoming(), userId, quotationId)
+          // Terminal State Lock: Once Converted to Invoice, quotation is permanently locked
+          && existing().status != 'Converted to Invoice'
+          && incoming().userId == existing().userId
+          && incoming().id == existing().id
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            // Action 1: Edit quotation content (never directly convert to invoice)
+            (
+              incoming().status != 'Converted to Invoice'
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'quotationNumber', 'quotationDate', 'validUntilDate', 'customerName',
+                'customerEmail', 'projectName', 'salesperson', 'currencyCode',
+                'status', 'subtotal', 'taxableAmount', 'totalTax', 'discountAmount',
+                'totalAmount', 'amountInWords', 'data', 'approvalHistory',
+                'approvedAt', 'approvedBy', 'approvalNotes', 'rejectionReason', 'updatedAt'
+              ])
+            )
+            ||
+            // Action 2: Convert Approved Quotation to Invoice (Atomic with linked invoice creation)
+            (
+              existing().status == 'Approved'
+              && incoming().status == 'Converted to Invoice'
+              && ('convertedInvoiceId' in incoming())
+              && isValidId(incoming().convertedInvoiceId)
+              && incoming().diff(existing()).affectedKeys().hasOnly([
+                'status', 'approvalHistory', 'convertedInvoiceId',
+                'convertedInvoiceNumber', 'convertedAt', 'updatedAt'
+              ])
+              && existsAfter(/databases/$(database)/documents/users/$(userId)/invoices/$(incoming().convertedInvoiceId))
+            )
+          )
+          && hasParentUser(userId);
+
+        allow delete: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(quotationId)
+          && existing().status != 'Converted to Invoice';
+      }
+
+      // 6. Invoices (/users/{userId}/invoices/{invoiceId})
+      match /invoices/{invoiceId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(invoiceId);
+        allow list: if isVerifiedOwner(userId) && resource.data.userId == request.auth.uid;
+
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(invoiceId)
+          && isValidInvoiceRecord(incoming(), userId, invoiceId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && hasParentUser(userId);
+
+        allow update: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(invoiceId)
+          && isValidInvoiceRecord(incoming(), userId, invoiceId)
+          && incoming().userId == existing().userId
+          && incoming().id == existing().id
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            // Action 1: Update invoice fields & revision
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'invoiceNumber', 'customerName', 'sourceType', 'sourceName',
+              'worksheetName', 'generatedDate', 'totalAmount', 'gstAmount',
+              'templateId', 'profileId', 'revisionNumber', 'status',
+              'dataSnapshot', 'paymentMethod', 'paymentStatus', 'paymentDate',
+              'paymentReference', 'paymentAmount', 'paymentNotes',
+              'sourceQuotationId', 'sourceQuotationNumber', 'updatedAt'
+            ])
+            ||
+            // Action 2: Record payment update
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'paymentMethod', 'paymentStatus', 'paymentDate',
+              'paymentReference', 'paymentAmount', 'paymentNotes', 'updatedAt'
+            ])
+          )
+          && hasParentUser(userId);
+
+        allow delete: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(invoiceId);
+      }
+
+      // 7. Email Delivery Audit Logs (/users/{userId}/emailLogs/{logId}) - Append-Only
+      match /emailLogs/{logId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(logId);
+        allow list: if isVerifiedOwner(userId) && resource.data.userId == request.auth.uid;
+
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(logId)
+          && isValidEmailLogRecord(incoming(), userId, logId)
+          && incoming().createdAt == request.time
+          && hasParentUser(userId);
+
+        // Append-only audit logs: updates are permanently forbidden
+        allow update: if false;
+
+        allow delete: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(logId);
+      }
+    }
+  }
+}

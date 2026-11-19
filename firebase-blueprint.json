@@ -1,0 +1,589 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Per-user public/non-PII profile document anchored at /users/{userId}.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the owning user."
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "Display name shown in the navigation bar."
+        },
+        "photoURL": {
+          "type": "string",
+          "maxLength": 512,
+          "description": "Optional avatar image URL."
+        },
+        "onboardingCompleted": {
+          "type": "boolean",
+          "description": "Whether the user has completed workspace onboarding."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when profile was last updated."
+        }
+      },
+      "required": ["userId", "displayName", "onboardingCompleted", "createdAt", "updatedAt"]
+    },
+    "UserPrivateAccount": {
+      "title": "UserPrivateAccount",
+      "description": "Isolated PII record for the user under /users/{userId}/private/{docId}.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the owning user."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "minLength": 3,
+          "maxLength": 254,
+          "description": "Verified email address of the owning user."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when private account doc was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when private account doc was last updated."
+        }
+      },
+      "required": ["userId", "email", "createdAt", "updatedAt"]
+    },
+    "WorkspaceSettings": {
+      "title": "WorkspaceSettings",
+      "description": "Per-user workspace configuration including company settings, PDF template, field catalog, and calculation settings.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the owning user."
+        },
+        "companySettings": {
+          "type": "object",
+          "description": "Company branding, tax identifiers, bank accounts, and defaults."
+        },
+        "template": {
+          "type": "object",
+          "description": "PDF layout template preferences and visibility flags."
+        },
+        "calculationSettings": {
+          "type": "object",
+          "description": "Calculation mode and GST inclusivity settings."
+        },
+        "fields": {
+          "type": "array",
+          "description": "Configured invoice field catalog (bounded to max 150 items)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when workspace settings were created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when workspace settings were last updated."
+        }
+      },
+      "required": ["userId", "companySettings", "template", "calculationSettings", "fields", "createdAt", "updatedAt"]
+    },
+    "CustomerRecord": {
+      "title": "CustomerRecord",
+      "description": "Per-user customer directory entry containing customer contact and billing PII.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the owning user."
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Unique customer record ID."
+        },
+        "customerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Customer legal or display name."
+        },
+        "contactPerson": {
+          "type": "string",
+          "maxLength": 150,
+          "description": "Primary contact person."
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 254,
+          "description": "Customer email address."
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 40,
+          "description": "Customer phone number."
+        },
+        "billingAddress": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Customer billing address."
+        },
+        "shippingAddress": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Optional shipping address."
+        },
+        "city": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "state": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "postalCode": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "country": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "gstin": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "pan": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "referenceNumber": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "id", "customerName", "billingAddress", "createdAt", "updatedAt"]
+    },
+    "QuotationRecord": {
+      "title": "QuotationRecord",
+      "description": "Per-user quotation with lifecycle status, approval audit history, and terminal locking once converted to invoice.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "quotationNumber": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "quotationDate": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "validUntilDate": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "customerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "customerEmail": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "projectName": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "salesperson": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "currencyCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 12
+        },
+        "status": {
+          "type": "string",
+          "enum": ["Draft", "Pending Approval", "Approved", "Not Approved", "Expired", "Converted to Invoice"]
+        },
+        "subtotal": {
+          "type": "number"
+        },
+        "taxableAmount": {
+          "type": "number"
+        },
+        "totalTax": {
+          "type": "number"
+        },
+        "discountAmount": {
+          "type": "number"
+        },
+        "totalAmount": {
+          "type": "number"
+        },
+        "amountInWords": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "data": {
+          "type": "object"
+        },
+        "approvalHistory": {
+          "type": "array"
+        },
+        "approvedAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "approvedBy": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "approvalNotes": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "rejectionReason": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "convertedInvoiceId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "convertedInvoiceNumber": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "convertedAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "userId",
+        "id",
+        "quotationNumber",
+        "quotationDate",
+        "validUntilDate",
+        "customerName",
+        "currencyCode",
+        "status",
+        "subtotal",
+        "taxableAmount",
+        "totalTax",
+        "discountAmount",
+        "totalAmount",
+        "amountInWords",
+        "data",
+        "approvalHistory",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "InvoiceRecord": {
+      "title": "InvoiceRecord",
+      "description": "Per-user generated or manual invoice record.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "invoiceNumber": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "customerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "sourceType": {
+          "type": "string",
+          "enum": ["excel", "googlesheets", "mock", "manual"]
+        },
+        "sourceName": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "worksheetName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "generatedDate": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "totalAmount": {
+          "type": "number"
+        },
+        "gstAmount": {
+          "type": "number"
+        },
+        "templateId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "profileId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "revisionNumber": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["success", "warning", "error"]
+        },
+        "dataSnapshot": {
+          "type": "object"
+        },
+        "paymentMethod": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "paymentStatus": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "paymentDate": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "paymentReference": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "paymentAmount": {
+          "type": "number"
+        },
+        "paymentNotes": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "sourceQuotationId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "sourceQuotationNumber": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "userId",
+        "id",
+        "invoiceNumber",
+        "customerName",
+        "sourceType",
+        "sourceName",
+        "worksheetName",
+        "generatedDate",
+        "totalAmount",
+        "gstAmount",
+        "templateId",
+        "profileId",
+        "revisionNumber",
+        "status",
+        "dataSnapshot",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "EmailLogRecord": {
+      "title": "EmailLogRecord",
+      "description": "Immutable per-user email dispatch audit log.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "documentType": {
+          "type": "string",
+          "enum": ["invoice", "quotation"]
+        },
+        "documentId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "documentNumber": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "recipientEmail": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 254
+        },
+        "cc": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "bcc": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "deliveryMethod": {
+          "type": "string",
+          "enum": ["gmail", "smtp"]
+        },
+        "senderEmail": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "status": {
+          "type": "string",
+          "enum": ["sent", "failed"]
+        },
+        "providerMessageId": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "errorMessage": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "userId",
+        "id",
+        "documentType",
+        "documentId",
+        "documentNumber",
+        "recipientEmail",
+        "deliveryMethod",
+        "senderEmail",
+        "subject",
+        "status",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Per-user non-PII profile document. Master gate for all user subcollections."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/UserPrivateAccount" },
+      "description": "Isolated PII record (email) readable and writable strictly by the authenticated owner."
+    },
+    "/users/{userId}/workspace/{docId}": {
+      "schema": { "$ref": "#/entities/WorkspaceSettings" },
+      "description": "Per-user workspace settings (company settings, template, calculation settings, fields)."
+    },
+    "/users/{userId}/customers/{customerId}": {
+      "schema": { "$ref": "#/entities/CustomerRecord" },
+      "description": "Per-user customer directory entries."
+    },
+    "/users/{userId}/quotations/{quotationId}": {
+      "schema": { "$ref": "#/entities/QuotationRecord" },
+      "description": "Per-user quotations with strict approval workflow and terminal lock when Converted to Invoice."
+    },
+    "/users/{userId}/invoices/{invoiceId}": {
+      "schema": { "$ref": "#/entities/InvoiceRecord" },
+      "description": "Per-user generated and manual invoices."
+    },
+    "/users/{userId}/emailLogs/{logId}": {
+      "schema": { "$ref": "#/entities/EmailLogRecord" },
+      "description": "Append-only per-user email dispatch audit logs."
+    }
+  }
+}

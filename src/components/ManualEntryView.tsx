@@ -76,6 +76,9 @@ interface ManualEntryViewProps {
   setGenerationHistory: React.Dispatch<React.SetStateAction<GenerationRecord[]>>;
   onNavigateTab: (tab: string) => void;
   onSendByEmail: (recordId: string) => void;
+  incomingConvertedInvoice?: ManualInvoiceData | null;
+  onConsumeIncomingInvoice?: () => void;
+  onInvoiceSaved?: (record: GenerationRecord) => void;
 }
 
 type SectionKey =
@@ -105,6 +108,9 @@ export const ManualEntryView: React.FC<ManualEntryViewProps> = ({
   setGenerationHistory,
   onNavigateTab,
   onSendByEmail,
+  incomingConvertedInvoice,
+  onConsumeIncomingInvoice,
+  onInvoiceSaved,
 }) => {
   const [formData, setFormData] = useState<ManualInvoiceData>(() => {
     const savedWorking = storage.loadActiveManualForm();
@@ -159,6 +165,27 @@ export const ManualEntryView: React.FC<ManualEntryViewProps> = ({
   useEffect(() => {
     storage.saveActiveManualForm(formData);
   }, [formData]);
+
+  // Hydrate invoice converted from an Approved Quotation
+  useEffect(() => {
+    if (!incomingConvertedInvoice) return;
+    setFormData(incomingConvertedInvoice);
+    const matched = generationHistory.find(
+      (r) =>
+        (incomingConvertedInvoice.id && r.id === incomingConvertedInvoice.id) ||
+        r.invoiceNumber === incomingConvertedInvoice.invoiceNumber
+    );
+    setGeneratedRecord(matched || null);
+    setActiveDraftId(null);
+    setShowValidationErrors(false);
+    setNotification({
+      type: 'success',
+      text: incomingConvertedInvoice.sourceQuotationNumber
+        ? `Invoice #${incomingConvertedInvoice.invoiceNumber} created from Approved Quotation ${incomingConvertedInvoice.sourceQuotationNumber} (Status: Unpaid). You can review, edit, download PDF, or email it now.`
+        : `Loaded Invoice #${incomingConvertedInvoice.invoiceNumber} for editing.`,
+    });
+    onConsumeIncomingInvoice?.();
+  }, [incomingConvertedInvoice, generationHistory, onConsumeIncomingInvoice]);
 
   // Real-time invoice computation & validation
   const snapshot = useMemo(
@@ -423,10 +450,40 @@ export const ManualEntryView: React.FC<ManualEntryViewProps> = ({
 
     setIsGenerating(true);
     try {
-      const record = convertManualInvoiceToGenerationRecord(formData, company, template);
+      const existingRec =
+        (generatedRecord &&
+          generationHistory.find((r) => r.id === generatedRecord.id)) ||
+        (formData.id
+          ? generationHistory.find((r) => r.id === formData.id)
+          : undefined);
 
-      setGenerationHistory((prev) => [record, ...prev]);
+      const baseRecord = convertManualInvoiceToGenerationRecord(
+        formData,
+        company,
+        template
+      );
+      const record: GenerationRecord = {
+        ...baseRecord,
+        id: existingRec?.id || formData.id || baseRecord.id,
+        revisionNumber: existingRec ? (existingRec.revisionNumber || 1) + 1 : 1,
+        sourceQuotationId:
+          formData.sourceQuotationId || existingRec?.sourceQuotationId,
+        sourceQuotationNumber:
+          formData.sourceQuotationNumber || existingRec?.sourceQuotationNumber,
+        updatedAt: new Date().toISOString(),
+      };
+
+      setGenerationHistory((prev) => {
+        const idx = prev.findIndex((r) => r.id === record.id);
+        if (idx >= 0) {
+          const copy = [...prev];
+          copy[idx] = record;
+          return copy;
+        }
+        return [record, ...prev];
+      });
       setGeneratedRecord(record);
+      onInvoiceSaved?.(record);
 
       // Remove loaded draft cleanly once converted into a finalized invoice
       if (activeDraftId) {
@@ -437,7 +494,9 @@ export const ManualEntryView: React.FC<ManualEntryViewProps> = ({
 
       setNotification({
         type: 'success',
-        text: `Invoice #${record.invoiceNumber} generated and saved to History (${formatCurrency(record.totalAmount, company.currency)}).`,
+        text: existingRec
+          ? `Invoice #${record.invoiceNumber} updated in History (${formatCurrency(record.totalAmount, company.currency)}).`
+          : `Invoice #${record.invoiceNumber} generated and saved to History (${formatCurrency(record.totalAmount, company.currency)}).`,
       });
 
       return record;
@@ -595,6 +654,27 @@ export const ManualEntryView: React.FC<ManualEntryViewProps> = ({
             aria-label="Dismiss notification"
           >
             <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Linked Source Quotation Info Banner */}
+      {formData.sourceQuotationNumber && (
+        <div className="bg-indigo-50 border border-indigo-200 rounded-2xl px-5 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+          <div className="flex items-center space-x-2 text-indigo-900">
+            <ShieldCheck className="w-4 h-4 text-indigo-600 shrink-0" />
+            <span>
+              Converted from Approved Quotation{' '}
+              <span className="font-mono font-bold">{formData.sourceQuotationNumber}</span>.
+              Edits here update only this invoice — the source quotation remains immutable and linked.
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigateTab('quotations')}
+            className="px-3 py-1.5 rounded-lg bg-white border border-indigo-300 text-indigo-700 font-bold hover:bg-indigo-100 shrink-0 cursor-pointer"
+          >
+            View Quotations
           </button>
         </div>
       )}

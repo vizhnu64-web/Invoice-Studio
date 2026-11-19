@@ -196,23 +196,28 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
       leftY += contactLines.length * 4;
     }
 
-    // Right Column: TAX INVOICE & Metadata
+    const isQuotation = fields['document_type'] === 'quotation';
+    // Right Column: TAX INVOICE / QUOTATION & Metadata
     doc.setFont(validFont, 'bold');
     doc.setFontSize(18);
     doc.setTextColor(accentRgb[0], accentRgb[1], accentRgb[2]);
-    const invTitle = fields['invoice_title'] || template?.labels?.['invoice_title'] || company.content?.invoiceTitle || 'TAX INVOICE';
+    const invTitle =
+      fields['invoice_title'] ||
+      template?.labels?.['invoice_title'] ||
+      (isQuotation ? 'QUOTATION' : company.content?.invoiceTitle || 'TAX INVOICE');
     doc.text(invTitle, pageWidth - margin, rightY, { align: 'right' });
     rightY += 8;
 
-    const invoiceNum = fields['invoice_number'] || 'INV-001';
+    const invoiceNum = fields['quotation_number'] || fields['invoice_number'] || (isQuotation ? 'QT-001' : 'INV-001');
     const invoiceDate = fields['invoice_date'] || '2026-11-01';
     const dueDate = fields['due_date'] || '';
-    const placeOfSupply = fields['place_of_supply'] || `${company.state} (06)`;
+    const validUntil = fields['valid_until'] || '';
+    const placeOfSupply = isQuotation ? (fields['place_of_supply'] || '') : (fields['place_of_supply'] || `${company.state} (06)`);
 
     doc.setFont(validFont, 'bold');
     doc.setFontSize(9.5);
     doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
-    doc.text(`Invoice No: ${invoiceNum}`, pageWidth - margin, rightY, { align: 'right' });
+    doc.text(`${isQuotation ? 'Quotation No' : 'Invoice No'}: ${invoiceNum}`, pageWidth - margin, rightY, { align: 'right' });
     rightY += 5;
 
     doc.setFont(validFont, 'normal');
@@ -221,13 +226,28 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
     doc.text(`Date: ${invoiceDate}`, pageWidth - margin, rightY, { align: 'right' });
     rightY += 4.5;
 
-    if (dueDate) {
+    if (isQuotation && validUntil) {
+      doc.text(`Valid Until: ${validUntil}`, pageWidth - margin, rightY, { align: 'right' });
+      rightY += 4.5;
+    }
+
+    if (!isQuotation && dueDate) {
       doc.text(`Due Date: ${dueDate}`, pageWidth - margin, rightY, { align: 'right' });
       rightY += 4.5;
     }
 
     if (placeOfSupply) {
       doc.text(`Place of Supply: ${placeOfSupply}`, pageWidth - margin, rightY, { align: 'right' });
+      rightY += 4.5;
+    }
+
+    if (fields['project_name']) {
+      doc.text(`Project: ${fields['project_name']}`, pageWidth - margin, rightY, { align: 'right' });
+      rightY += 4.5;
+    }
+
+    if (fields['salesperson']) {
+      doc.text(`Prepared By: ${fields['salesperson']}`, pageWidth - margin, rightY, { align: 'right' });
       rightY += 4.5;
     }
 
@@ -268,7 +288,11 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
     doc.setFont(validFont, 'bold');
     doc.setFontSize(9.5);
     doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
-    const billToLabel = template?.labels?.['bill_to'] || 'Billed To (Customer Details):';
+    const billToLabel =
+      template?.labels?.['bill_to'] ||
+      (fields['document_type'] === 'quotation'
+        ? 'Prepared For (Customer Details):'
+        : 'Billed To (Customer Details):');
     doc.text(billToLabel, margin, currentY);
 
     currentY += 4.5;
@@ -448,9 +472,17 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
     doc.line(summaryX, summaryY - 2, pageWidth - margin, summaryY - 2);
     summaryY += 1;
 
-    addSummaryRow('Total Invoice Amount:', formatCurrency(summary.totalInvoiceAmount, company.currency), true, true);
-    addSummaryRow('Payment Received:', formatCurrency(paymentMade, company.currency));
-    addSummaryRow('Balance Due:', formatCurrency(summary.balanceDue, company.currency), true);
+    const isQuotationDoc = fields['document_type'] === 'quotation';
+    addSummaryRow(
+      isQuotationDoc ? 'Total Quoted Amount:' : 'Total Invoice Amount:',
+      formatCurrency(summary.totalInvoiceAmount, company.currency),
+      true,
+      true
+    );
+    if (!isQuotationDoc) {
+      addSummaryRow('Payment Received:', formatCurrency(paymentMade, company.currency));
+      addSummaryRow('Balance Due:', formatCurrency(summary.balanceDue, company.currency), true);
+    }
 
     // Left side: Amount in words & Bank Details
     let leftY = currentY;
@@ -470,7 +502,8 @@ export function generateInvoicePDF(options: GeneratePDFOptions): jsPDF {
     }
 
     // Bank Details
-    const showBank = template?.showSections?.bankDetails !== false;
+    const showBank =
+      template?.showSections?.bankDetails !== false && fields['include_bank_details'] !== false;
     if (showBank) {
       const activeBank = company.bankAccounts.find(b => b.id === company.activeBankId) || company.bankAccounts.find(b => b.isDefault) || company.bankAccounts[0];
       if (activeBank) {

@@ -191,7 +191,7 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
       return '';
     };
     const amount = (...aliases: string[]) => {
-      const raw = read(...aliases).replace(/[₹$,\\s]/g, '');
+      const raw = read(...aliases).replace(/[₹$,\s]/g, '');
       const parsed = Number(raw);
       return Number.isFinite(parsed) ? parsed : 0;
     };

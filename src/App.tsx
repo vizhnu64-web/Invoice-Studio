@@ -612,6 +612,7 @@ export default function App() {
             setQuotations={handleUpdateQuotations}
             generationHistory={generationHistory}
             authUser={authUser}
+            spreadsheetData={spreadsheetData}
             onConvertedToInvoice={handleConvertedToInvoice}
             onEmailQuotation={handleEmailQuotation}
             onNavigateTab={setActiveTab}

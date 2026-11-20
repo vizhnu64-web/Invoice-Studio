@@ -3,7 +3,7 @@
  * The previous Express server is retained for local development, while every
  * /api/* request in production is dispatched directly to the shared handlers.
  */
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { NormalizedRequest, NormalizedResponse } from './_lib/http.js';
 import {
   handleAuthDisconnect,
   handleAuthStatus,
@@ -29,7 +29,7 @@ import {
   handleWorkspace,
 } from './_lib/handlers.js';
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: NormalizedRequest, res: NormalizedResponse) {
   const url = new URL(req.url || '/', `https://${req.headers.host || 'localhost'}`);
   const path = url.pathname.replace(/\\/+$/, '') || '/';
   const method = (req.method || 'GET').toUpperCase();
@@ -65,11 +65,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (path === '/api/email/history') return await handleEmailHistory(req, res);
 
     res.setHeader('Cache-Control', 'no-store, max-age=0');
-    return res.status(404).json({ error: 'API endpoint not found', path });
+    res.statusCode = 404;\n    res.setHeader('Content-Type', 'application/json; charset=utf-8');\n    return res.end(JSON.stringify({ error: 'API endpoint not found', path }));
   } catch (error) {
     console.error('Invoice Studio API handler error:', error);
     if (!res.headersSent) {
-      return res.status(500).json({ error: 'Unexpected API server error.' });
+      res.statusCode = 500;\n      res.setHeader('Content-Type', 'application/json; charset=utf-8');\n      return res.end(JSON.stringify({ error: 'Unexpected API server error.' }));
     }
   }
 }

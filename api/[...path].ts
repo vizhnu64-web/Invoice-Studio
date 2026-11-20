@@ -31,7 +31,7 @@ import {
 
 export default async function handler(req: NormalizedRequest, res: NormalizedResponse) {
   const url = new URL(req.url || '/', `https://${req.headers.host || 'localhost'}`);
-  const path = url.pathname.replace(/\\/+$/, '') || '/';
+  const path = url.pathname.replace(/\/+$/, '') || '/';
   const method = (req.method || 'GET').toUpperCase();
 
   try {

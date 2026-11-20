@@ -475,7 +475,7 @@ export const defaultCompanySettings: CompanySettings = {
     invoiceTitle: 'TAX INVOICE',
     invoiceSubtitle: 'Original For Recipient',
     defaultNotes: '',
-    defaultTerms: '1. Goods once sold will not be taken back.\n2. Interest @ 18% p.a. will be charged if payment is delayed beyond due date.\n3. Subject to Gurugram jurisdiction.',
+    defaultTerms: '',
     paymentInstructions: '',
     thankYouMessage: '',
     footerMessage: 'This is a computer generated invoice powered by Invoice Studio.',
@@ -552,6 +552,17 @@ export const defaultFieldCatalog: InvoiceFieldConfig[] = [
   // Footer
   { id: 'footer_text', defaultName: 'Footer Text', displayName: 'Footer Note', category: 'footer', dataType: 'string', dataSource: 'static', fetchEnabled: false, pdfVisibility: true, value: '', defaultValue: '', required: false, displayOrder: 90 },
 ];
+
+// Remove every sample transaction/company value from the starter field catalog.
+// Static labels (for example TAX INVOICE and Quantity) remain as neutral UI defaults.
+for (const field of defaultFieldCatalog) {
+  if (field.dataSource !== 'static') {
+    const emptyValue = field.dataType === 'number' || field.dataType === 'currency' ? 0 : '';
+    field.value = emptyValue;
+    field.defaultValue = emptyValue;
+  }
+  if (field.dataSource === 'excel') field.sourceColumn = '';
+}
 
 export const defaultMappingProfiles: MappingProfile[] = [];
 

@@ -41,6 +41,7 @@ import {
   QuotationData,
   QuotationRecord,
   QuotationStatus,
+  SpreadsheetData,
 } from '../types';
 import { CURRENCY_CATALOG } from '../mockData';
 import { formatCurrency } from '../utils/calculator';
@@ -84,6 +85,7 @@ interface QuotationGeneratorViewProps {
   ) => void;
   onEmailQuotation: (quotationId: string) => void;
   onNavigateTab: (tab: string) => void;
+  spreadsheetData: SpreadsheetData;
 }
 
 const STATUS_BADGE_STYLES: Record<
@@ -134,6 +136,7 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
   onConvertedToInvoice,
   onEmailQuotation,
   onNavigateTab,
+  spreadsheetData,
 }) => {
   const [viewMode, setViewMode] = useState<'list' | 'editor'>('list');
   const [editingQuotationId, setEditingQuotationId] = useState<string | null>(null);
@@ -165,9 +168,70 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
   const [convertModalTarget, setConvertModalTarget] = useState<QuotationRecord | null>(null);
   const [deleteModalTarget, setDeleteModalTarget] = useState<QuotationRecord | null>(null);
   const [isUploadingDrive, setIsUploadingDrive] = useState(false);
+  const [selectedImportRow, setSelectedImportRow] = useState(0);
 
   const actorName = authUser?.name || authUser?.email || company.authorizedPerson || 'Workspace User';
   const actorEmail = authUser?.email || company.email;
+
+  const sourceWorksheet = spreadsheetData.worksheets.find((sheet) => sheet.name === spreadsheetData.activeSheetName) || spreadsheetData.worksheets[0];
+  const sourceRows = sourceWorksheet?.rows || [];
+
+  const handleImportSelectedSpreadsheetRow = () => {
+    if (!sourceRows.length) {
+      onNavigateTab('datasource');
+      return;
+    }
+    const row = sourceRows[Math.min(selectedImportRow, sourceRows.length - 1)] || {};
+    const normalized = new Map(Object.entries(row).map(([key, value]) => [key.toLowerCase().replace(/[^a-z0-9]/g, ''), value]));
+    const read = (...aliases: string[]) => {
+      for (const alias of aliases) {
+        const value = normalized.get(alias.toLowerCase().replace(/[^a-z0-9]/g, ''));
+        if (value !== undefined && value !== null && String(value).trim() !== '') return String(value).trim();
+      }
+      return '';
+    };
+    const amount = (...aliases: string[]) => {
+      const raw = read(...aliases).replace(/[₹$,\\s]/g, '');
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+    const next = createDefaultQuotationData(company, quotations);
+    const item = next.items[0] || {
+      id: `item_${Date.now()}`, itemName: '', itemDescription: '', hsnSac: '',
+      quantity: 1, unit: 'Nos', rate: 0, discount: 0, discountType: 'fixed' as const, gstPercentage: 0,
+    };
+    const description = read('Item Description', 'Description', 'Product', 'Service', 'Program Name', 'Particulars', 'Subject');
+    item.itemName = description;
+    item.itemDescription = description;
+    item.hsnSac = read('HSN/SAC', 'HSN', 'SAC', 'HSN Code');
+    item.quantity = amount('Quantity', 'Qty') || 1;
+    item.unit = read('Unit', 'UOM') || item.unit || 'Nos';
+    item.rate = amount('Rate', 'Unit Price', 'Price', 'Unit Rate', 'Amount');
+    item.gstPercentage = amount('GST %', 'GST Rate', 'Tax %', 'Tax Rate') || next.defaultGstRate;
+    setEditingQuotationId(null);
+    setFormData({
+      ...next,
+      quotationDate: read('Quotation Date', 'Date', 'Invoice Date') || next.quotationDate,
+      validUntilDate: read('Valid Until', 'Validity Date', 'Expiry Date') || next.validUntilDate,
+      referenceNumber: read('Reference', 'Reference Number', 'PO Number'),
+      subject: read('Subject', 'Description', 'Service', 'Program Name'),
+      projectName: read('Project', 'Project Name', 'Program Name'),
+      customerName: read('Customer Name', 'Client Name', 'Buyer Name', 'Customer', 'Participant Name', 'Name'),
+      contactPerson: read('Contact Person', 'Contact'),
+      customerEmail: read('Email', 'Customer Email', 'Client Email'),
+      customerPhone: read('Phone', 'Mobile', 'Contact Number'),
+      billingAddress: read('Billing Address', 'Address', 'Customer Address', 'Location'),
+      customerCity: read('City'),
+      customerState: read('State'),
+      customerPostalCode: read('Postal Code', 'PIN', 'Pincode', 'ZIP'),
+      customerCountry: read('Country') || next.customerCountry,
+      customerGstin: read('GSTIN', 'GSTIN/UIN', 'Tax ID'),
+      items: [item],
+    });
+    setValidationErrors({});
+    setBanner({ type: 'info', text: `Loaded spreadsheet row ${Math.min(selectedImportRow, sourceRows.length - 1) + 1}. Review the mapped fields before saving.` });
+    setViewMode('editor');
+  };
 
   const stats = useMemo(() => computeQuotationStats(quotations), [quotations]);
 
@@ -549,14 +613,46 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
               Back to Quotations ({quotations.length})
             </button>
           ) : (
-            <button
-              type="button"
-              onClick={handleOpenCreateNew}
-              className="inline-flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm transition-colors cursor-pointer"
-            >
-              <FilePlus2 className="w-4 h-4" />
-              <span>New Quotation</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              {sourceRows.length > 0 && (
+                <>
+                  <select
+                    aria-label="Select spreadsheet row for quotation"
+                    value={selectedImportRow}
+                    onChange={(event) => setSelectedImportRow(Number(event.target.value))}
+                    className="max-w-[180px] px-3 py-2.5 rounded-xl border border-slate-300 bg-white text-xs"
+                  >
+                    {sourceRows.map((_, index) => (
+                      <option key={index} value={index}>Import row {index + 1}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={handleImportSelectedSpreadsheetRow}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-cyan-300 bg-cyan-50 text-cyan-800 text-xs font-bold hover:bg-cyan-100"
+                  >
+                    <CloudUpload className="w-4 h-4" />
+                    Import Row
+                  </button>
+                </>
+              )}
+              <button
+                type="button"
+                onClick={() => onNavigateTab('datasource')}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-700 text-xs font-bold hover:bg-slate-50"
+              >
+                <CloudUpload className="w-4 h-4" />
+                Import Excel / Google Sheet
+              </button>
+              <button
+                type="button"
+                onClick={handleOpenCreateNew}
+                className="inline-flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm transition-colors cursor-pointer"
+              >
+                <FilePlus2 className="w-4 h-4" />
+                <span>Manual Quotation</span>
+              </button>
+            </div>
           )}
         </div>
       </div>

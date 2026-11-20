@@ -23,13 +23,11 @@ import { workspaceApi } from '../utils/workspaceApi';
 
 interface AuthGateScreenProps {
   diagnostics: IntegrationDiagnostics | null;
-  onContinueLocalPreview: () => void;
   onSignedIn: () => Promise<void>;
 }
 
 export const AuthGateScreen: React.FC<AuthGateScreenProps> = ({
   diagnostics,
-  onContinueLocalPreview,
   onSignedIn,
 }) => {
   const [isConnecting, setIsConnecting] = useState(false);
@@ -44,7 +42,7 @@ export const AuthGateScreen: React.FC<AuthGateScreenProps> = ({
     } catch (err: any) {
       setErrorMsg(
         err?.message ||
-          'Google Sign-In could not be completed. Allow popups, try Redirect Sign-In, or continue in Local Workspace Mode.'
+          'Google Sign-In could not be completed. Allow popups, try Redirect Sign-In, and try Standard Redirect Sign-In.'
       );
     } finally {
       setIsConnecting(false);
@@ -175,24 +173,6 @@ export const AuthGateScreen: React.FC<AuthGateScreenProps> = ({
               </div>
             </div>
           )}
-
-          <div className="relative py-1">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-slate-200" />
-            </div>
-            <div className="relative flex justify-center text-[11px]">
-              <span className="bg-white px-2 text-slate-400 font-medium">or work locally</span>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={onContinueLocalPreview}
-            className="w-full py-2.5 px-4 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-800 text-xs font-bold flex items-center justify-center space-x-2 cursor-pointer"
-          >
-            <span>Continue in Local Workspace Mode</span>
-            <ArrowRight className="w-3.5 h-3.5" />
-          </button>
 
           <p className="text-[11px] text-slate-400 text-center">
             Your workspace starts clean and empty—no preloaded demo customers or sample invoices.

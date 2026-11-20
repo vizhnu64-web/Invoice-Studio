@@ -41,10 +41,16 @@ export default async function handler(req: NormalizedRequest, res: NormalizedRes
     if (path === '/api/auth/disconnect') return await handleAuthDisconnect(req, res);
     if (path === '/api/workspace') return await handleWorkspace(req, res);
 
-    const quotationMatch = path.match(/^\\/api\\/quotations(?:\\/([^/]+))?(?:\\/([^/]+))?$/);
-    if (quotationMatch) return await handleQuotations(req, res, quotationMatch.slice(1).filter(Boolean));
-    const invoiceMatch = path.match(/^\\/api\\/invoices(?:\\/([^/]+))?$/);
-    if (invoiceMatch) return await handleInvoices(req, res, invoiceMatch.slice(1).filter(Boolean));
+    if (path === '/api/quotations') return await handleQuotations(req, res, []);
+    if (path.startsWith('/api/quotations/')) {
+      const segments = path.slice('/api/quotations/'.length).split('/').filter(Boolean).map(decodeURIComponent);
+      return await handleQuotations(req, res, segments);
+    }
+    if (path === '/api/invoices') return await handleInvoices(req, res, []);
+    if (path.startsWith('/api/invoices/')) {
+      const segments = path.slice('/api/invoices/'.length).split('/').filter(Boolean).map(decodeURIComponent);
+      return await handleInvoices(req, res, segments);
+    }
 
     if (path === '/api/drive/status') return await handleDriveStatus(req, res);
     if (path === '/api/drive/sync') return await handleDriveSync(req, res);

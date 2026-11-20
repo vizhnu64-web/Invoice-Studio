@@ -401,23 +401,23 @@ export const defaultCompanySettings: CompanySettings = {
   profileName: 'Default Brand Profile',
   isDefault: true,
   currency: defaultCurrencySettings,
-  legalName: 'TBT VENTURES PRIVATE LIMITED',
-  displayName: 'ThinkBeyondThink',
-  tagline: 'Accelerating Enterprise Growth & Mentorship',
-  gstin: '06AAACT1234F1Z5',
-  pan: 'AAACT1234F',
-  cin: 'U74999HR2023PTC123456',
-  addressLine1: '3rd Floor, Tower B, Cyber City',
-  addressLine2: 'Sector 43',
-  branchAddress: 'DLF Phase 4',
-  city: 'Gurugram',
-  state: 'Haryana',
-  pinCode: '122002',
+  legalName: '',
+  displayName: '',
+  tagline: '',
+  gstin: '',
+  pan: '',
+  cin: '',
+  addressLine1: '',
+  addressLine2: '',
+  branchAddress: '',
+  city: '',
+  state: '',
+  pinCode: '',
   country: 'India',
-  phone: '+91 98765 43210',
-  email: 'billing@thinkbeyondthink.com',
-  website: 'https://thinkbeyondthink.com',
-  supportEmail: 'support@thinkbeyondthink.com',
+  phone: '',
+  email: '',
+  website: '',
+  supportEmail: '',
 
   brandPalette: {
     primaryColor: '#4f46e5', // Indigo 600
@@ -476,11 +476,11 @@ export const defaultCompanySettings: CompanySettings = {
     invoiceSubtitle: 'Original For Recipient',
     defaultNotes: 'Thank you for your business. Please make payments referencing invoice number.',
     defaultTerms: '1. Goods once sold will not be taken back.\n2. Interest @ 18% p.a. will be charged if payment is delayed beyond due date.\n3. Subject to Gurugram jurisdiction.',
-    paymentInstructions: 'Please transfer via NEFT/RTGS or UPI to the bank account below.',
+    paymentInstructions: '',
     thankYouMessage: 'We appreciate your partnership!',
     footerMessage: 'This is a computer generated invoice powered by Invoice Studio.',
-    legalDisclaimer: 'Subject to Gurugram jurisdiction.',
-    refundPolicy: 'No refunds once program access is provisioned.',
+    legalDisclaimer: '',
+    refundPolicy: '',
     customTextBlocks: [
       { id: 'block_1', title: 'Special Instructions', content: 'Please share transaction UTR via email upon payment.', enabled: true }
     ],
@@ -510,10 +510,10 @@ export const defaultCompanySettings: CompanySettings = {
       isDefault: false,
     }
   ],
-  activeBankId: 'acc_1',
-  signatureHeading: 'For TBT VENTURES PRIVATE LIMITED',
+  activeBankId: '',
+  signatureHeading: '',
   authorizedPerson: 'Authorized Signatory',
-  designation: 'Director / Finance Head',
+  designation: '',
 };
 
 export const defaultFieldCatalog: InvoiceFieldConfig[] = [
@@ -578,225 +578,4 @@ export const defaultFieldCatalog: InvoiceFieldConfig[] = [
   { id: 'footer_text', defaultName: 'Footer Text', displayName: 'Footer Note', category: 'footer', dataType: 'string', dataSource: 'static', fetchEnabled: false, pdfVisibility: true, value: 'This is a computer generated invoice.', defaultValue: '', required: false, displayOrder: 90 },
 ];
 
-export const defaultMappingProfiles: MappingProfile[] = [
-  {
-    id: 'profile_zrm',
-    name: 'ZRM',
-    description: 'Mapping profile for ZRM worksheet imports',
-    worksheetName: 'ZRM',
-    calculationSettings: { mode: 'calculated', taxInclusive: false },
-    mappings: {
-      'customer_name': { column: 'Buyer Name', fetchEnabled: true, pdfVisibility: true, displayName: 'Bill To' },
-      'invoice_number': { column: 'Invoice No', fetchEnabled: true, pdfVisibility: true, displayName: 'Invoice No.' },
-      'invoice_date': { column: 'Date', fetchEnabled: true, pdfVisibility: true, displayName: 'Date' },
-      'customer_address': { column: 'Address', fetchEnabled: true, pdfVisibility: true, displayName: 'Address' },
-      'customer_gstin': { column: 'GSTIN', fetchEnabled: true, pdfVisibility: true, displayName: 'GSTIN' },
-      'subject_description': { column: 'Description', fetchEnabled: true, pdfVisibility: true, displayName: 'Subject Description' },
-      'item_description': { column: 'Description', fetchEnabled: true, pdfVisibility: true, displayName: 'Item Description' },
-      'item_hsn': { column: 'HSN/SAC', fetchEnabled: true, pdfVisibility: true, displayName: 'HSN/SAC' },
-      'item_quantity': { column: 'Quantity', fetchEnabled: true, pdfVisibility: true, displayName: 'Quantity' },
-      'item_unit_price': { column: 'Rate', fetchEnabled: true, pdfVisibility: true, displayName: 'Rate' },
-      'item_gst_rate': { column: 'GST %', fetchEnabled: true, pdfVisibility: true, displayName: 'GST %' },
-    }
-  },
-  {
-    id: 'profile_coachx',
-    name: 'CoachX',
-    description: 'Mapping profile for CoachX worksheet imports',
-    worksheetName: 'CoachX',
-    calculationSettings: { mode: 'calculated', taxInclusive: false },
-    mappings: {
-      'customer_name': { column: 'Client Name', fetchEnabled: true, pdfVisibility: true, displayName: 'Bill To' },
-      'invoice_number': { column: 'Inv #', fetchEnabled: true, pdfVisibility: true, displayName: 'Invoice No.' },
-      'invoice_date': { column: 'Invoice Date', fetchEnabled: true, pdfVisibility: true, displayName: 'Date' },
-      'customer_address': { column: 'Billing Address', fetchEnabled: true, pdfVisibility: true, displayName: 'Address' },
-      'customer_gstin': { column: 'Tax ID', fetchEnabled: true, pdfVisibility: true, displayName: 'GSTIN' },
-      'subject_description': { column: 'Program Name', fetchEnabled: true, pdfVisibility: true, displayName: 'Subject Description' },
-      'item_description': { column: 'Program Name', fetchEnabled: true, pdfVisibility: true, displayName: 'Item Description' },
-      'item_quantity': { column: 'Quantity', fetchEnabled: true, pdfVisibility: true, displayName: 'Quantity' },
-      'item_unit_price': { column: 'Rate', fetchEnabled: true, pdfVisibility: true, displayName: 'Rate' },
-      'item_gst_rate': { column: 'GST %', fetchEnabled: true, pdfVisibility: true, displayName: 'GST %' },
-    }
-  },
-  {
-    id: 'profile_capcut',
-    name: 'Capcut',
-    description: 'Mapping profile for Capcut worksheet imports',
-    worksheetName: 'Capcut',
-    calculationSettings: { mode: 'calculated', taxInclusive: false },
-    mappings: {
-      'customer_name': { column: 'Buyer Name', fetchEnabled: true, pdfVisibility: true, displayName: 'Bill To' },
-      'invoice_number': { column: 'Invoice No', fetchEnabled: true, pdfVisibility: true, displayName: 'Invoice No.' },
-      'invoice_date': { column: 'Date', fetchEnabled: true, pdfVisibility: true, displayName: 'Date' },
-      'customer_address': { column: 'Address', fetchEnabled: true, pdfVisibility: true, displayName: 'Address' },
-      'customer_gstin': { column: 'GSTIN', fetchEnabled: true, pdfVisibility: true, displayName: 'GSTIN' },
-      'subject_description': { column: 'Description', fetchEnabled: true, pdfVisibility: true, displayName: 'Subject Description' },
-      'item_description': { column: 'Description', fetchEnabled: true, pdfVisibility: true, displayName: 'Item Description' },
-      'item_quantity': { column: 'Quantity', fetchEnabled: true, pdfVisibility: true, displayName: 'Quantity' },
-      'item_unit_price': { column: 'Rate', fetchEnabled: true, pdfVisibility: true, displayName: 'Rate' },
-      'item_gst_rate': { column: 'GST %', fetchEnabled: true, pdfVisibility: true, displayName: 'GST %' },
-    }
-  },
-  {
-    id: 'profile_trym10k',
-    name: 'TRYM 10K',
-    description: 'Mapping profile for TRYM 10K worksheet imports',
-    worksheetName: 'TRYM 10K',
-    calculationSettings: { mode: 'calculated', taxInclusive: false },
-    mappings: {
-      'customer_name': { column: 'Customer', fetchEnabled: true, pdfVisibility: true, displayName: 'Bill To' },
-      'invoice_number': { column: 'Invoice Ref', fetchEnabled: true, pdfVisibility: true, displayName: 'Invoice No.' },
-      'invoice_date': { column: 'Txn Date', fetchEnabled: true, pdfVisibility: true, displayName: 'Date' },
-      'customer_address': { column: 'Location', fetchEnabled: true, pdfVisibility: true, displayName: 'Address' },
-      'customer_gstin': { column: 'GSTIN', fetchEnabled: true, pdfVisibility: true, displayName: 'GSTIN' },
-      'subject_description': { column: 'Service Item', fetchEnabled: true, pdfVisibility: true, displayName: 'Subject Description' },
-      'item_description': { column: 'Service Item', fetchEnabled: true, pdfVisibility: true, displayName: 'Item Description' },
-      'item_hsn': { column: 'HSN/SAC', fetchEnabled: true, pdfVisibility: true, displayName: 'HSN/SAC' },
-      'item_quantity': { column: 'Quantity', fetchEnabled: true, pdfVisibility: true, displayName: 'Quantity' },
-      'item_unit_price': { column: 'Rate', fetchEnabled: true, pdfVisibility: true, displayName: 'Rate' },
-      'item_gst_rate': { column: 'GST %', fetchEnabled: true, pdfVisibility: true, displayName: 'GST %' },
-    }
-  },
-  {
-    id: 'profile_tbt90days',
-    name: 'TBT 90 Days',
-    description: 'Mapping profile for TBT 90 Days worksheet imports',
-    worksheetName: 'TBT 90 Days',
-    calculationSettings: { mode: 'calculated', taxInclusive: false },
-    mappings: {
-      'customer_name': { column: 'Participant Name', fetchEnabled: true, pdfVisibility: true, displayName: 'Bill To' },
-      'invoice_number': { column: 'Invoice Number', fetchEnabled: true, pdfVisibility: true, displayName: 'Invoice No.' },
-      'invoice_date': { column: 'Enrollment Date', fetchEnabled: true, pdfVisibility: true, displayName: 'Date' },
-      'customer_address': { column: 'Billing Location', fetchEnabled: true, pdfVisibility: true, displayName: 'Address' },
-      'customer_gstin': { column: 'GSTIN / UIN', fetchEnabled: true, pdfVisibility: true, displayName: 'GSTIN' },
-      'subject_description': { column: 'Program Title', fetchEnabled: true, pdfVisibility: true, displayName: 'Subject Description' },
-      'item_description': { column: 'Program Title', fetchEnabled: true, pdfVisibility: true, displayName: 'Item Description' },
-      'item_hsn': { column: 'HSN/SAC', fetchEnabled: true, pdfVisibility: true, displayName: 'HSN/SAC' },
-      'item_quantity': { column: 'Quantity', fetchEnabled: true, pdfVisibility: true, displayName: 'Quantity' },
-      'item_unit_price': { column: 'Rate', fetchEnabled: true, pdfVisibility: true, displayName: 'Rate' },
-      'item_gst_rate': { column: 'GST %', fetchEnabled: true, pdfVisibility: true, displayName: 'GST %' },
-    }
-  }
-];
-
-export const sampleSpreadsheetData: SpreadsheetData = {
-  fileName: '262711TBT_AllWorksheets.xlsx',
-  activeSheetName: 'TBT 90 Days',
-  worksheets: [
-    {
-      name: 'ZRM',
-      headers: ['Invoice No', 'Date', 'Due Date', 'Buyer Name', 'Business Name', 'Address', 'GSTIN', 'Email', 'Description', 'HSN/SAC', 'Quantity', 'Rate', 'GST %', 'State'],
-      rows: [
-        {
-          'Invoice No': '2627/11/ZRM/01',
-          'Date': '2026-11-01',
-          'Due Date': '2026-11-15',
-          'Buyer Name': 'Rahul Verma',
-          'Business Name': 'Verma Media Corp',
-          'Address': 'Sector 14, Gurgaon, Haryana - 122001',
-          'GSTIN': '06AABCV1234E1Z2',
-          'Email': 'rahul@verma.com',
-          'Description': 'ZRM Advanced Growth Accelerator Consulting',
-          'HSN/SAC': '998314',
-          'Quantity': 1,
-          'Rate': 45000,
-          'GST %': 18,
-          'State': 'Haryana (06)'
-        },
-        {
-          'Invoice No': '2627/11/ZRM/02',
-          'Date': '2026-11-02',
-          'Due Date': '2026-11-16',
-          'Buyer Name': 'Priya Nair',
-          'Business Name': 'Nair Digital Solutions',
-          'Address': 'Koramangala, Bangalore, Karnataka - 560034',
-          'GSTIN': '29AABCN5678F1Z1',
-          'Email': 'priya@nair.com',
-          'Description': 'ZRM Quarterly Enterprise Coaching',
-          'HSN/SAC': '998314',
-          'Quantity': 2,
-          'Rate': 25000,
-          'GST %': 18,
-          'State': 'Karnataka (29)'
-        }
-      ]
-    },
-    {
-      name: 'CoachX',
-      headers: ['Inv #', 'Invoice Date', 'Client Name', 'Billing Address', 'Tax ID', 'Program Name', 'HSN/SAC', 'Qty', 'Rate', 'GST %', 'State'],
-      rows: [
-        {
-          'Inv #': '2627/11/CX/01',
-          'Invoice Date': '2026-11-03',
-          'Client Name': 'Amit Patel',
-          'Billing Address': 'Satellite, Ahmedabad, Gujarat - 380015',
-          'Tax ID': '24AABCP9876G1Z9',
-          'Program Name': 'CoachX Mastermind Elite Cohort',
-          'HSN/SAC': '999293',
-          'Quantity': 1,
-          'Rate': 75000,
-          'GST %': 18,
-          'State': 'Gujarat (24)'
-        }
-      ]
-    },
-    {
-      name: 'Capcut',
-      headers: ['Invoice No', 'Date', 'Buyer Name', 'Business Name', 'Address', 'GSTIN', 'Description', 'HSN/SAC', 'Quantity', 'Rate', 'GST %', 'State'],
-      rows: [
-        {
-          'Invoice No': '2627/11/CC/01',
-          'Date': '2026-11-04',
-          'Buyer Name': 'Sneha Kapoor',
-          'Business Name': 'Kapoor Creatives',
-          'Address': 'Bandra West, Mumbai, Maharashtra - 400050',
-          'GSTIN': '27AABCS4321H1Z8',
-          'Description': 'Capcut Creator Monetization Masterclass',
-          'HSN/SAC': '998311',
-          'Quantity': 1,
-          'Rate': 30000,
-          'GST %': 18,
-          'State': 'Maharashtra (27)'
-        }
-      ]
-    },
-    {
-      name: 'TRYM 10K',
-      headers: ['Invoice Ref', 'Txn Date', 'Customer', 'Location', 'GSTIN', 'Service Item', 'HSN/SAC', 'Quantity', 'Rate', 'GST %', 'State'],
-      rows: [
-        {
-          'Invoice Ref': '2627/11/TR/01',
-          'Txn Date': '2026-11-05',
-          'Customer': 'Vikram Singh',
-          'Location': 'Civil Lines, Jaipur, Rajasthan - 302006',
-          'GSTIN': '08AABCV5678J1Z3',
-          'Service Item': 'TRYM 10K Fitness & Nutrition Accelerator',
-          'HSN/SAC': '999799',
-          'Quantity': 1,
-          'Rate': 10000,
-          'GST %': 18,
-          'State': 'Rajasthan (08)'
-        }
-      ]
-    },
-    {
-      name: 'TBT 90 Days',
-      headers: ['Invoice Number', 'Enrollment Date', 'Participant Name', 'Billing Location', 'GSTIN / UIN', 'Program Title', 'HSN/SAC', 'Quantity', 'Rate', 'GST %', 'State'],
-      rows: [
-        {
-          'Invoice Number': '2627/11/TBT/01',
-          'Enrollment Date': '2026-11-01',
-          'Participant Name': 'Aarav Sharma',
-          'Billing Location': 'Plot 12, Industrial Area, Gurgaon, Haryana - 122001',
-          'GSTIN / UIN': '06AABCS1234Q1ZU',
-          'Program Title': 'Invoice For 90 Days Mentorship Program & Consulting Services',
-          'HSN/SAC': '9983',
-          'Quantity': 1,
-          'Rate': 50000,
-          'GST %': 18,
-          'State': 'Haryana (06)'
-        }
-      ]
-    }
-  ]
-};
+export const defaultMappingProfiles: MappingProfile[] = [];

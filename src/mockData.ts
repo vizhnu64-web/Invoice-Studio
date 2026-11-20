@@ -474,45 +474,20 @@ export const defaultCompanySettings: CompanySettings = {
   content: {
     invoiceTitle: 'TAX INVOICE',
     invoiceSubtitle: 'Original For Recipient',
-    defaultNotes: 'Thank you for your business. Please make payments referencing invoice number.',
+    defaultNotes: '',
     defaultTerms: '1. Goods once sold will not be taken back.\n2. Interest @ 18% p.a. will be charged if payment is delayed beyond due date.\n3. Subject to Gurugram jurisdiction.',
     paymentInstructions: '',
-    thankYouMessage: 'We appreciate your partnership!',
+    thankYouMessage: '',
     footerMessage: 'This is a computer generated invoice powered by Invoice Studio.',
     legalDisclaimer: '',
     refundPolicy: '',
-    customTextBlocks: [
-      { id: 'block_1', title: 'Special Instructions', content: 'Please share transaction UTR via email upon payment.', enabled: true }
-    ],
+    customTextBlocks: [],
   },
 
-  bankAccounts: [
-    {
-      id: 'acc_1',
-      accountHolderName: 'TBT VENTURES PRIVATE LIMITED',
-      bankAccountName: 'HDFC Current Account',
-      accountNumber: '50200012345678',
-      ifscCode: 'HDFC0001234',
-      bankName: 'HDFC Bank',
-      branch: 'Cyber City, Gurugram',
-      upiId: 'tbtventures@hdfcbank',
-      isDefault: true,
-    },
-    {
-      id: 'acc_2',
-      accountHolderName: 'TBT VENTURES PRIVATE LIMITED',
-      bankAccountName: 'ICICI Current Account',
-      accountNumber: '001205009876',
-      ifscCode: 'ICIC0000456',
-      bankName: 'ICICI Bank',
-      branch: 'MG Road, Gurugram',
-      upiId: 'tbtventures@icici',
-      isDefault: false,
-    }
-  ],
+  bankAccounts: [],
   activeBankId: '',
   signatureHeading: '',
-  authorizedPerson: 'Authorized Signatory',
+  authorizedPerson: '',
   designation: '',
 };
 
@@ -525,32 +500,32 @@ export const defaultFieldCatalog: InvoiceFieldConfig[] = [
 
   // Invoice
   { id: 'invoice_title', defaultName: 'Invoice Title', displayName: 'TAX INVOICE', category: 'invoice', dataType: 'string', dataSource: 'static', fetchEnabled: false, pdfVisibility: true, value: 'TAX INVOICE', defaultValue: 'TAX INVOICE', required: true, displayOrder: 10 },
-  { id: 'invoice_number', defaultName: 'Invoice Number', displayName: 'Invoice No.', category: 'invoice', dataType: 'string', dataSource: 'excel', sourceColumn: 'Invoice No', fetchEnabled: true, pdfVisibility: true, value: '2627/11/TBT/01', defaultValue: '2627/11/TBT/01', required: true, displayOrder: 11 },
-  { id: 'invoice_date', defaultName: 'Invoice Date', displayName: 'Invoice Date', category: 'invoice', dataType: 'date', dataSource: 'excel', sourceColumn: 'Date', fetchEnabled: true, pdfVisibility: true, value: '2026-11-01', defaultValue: '2026-11-01', required: true, displayOrder: 12 },
-  { id: 'due_date', defaultName: 'Due Date', displayName: 'Due Date', category: 'invoice', dataType: 'date', dataSource: 'excel', sourceColumn: 'Due Date', fetchEnabled: true, pdfVisibility: true, value: '2026-11-15', defaultValue: '2026-11-15', required: false, displayOrder: 13 },
+  { id: 'invoice_number', defaultName: 'Invoice Number', displayName: 'Invoice No.', category: 'invoice', dataType: 'string', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: '2627/11/TBT/01', defaultValue: '2627/11/TBT/01', required: true, displayOrder: 11 },
+  { id: 'invoice_date', defaultName: 'Invoice Date', displayName: 'Invoice Date', category: 'invoice', dataType: 'date', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: '2026-11-01', defaultValue: '2026-11-01', required: true, displayOrder: 12 },
+  { id: 'due_date', defaultName: 'Due Date', displayName: 'Due Date', category: 'invoice', dataType: 'date', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: '2026-11-15', defaultValue: '2026-11-15', required: false, displayOrder: 13 },
   { id: 'terms', defaultName: 'Terms', displayName: 'Payment Terms', category: 'invoice', dataType: 'string', dataSource: 'static', fetchEnabled: false, pdfVisibility: true, value: 'Net 15', defaultValue: 'Net 15', required: false, displayOrder: 14 },
-  { id: 'place_of_supply', defaultName: 'Place of Supply', displayName: 'Place of Supply', category: 'invoice', dataType: 'string', dataSource: 'excel', sourceColumn: 'State', fetchEnabled: true, pdfVisibility: true, value: 'Haryana (06)', defaultValue: 'Haryana (06)', required: true, displayOrder: 15 },
+  { id: 'place_of_supply', defaultName: 'Place of Supply', displayName: 'Place of Supply', category: 'invoice', dataType: 'string', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: 'Haryana (06)', defaultValue: 'Haryana (06)', required: true, displayOrder: 15 },
 
   // Customer
-  { id: 'customer_name', defaultName: 'Customer Name', displayName: 'Bill To (Customer Name)', category: 'customer', dataType: 'string', dataSource: 'excel', sourceColumn: 'Buyer Name', fetchEnabled: true, pdfVisibility: true, value: 'Aarav Sharma', defaultValue: '', required: true, displayOrder: 20 },
-  { id: 'customer_business', defaultName: 'Business Name', displayName: 'Business Name', category: 'customer', dataType: 'string', dataSource: 'excel', sourceColumn: 'Business Name', fetchEnabled: true, pdfVisibility: true, value: 'Sharma Enterprises', defaultValue: '', required: false, displayOrder: 21 },
-  { id: 'customer_address', defaultName: 'Customer Address', displayName: 'Address', category: 'customer', dataType: 'string', dataSource: 'excel', sourceColumn: 'Address', fetchEnabled: true, pdfVisibility: true, value: 'Plot 12, Industrial Area, Gurgaon, Haryana - 122001', defaultValue: '', required: true, displayOrder: 22 },
-  { id: 'customer_gstin', defaultName: 'Customer GSTIN', displayName: 'Customer GSTIN', category: 'customer', dataType: 'string', dataSource: 'excel', sourceColumn: 'GSTIN', fetchEnabled: true, pdfVisibility: true, value: '06AABCS1234Q1ZU', defaultValue: '', required: false, displayOrder: 23 },
-  { id: 'customer_email', defaultName: 'Customer Email', displayName: 'Email', category: 'customer', dataType: 'string', dataSource: 'excel', sourceColumn: 'Email', fetchEnabled: true, pdfVisibility: false, value: 'aarav@sharma.com', defaultValue: '', required: false, displayOrder: 24 },
+  { id: 'customer_name', defaultName: 'Customer Name', displayName: 'Bill To (Customer Name)', category: 'customer', dataType: 'string', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: 'Aarav Sharma', defaultValue: '', required: true, displayOrder: 20 },
+  { id: 'customer_business', defaultName: 'Business Name', displayName: 'Business Name', category: 'customer', dataType: 'string', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: 'Sharma Enterprises', defaultValue: '', required: false, displayOrder: 21 },
+  { id: 'customer_address', defaultName: 'Customer Address', displayName: 'Address', category: 'customer', dataType: 'string', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: 'Plot 12, Industrial Area, Gurgaon, Haryana - 122001', defaultValue: '', required: true, displayOrder: 22 },
+  { id: 'customer_gstin', defaultName: 'Customer GSTIN', displayName: 'Customer GSTIN', category: 'customer', dataType: 'string', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: '06AABCS1234Q1ZU', defaultValue: '', required: false, displayOrder: 23 },
+  { id: 'customer_email', defaultName: 'Customer Email', displayName: 'Email', category: 'customer', dataType: 'string', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: false, value: 'aarav@sharma.com', defaultValue: '', required: false, displayOrder: 24 },
 
   // Subject
   { id: 'subject_label', defaultName: 'Subject Label', displayName: 'Subject', category: 'subject', dataType: 'string', dataSource: 'static', fetchEnabled: false, pdfVisibility: true, value: 'Subject:', defaultValue: 'Subject:', required: false, displayOrder: 30 },
-  { id: 'subject_description', defaultName: 'Subject Description', displayName: 'Description', category: 'subject', dataType: 'string', dataSource: 'excel', sourceColumn: 'Description', fetchEnabled: true, pdfVisibility: true, value: 'Invoice For 90 Days Mentorship Program & Consulting Services', defaultValue: '', required: true, displayOrder: 31 },
+  { id: 'subject_description', defaultName: 'Subject Description', displayName: 'Description', category: 'subject', dataType: 'string', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: 'Invoice For 90 Days Mentorship Program & Consulting Services', defaultValue: '', required: true, displayOrder: 31 },
 
   // Items
-  { id: 'item_description', defaultName: 'Item / Description', displayName: 'Item Description', category: 'item', dataType: 'string', dataSource: 'excel', sourceColumn: 'Description', fetchEnabled: true, pdfVisibility: true, value: '90 Days Mentorship Program & Consulting Services', defaultValue: 'Consulting Services', required: true, displayOrder: 40 },
-  { id: 'item_hsn', defaultName: 'HSN / SAC Code', displayName: 'HSN/SAC', category: 'item', dataType: 'string', dataSource: 'excel', sourceColumn: 'HSN/SAC', fetchEnabled: true, pdfVisibility: true, value: '9983', defaultValue: '9983', required: false, displayOrder: 41 },
-  { id: 'item_quantity', defaultName: 'Quantity', displayName: 'Quantity', category: 'item', dataType: 'number', dataSource: 'excel', sourceColumn: 'Quantity', fetchEnabled: true, pdfVisibility: true, value: 1, defaultValue: 1, required: true, displayOrder: 42 },
+  { id: 'item_description', defaultName: 'Item / Description', displayName: 'Item Description', category: 'item', dataType: 'string', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: '90 Days Mentorship Program & Consulting Services', defaultValue: 'Consulting Services', required: true, displayOrder: 40 },
+  { id: 'item_hsn', defaultName: 'HSN / SAC Code', displayName: 'HSN/SAC', category: 'item', dataType: 'string', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: '9983', defaultValue: '9983', required: false, displayOrder: 41 },
+  { id: 'item_quantity', defaultName: 'Quantity', displayName: 'Quantity', category: 'item', dataType: 'number', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: 1, defaultValue: 1, required: true, displayOrder: 42 },
   { id: 'item_unit', defaultName: 'Unit of Measure', displayName: 'Unit', category: 'item', dataType: 'string', dataSource: 'static', sourceColumn: '', fetchEnabled: false, pdfVisibility: true, value: 'Nos', defaultValue: 'Nos', required: false, displayOrder: 43 },
-  { id: 'item_unit_price', defaultName: 'Unit Price / Rate', displayName: 'Rate (Unit Price)', category: 'item', dataType: 'currency', dataSource: 'excel', sourceColumn: 'Rate', fetchEnabled: true, pdfVisibility: true, value: 50000, defaultValue: 50000, required: false, displayOrder: 44 },
-  { id: 'item_amount', defaultName: 'Line Amount (Excel)', displayName: 'Line Amount', category: 'item', dataType: 'currency', dataSource: 'excel', sourceColumn: 'Amount', fetchEnabled: true, pdfVisibility: true, value: 50000, defaultValue: 50000, required: false, displayOrder: 45 },
+  { id: 'item_unit_price', defaultName: 'Unit Price / Rate', displayName: 'Rate (Unit Price)', category: 'item', dataType: 'currency', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: 50000, defaultValue: 50000, required: false, displayOrder: 44 },
+  { id: 'item_amount', defaultName: 'Line Amount (Excel)', displayName: 'Line Amount', category: 'item', dataType: 'currency', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: 50000, defaultValue: 50000, required: false, displayOrder: 45 },
   { id: 'item_discount', defaultName: 'Item Discount', displayName: 'Discount', category: 'item', dataType: 'currency', dataSource: 'manual', sourceColumn: 'Discount', fetchEnabled: false, pdfVisibility: false, value: 0, defaultValue: 0, required: false, displayOrder: 46 },
-  { id: 'item_gst_rate', defaultName: 'GST / Tax Rate (%)', displayName: 'GST %', category: 'item', dataType: 'number', dataSource: 'excel', sourceColumn: 'GST %', fetchEnabled: true, pdfVisibility: true, value: 18, defaultValue: 18, required: true, displayOrder: 47 },
+  { id: 'item_gst_rate', defaultName: 'GST / Tax Rate (%)', displayName: 'GST %', category: 'item', dataType: 'number', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: 18, defaultValue: 18, required: true, displayOrder: 47 },
 
   // Summary
   { id: 'subtotal', defaultName: 'Subtotal', displayName: 'Sub Total', category: 'summary', dataType: 'currency', dataSource: 'calculated', fetchEnabled: false, pdfVisibility: true, value: 50000, defaultValue: 0, required: true, displayOrder: 50 },
@@ -563,11 +538,11 @@ export const defaultFieldCatalog: InvoiceFieldConfig[] = [
   { id: 'balance_due', defaultName: 'Balance Due', displayName: 'Balance Due', category: 'summary', dataType: 'currency', dataSource: 'calculated', fetchEnabled: false, pdfVisibility: true, value: 0, defaultValue: 0, required: false, displayOrder: 57 },
 
   // Payment Information
-  { id: 'payment_method', defaultName: 'Payment Method', displayName: 'Payment Method', category: 'invoice', dataType: 'string', dataSource: 'excel', sourceColumn: 'Payment Method', fetchEnabled: true, pdfVisibility: true, value: 'UPI', defaultValue: 'UPI', required: false, displayOrder: 60 },
+  { id: 'payment_method', defaultName: 'Payment Method', displayName: 'Payment Method', category: 'invoice', dataType: 'string', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: 'UPI', defaultValue: 'UPI', required: false, displayOrder: 60 },
   { id: 'payment_status', defaultName: 'Payment Status', displayName: 'Payment Status', category: 'summary', dataType: 'string', dataSource: 'manual', fetchEnabled: false, pdfVisibility: true, value: 'Paid', defaultValue: 'Paid', required: false, displayOrder: 61 },
-  { id: 'payment_date', defaultName: 'Payment Date', displayName: 'Payment Date', category: 'invoice', dataType: 'date', dataSource: 'excel', sourceColumn: 'Payment Date', fetchEnabled: true, pdfVisibility: true, value: '2026-11-01', defaultValue: '', required: false, displayOrder: 62 },
-  { id: 'payment_reference', defaultName: 'Payment Reference', displayName: 'Transaction Reference / UTR', category: 'invoice', dataType: 'string', dataSource: 'excel', sourceColumn: 'Transaction Reference', fetchEnabled: true, pdfVisibility: true, value: 'UPI/2026/987654321', defaultValue: '', required: false, displayOrder: 63 },
-  { id: 'amount_paid', defaultName: 'Amount Paid', displayName: 'Amount Paid', category: 'summary', dataType: 'currency', dataSource: 'excel', sourceColumn: 'Amount Paid', fetchEnabled: true, pdfVisibility: true, value: 59000, defaultValue: 0, required: false, displayOrder: 64 },
+  { id: 'payment_date', defaultName: 'Payment Date', displayName: 'Payment Date', category: 'invoice', dataType: 'date', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: '2026-11-01', defaultValue: '', required: false, displayOrder: 62 },
+  { id: 'payment_reference', defaultName: 'Payment Reference', displayName: 'Transaction Reference / UTR', category: 'invoice', dataType: 'string', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: 'UPI/2026/987654321', defaultValue: '', required: false, displayOrder: 63 },
+  { id: 'amount_paid', defaultName: 'Amount Paid', displayName: 'Amount Paid', category: 'summary', dataType: 'currency', dataSource: 'excel', sourceColumn: '', fetchEnabled: true, pdfVisibility: true, value: 59000, defaultValue: 0, required: false, displayOrder: 64 },
   { id: 'payment_notes', defaultName: 'Payment Notes', displayName: 'Payment Notes', category: 'notes', dataType: 'string', dataSource: 'static', fetchEnabled: false, pdfVisibility: true, value: '', defaultValue: '', required: false, displayOrder: 65 },
 
   // Notes & Terms

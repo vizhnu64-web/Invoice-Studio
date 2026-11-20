@@ -89,20 +89,14 @@ function readTabFromHash(): string {
 }
 
 function shouldSkipInitialAuthGate(): boolean {
-  if (typeof window === 'undefined') return true;
-  const params = new URLSearchParams(window.location.search);
-  if (params.get('autostart') === '1' || params.has('google_auth')) {
-    return true;
-  }
-  try {
-    if (window.sessionStorage.getItem('invoice_studio_local_preview') === '1') {
-      return true;
-    }
-  } catch {
-    // Ignore storage access restrictions
-  }
+  // Always require a verified Google session before showing any workspace data.
+  // OAuth callback state is checked by the same server-side session endpoint.
   return false;
 }
+
+// Google Drive is the durable source of truth. Clear legacy shared browser caches
+// before React initializes so one visitor can never see another visitor's records.
+storage.clearAllUserWorkspaceCaches();
 
 export default function App() {
   const [activeTab, setActiveTabState] = useState<string>(() => readTabFromHash());
@@ -111,7 +105,7 @@ export default function App() {
     storage.loadFields(storage.loadCompanySettings())
   );
   const [mappingProfiles] = useState<MappingProfile[]>(defaultMappingProfiles);
-  const [activeProfileId, setActiveProfileId] = useState<string>('profile_tbt90days');
+  const [activeProfileId, setActiveProfileId] = useState<string>('');
   const [spreadsheetData, setSpreadsheetData] = useState<SpreadsheetData>(() =>
     storage.loadSpreadsheetData()
   );
@@ -309,15 +303,6 @@ export default function App() {
       }
     }
   }, [refreshAuthAndWorkspace]);
-
-  const handleContinueLocalPreview = () => {
-    try {
-      window.sessionStorage.setItem('invoice_studio_local_preview', '1');
-    } catch {
-      // Ignore storage error
-    }
-    setShowAuthGate(false);
-  };
 
   const handleSaveCustomer = async (customer: CustomerRecord) => {
     setCustomers((prev) => {
@@ -554,7 +539,6 @@ export default function App() {
     return (
       <AuthGateScreen
         diagnostics={diagnostics}
-        onContinueLocalPreview={handleContinueLocalPreview}
         onSignedIn={refreshAuthAndWorkspace}
       />
     );

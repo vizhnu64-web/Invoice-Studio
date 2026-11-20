@@ -568,14 +568,21 @@ export const defaultFieldCatalog: InvoiceFieldConfig[] = [
   { id: 'payment_date', defaultName: 'Payment Date', displayName: 'Payment Date', category: 'invoice', dataType: 'date', dataSource: 'excel', sourceColumn: 'Payment Date', fetchEnabled: true, pdfVisibility: true, value: '2026-11-01', defaultValue: '', required: false, displayOrder: 62 },
   { id: 'payment_reference', defaultName: 'Payment Reference', displayName: 'Transaction Reference / UTR', category: 'invoice', dataType: 'string', dataSource: 'excel', sourceColumn: 'Transaction Reference', fetchEnabled: true, pdfVisibility: true, value: 'UPI/2026/987654321', defaultValue: '', required: false, displayOrder: 63 },
   { id: 'amount_paid', defaultName: 'Amount Paid', displayName: 'Amount Paid', category: 'summary', dataType: 'currency', dataSource: 'excel', sourceColumn: 'Amount Paid', fetchEnabled: true, pdfVisibility: true, value: 59000, defaultValue: 0, required: false, displayOrder: 64 },
-  { id: 'payment_notes', defaultName: 'Payment Notes', displayName: 'Payment Notes', category: 'notes', dataType: 'string', dataSource: 'static', fetchEnabled: false, pdfVisibility: true, value: 'Paid via UPI. Reference verified.', defaultValue: '', required: false, displayOrder: 65 },
+  { id: 'payment_notes', defaultName: 'Payment Notes', displayName: 'Payment Notes', category: 'notes', dataType: 'string', dataSource: 'static', fetchEnabled: false, pdfVisibility: true, value: '', defaultValue: '', required: false, displayOrder: 65 },
 
   // Notes & Terms
-  { id: 'notes_content', defaultName: 'Notes Content', displayName: 'Notes', category: 'notes', dataType: 'string', dataSource: 'static', fetchEnabled: false, pdfVisibility: true, value: 'Thank you for your business. Please make payments referencing invoice number.', defaultValue: '', required: false, displayOrder: 70 },
-  { id: 'terms_content', defaultName: 'Terms Content', displayName: 'Terms & Conditions', category: 'terms', dataType: 'string', dataSource: 'static', fetchEnabled: false, pdfVisibility: true, value: '1. Goods once sold will not be taken back.\n2. Interest @ 18% p.a. will be charged if payment is delayed beyond due date.\n3. Subject to Gurugram jurisdiction.', defaultValue: '', required: false, displayOrder: 80 },
+  { id: 'notes_content', defaultName: 'Notes Content', displayName: 'Notes', category: 'notes', dataType: 'string', dataSource: 'static', fetchEnabled: false, pdfVisibility: true, value: '', defaultValue: '', required: false, displayOrder: 70 },
+  { id: 'terms_content', defaultName: 'Terms Content', displayName: 'Terms & Conditions', category: 'terms', dataType: 'string', dataSource: 'static', fetchEnabled: false, pdfVisibility: true, value: '', defaultValue: '', required: false, displayOrder: 80 },
 
   // Footer
-  { id: 'footer_text', defaultName: 'Footer Text', displayName: 'Footer Note', category: 'footer', dataType: 'string', dataSource: 'static', fetchEnabled: false, pdfVisibility: true, value: 'This is a computer generated invoice.', defaultValue: '', required: false, displayOrder: 90 },
+  { id: 'footer_text', defaultName: 'Footer Text', displayName: 'Footer Note', category: 'footer', dataType: 'string', dataSource: 'static', fetchEnabled: false, pdfVisibility: true, value: '', defaultValue: '', required: false, displayOrder: 90 },
 ];
 
 export const defaultMappingProfiles: MappingProfile[] = [];
+
+// Kept as an empty compatibility export for older imports/tests. Never preload customer data.
+export const sampleSpreadsheetData: SpreadsheetData = {
+  fileName: 'No file loaded',
+  activeSheetName: '',
+  worksheets: [],
+};

@@ -74,6 +74,8 @@ interface ManualEntryViewProps {
   template: InvoiceTemplate;
   generationHistory: GenerationRecord[];
   setGenerationHistory: React.Dispatch<React.SetStateAction<GenerationRecord[]>>;
+  customers?: CustomerRecord[];
+  onSaveCustomer?: (customer: CustomerRecord) => Promise<void> | void;
   onNavigateTab: (tab: string) => void;
   onSendByEmail: (recordId: string) => void;
   incomingConvertedInvoice?: ManualInvoiceData | null;
@@ -106,6 +108,8 @@ export const ManualEntryView: React.FC<ManualEntryViewProps> = ({
   template,
   generationHistory,
   setGenerationHistory,
+  customers: externalCustomers,
+  onSaveCustomer,
   onNavigateTab,
   onSendByEmail,
   incomingConvertedInvoice,
@@ -130,7 +134,10 @@ export const ManualEntryView: React.FC<ManualEntryViewProps> = ({
     return createDefaultManualInvoice(company, fields, generationHistory);
   });
 
-  const [customers, setCustomers] = useState<CustomerRecord[]>(() => storage.loadCustomers());
+  const [localCustomers, setLocalCustomers] = useState<CustomerRecord[]>(() =>
+    externalCustomers ?? storage.loadCustomers()
+  );
+  const customers = externalCustomers ?? localCustomers;
   const [drafts, setDrafts] = useState<ManualInvoiceDraft[]>(() => storage.loadManualDrafts());
   const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
   const [customerSearch, setCustomerSearch] = useState('');
@@ -282,9 +289,12 @@ export const ManualEntryView: React.FC<ManualEntryViewProps> = ({
         c.customerName.trim().toLowerCase() === formData.customerName.trim().toLowerCase()
     );
     const customerObj = extractCustomerFromManualInvoice(formData, existingMatch?.id);
-    storage.saveCustomer(customerObj);
-    const refreshed = storage.loadCustomers();
-    setCustomers(refreshed);
+    if (onSaveCustomer) {
+      void onSaveCustomer(customerObj);
+    } else {
+      storage.saveCustomer(customerObj);
+      setLocalCustomers(storage.loadCustomers());
+    }
     setFormData((prev) => ({ ...prev, selectedCustomerId: customerObj.id }));
     setNotification({
       type: 'success',

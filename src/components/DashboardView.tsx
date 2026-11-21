@@ -3,483 +3,615 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
-import { 
-  FileText, 
-  Database, 
-  Cpu, 
-  History, 
-  ArrowRight, 
-  CheckCircle2, 
-  Sparkles, 
-  Layers, 
-  FileSpreadsheet,
-  Building,
-  Layout,
-  Upload,
-  Globe,
-  Play,
-  RotateCcw,
+import React, { useMemo } from 'react';
+import {
+  AlertCircle,
+  ArrowRight,
+  Building2,
+  CheckCircle2,
   Clock,
-  Bookmark,
-  ExternalLink,
-  ChevronRight,
-  FilePlus2
+  Cloud,
+  CloudOff,
+  FileCheck2,
+  FilePlus2,
+  FileSpreadsheet,
+  FileText,
+  IndianRupee,
+  Mail,
+  Settings,
+  Users,
+  Wallet,
 } from 'lucide-react';
-import { SpreadsheetData, GenerationRecord, CompanySettings, GuidedWorkflowStep } from '../types';
+import {
+  CompanySettings,
+  CustomerRecord,
+  DriveWorkspaceConnection,
+  GenerationRecord,
+  GuidedWorkflowStep,
+  QuotationRecord,
+  QuotationStatus,
+  SpreadsheetData,
+} from '../types';
+import type { DriveSyncState } from '../App';
+import { formatCurrency } from '../utils/calculator';
+import { computeQuotationStats } from '../utils/quotation';
 import { storage } from '../utils/storage';
-import { formatCurrency, deduplicateHeaders } from '../utils/calculator';
-import * as XLSX from 'xlsx';
 
 interface DashboardViewProps {
   setActiveTab: (tab: string) => void;
   spreadsheetData: SpreadsheetData;
-  setSpreadsheetData?: React.Dispatch<React.SetStateAction<SpreadsheetData>>;
+  setSpreadsheetData: React.Dispatch<React.SetStateAction<SpreadsheetData>>;
   generationHistory: GenerationRecord[];
+  quotations: QuotationRecord[];
+  customers: CustomerRecord[];
   company: CompanySettings;
+  driveConnection: DriveWorkspaceConnection | null;
+  driveSyncState: DriveSyncState;
   onStartGuidedWorkflow: (step?: GuidedWorkflowStep) => void;
+  onNavigateQuotationsFiltered?: (status: QuotationStatus | 'ALL') => void;
+  onNavigateInvoicesFiltered?: (paymentFilter: string) => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
   setActiveTab,
   spreadsheetData,
-  setSpreadsheetData,
   generationHistory,
+  quotations,
+  customers,
   company,
+  driveConnection,
+  driveSyncState,
   onStartGuidedWorkflow,
+  onNavigateQuotationsFiltered,
+  onNavigateInvoicesFiltered,
 }) => {
-  const [isDragging, setIsDragging] = useState(false);
-  const totalRows = spreadsheetData.worksheets.reduce((acc, ws) => acc + ws.rows.length, 0);
-
-  // Check if a saved in-progress session exists
   const activeSession = storage.loadWorkflowSession();
-  const savedTemplates = storage.loadSavedTemplates();
+  const importedRowsCount = useMemo(
+    () => spreadsheetData.worksheets.reduce((acc, ws) => acc + ws.rows.length, 0),
+    [spreadsheetData]
+  );
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !setSpreadsheetData) return;
+  const invoiceStats = useMemo(() => {
+    let totalInvoiced = 0;
+    let totalPaid = 0;
+    let unpaidCount = 0;
+    let paidCount = 0;
+    let partialCount = 0;
 
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      try {
-        const bstr = evt.target?.result;
-        const workbook = XLSX.read(bstr, { type: 'binary' });
-        const newWorksheets = workbook.SheetNames.map(sheetName => {
-          const worksheet = workbook.Sheets[sheetName];
-          const rawRows = XLSX.utils.sheet_to_json<Record<string, any>>(worksheet);
-          const rawAoA = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1 });
-          const rawHeaderRow = (rawAoA[0] || []).map((h: any, i: number) => String(h || `Col_${i + 1}`).trim()).filter(Boolean);
-          const headers = deduplicateHeaders(rawHeaderRow);
-          return { name: sheetName, headers, rows: rawRows };
-        });
+    for (const rec of generationHistory) {
+      const amount = Number(rec.totalAmount || 0);
+      totalInvoiced += amount;
+      const status = String(rec.paymentStatus || 'Unpaid');
+      const paidAmt =
+        rec.paymentAmount !== undefined
+          ? Math.min(amount, Math.max(0, Number(rec.paymentAmount)))
+          : status === 'Paid'
+            ? amount
+            : 0;
+      totalPaid += paidAmt;
 
-        setSpreadsheetData({
-          fileName: file.name,
-          worksheets: newWorksheets,
-          activeSheetName: newWorksheets[0]?.name || 'Sheet1'
-        });
-
-        // Launch guided workflow step 1
-        onStartGuidedWorkflow('source');
-      } catch (err) {
-        console.error('Error reading excel file:', err);
+      if (status === 'Paid' || (amount > 0 && paidAmt >= amount - 0.01)) {
+        paidCount += 1;
+      } else if (status === 'Partially Paid' || paidAmt > 0) {
+        partialCount += 1;
+      } else {
+        unpaidCount += 1;
       }
+    }
+
+    const outstandingBalance = Math.max(0, totalInvoiced - totalPaid);
+    return {
+      totalInvoices: generationHistory.length,
+      totalInvoiced,
+      totalPaid,
+      outstandingBalance,
+      paidCount,
+      partialCount,
+      unpaidCount,
     };
-    reader.readAsBinaryString(file);
-  };
+  }, [generationHistory]);
 
-  const handleFileDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const file = e.dataTransfer.files?.[0];
-    if (!file || !setSpreadsheetData) return;
+  const quotationStats = useMemo(() => computeQuotationStats(quotations), [quotations]);
 
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      try {
-        const bstr = evt.target?.result;
-        const workbook = XLSX.read(bstr, { type: 'binary' });
-        const newWorksheets = workbook.SheetNames.map(sheetName => {
-          const worksheet = workbook.Sheets[sheetName];
-          const rawRows = XLSX.utils.sheet_to_json<Record<string, any>>(worksheet);
-          const rawAoA = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1 });
-          const rawHeaderRow = (rawAoA[0] || []).map((h: any, i: number) => String(h || `Col_${i + 1}`).trim()).filter(Boolean);
-          const headers = deduplicateHeaders(rawHeaderRow);
-          return { name: sheetName, headers, rows: rawRows };
-        });
+  const recentActivity = useMemo(() => {
+    const items: Array<{
+      id: string;
+      type: 'invoice' | 'quotation';
+      number: string;
+      customerName: string;
+      amount: number;
+      status: string;
+      date: string;
+    }> = [
+      ...generationHistory.map((inv) => ({
+        id: inv.id,
+        type: 'invoice' as const,
+        number: inv.invoiceNumber,
+        customerName: inv.customerName || 'Unnamed Customer',
+        amount: Number(inv.totalAmount || 0),
+        status: inv.paymentStatus || 'Unpaid',
+        date: inv.updatedAt || inv.generatedDate || '',
+      })),
+      ...quotations.map((qt) => ({
+        id: qt.id,
+        type: 'quotation' as const,
+        number: qt.quotationNumber,
+        customerName: qt.customerName || 'Unnamed Customer',
+        amount: Number(qt.totalAmount || 0),
+        status: qt.status,
+        date: qt.updatedAt || qt.createdAt || qt.quotationDate || '',
+      })),
+    ];
 
-        setSpreadsheetData({
-          fileName: file.name,
-          worksheets: newWorksheets,
-          activeSheetName: newWorksheets[0]?.name || 'Sheet1'
-        });
+    return items
+      .sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime())
+      .slice(0, 6);
+  }, [generationHistory, quotations]);
 
-        // Launch guided workflow step 1
-        onStartGuidedWorkflow('source');
-      } catch (err) {
-        console.error('Error reading dropped excel file:', err);
-      }
-    };
-    reader.readAsBinaryString(file);
-  };
-
-  const stepNames: Record<GuidedWorkflowStep, string> = {
-    source: '1. Select Data Source',
-    mapping: '2. Map Invoice Data',
-    amount_calc: '3. Amount Calculations',
-    gst_calc: '4. GST & Tax Calculations',
-    review: '5. Review Data',
-    finalize: '6. Finalize & Generator'
-  };
+  const isCompanyConfigured = Boolean(company.legalName?.trim() || company.displayName?.trim());
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-      {/* Continue Previous Session Banner if available */}
-      {activeSession && (
-        <div className="bg-gradient-to-r from-indigo-50 via-white to-indigo-50/60 p-5 rounded-2xl border-2 border-indigo-500/30 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center flex-shrink-0 shadow-md shadow-indigo-600/20">
-              <RotateCcw className="w-5 h-5 animate-spin-reverse" />
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-6">
+      {/* Workspace Storage Status Banner */}
+      {driveConnection?.isConnected ? (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start sm:items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+              <Cloud className="w-5 h-5" />
             </div>
             <div>
-              <div className="flex items-center space-x-2">
-                <span className="text-xs font-bold uppercase tracking-wider text-indigo-700 bg-indigo-100 px-2 py-0.5 rounded">
-                  In-Progress Session Found
-                </span>
-                <span className="text-xs text-slate-400">
-                  Updated {new Date(activeSession.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-sm font-bold text-emerald-950">
+                  Google Drive Connected: {driveConnection.folderName}
+                </p>
+                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 border border-emerald-200">
+                  {driveSyncState === 'syncing'
+                    ? 'Syncing...'
+                    : driveSyncState === 'error'
+                      ? 'Sync Attention Needed'
+                      : 'Persistent Storage Active'}
                 </span>
               </div>
-              <h3 className="font-bold text-slate-900 text-sm mt-0.5">
-                Resume at {stepNames[activeSession.currentStep]} ({activeSession.selectedWorksheetName || spreadsheetData.fileName})
-              </h3>
+              <p className="text-xs text-emerald-800 mt-0.5">
+                All company settings, customers, invoices, quotations, PDFs, and email history are
+                isolated to this Drive folder.
+                {driveConnection.lastSyncedAt && (
+                  <span className="ml-1.5 font-medium">
+                    Last sync: {new Date(driveConnection.lastSyncedAt).toLocaleString()}
+                  </span>
+                )}
+              </p>
             </div>
           </div>
-
-          <div className="flex items-center space-x-2">
-            <button
-              onClick={() => storage.clearWorkflowSession()}
-              className="text-xs text-slate-500 hover:text-slate-800 font-semibold px-3 py-2 rounded-xl hover:bg-slate-100 transition-colors"
-            >
-              Discard Session
-            </button>
-            <button
-              onClick={() => onStartGuidedWorkflow(activeSession.currentStep)}
-              className="inline-flex items-center space-x-1.5 bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-xl font-bold text-xs shadow-md shadow-indigo-600/20 transition-all cursor-pointer"
-            >
-              <span>Continue Previous Session</span>
-              <ArrowRight className="w-4 h-4" />
-            </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('integrations')}
+            className="px-3.5 py-2 rounded-xl bg-white border border-emerald-300 text-emerald-900 text-xs font-semibold hover:bg-emerald-100 transition-colors shrink-0 cursor-pointer"
+          >
+            Manage Drive & Email
+          </button>
+        </div>
+      ) : (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start sm:items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-500 text-white flex items-center justify-center shrink-0">
+              <CloudOff className="w-5 h-5" />
+            </div>
+            <div>
+              <p className="text-sm font-bold text-amber-950">
+                Temporary Workspace — Not Backed Up to Google Drive
+              </p>
+              <p className="text-xs text-amber-800 mt-0.5">
+                You can create invoices, quotations, and download PDFs immediately without signing
+                in. Connect your business Google Drive folder URL to save records permanently.
+              </p>
+            </div>
           </div>
+          <button
+            type="button"
+            onClick={() => setActiveTab('integrations')}
+            className="px-4 py-2 rounded-xl bg-amber-600 text-white text-xs font-semibold hover:bg-amber-700 transition-colors shrink-0 cursor-pointer flex items-center justify-center gap-1.5"
+          >
+            <Cloud className="w-3.5 h-3.5" />
+            <span>Connect Google Drive Folder</span>
+          </button>
         </div>
       )}
 
-      {/* PROMINENT SECTION: CREATE A NEW INVOICE */}
-      <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-sm space-y-6">
-        <div>
-          <div className="inline-flex items-center space-x-1.5 bg-indigo-50 text-indigo-700 px-3 py-1 rounded-full text-xs font-bold mb-2">
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>Guided Creation Flow</span>
-          </div>
-          <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">
-            Create a New Invoice
-          </h2>
-          <p className="text-sm text-slate-500 mt-1 max-w-2xl">
-            Choose your starting point below. Our step-by-step assistant guides you through data mapping, amount calculations, and tax rules without technical hassle.
+      {/* Hero Header */}
+      <div className="bg-slate-900 text-white rounded-3xl p-6 sm:p-8 shadow-sm border border-slate-800 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+        <div className="space-y-2 max-w-2xl">
+          <p className="text-xs font-semibold uppercase tracking-wider text-indigo-300">
+            {isCompanyConfigured
+              ? company.displayName || company.legalName
+              : 'Fresh Business Workspace'}
+          </p>
+          <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">
+            Invoice & Quotation Management Dashboard
+          </h1>
+          <p className="text-sm text-slate-300 leading-relaxed">
+            Create GST-compliant invoices and quotations from Excel, CSV, Google Sheets URLs, or
+            manual entry. Download branded PDFs and deliver directly via Gmail SMTP or Custom SMTP.
           </p>
         </div>
 
-        {/* THREE CLEAR STARTING OPTIONS */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {/* OPTION A: Import Excel / CSV */}
-          <div
-            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={handleFileDrop}
-            className={`rounded-2xl p-6 border-2 transition-all flex flex-col justify-between ${
-              isDragging
-                ? 'border-indigo-600 bg-indigo-50/50'
-                : 'border-slate-200 hover:border-indigo-500 bg-gradient-to-b from-slate-50/60 to-white hover:shadow-md'
-            }`}
+        <div className="flex flex-wrap gap-2.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => setActiveTab('manual')}
+            className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-2 transition-colors cursor-pointer"
           >
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="w-12 h-12 rounded-2xl bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold">
-                  <FileSpreadsheet className="w-6 h-6" />
-                </div>
-                <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-full">
-                  Option A • Spreadsheet
-                </span>
-              </div>
+            <FilePlus2 className="w-4 h-4" />
+            <span>New Invoice</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('quotations')}
+            className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-xs font-semibold flex items-center gap-2 transition-colors cursor-pointer"
+          >
+            <FileCheck2 className="w-4 h-4 text-emerald-400" />
+            <span>New Quotation</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('datasource')}
+            className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-xs font-semibold flex items-center gap-2 transition-colors cursor-pointer"
+          >
+            <FileSpreadsheet className="w-4 h-4 text-cyan-400" />
+            <span>Import Spreadsheet</span>
+          </button>
+        </div>
+      </div>
 
-              <div>
-                <h3 className="text-lg font-bold text-slate-900">Import Excel / CSV</h3>
-                <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                  Upload an existing spreadsheet (.xlsx, .xls, or .csv). We will automatically detect columns, parse monetary values, and configure line items.
-                </p>
-              </div>
-
-              <div className="space-y-1.5 text-[11px] text-slate-500 bg-white p-3 rounded-xl border border-slate-200">
-                <div className="flex items-center space-x-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Supports XLSX, XLS & standard CSV files</span>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Indian lakhs (1,50,000) & international decimal parsing</span>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Active file: <strong className="text-slate-800">{spreadsheetData.fileName}</strong> ({totalRows} rows)</span>
-                </div>
-              </div>
+      {/* KPI Cards Grid (All Real Numbers — Zero on Fresh Visit, Clickable to Filtered Views) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <button
+          type="button"
+          onClick={() =>
+            onNavigateInvoicesFiltered
+              ? onNavigateInvoicesFiltered('ALL')
+              : setActiveTab('history')
+          }
+          className="bg-white rounded-2xl p-5 border border-slate-200 hover:border-indigo-300 hover:shadow-md transition-all text-left cursor-pointer group"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+              Total Invoices
+            </span>
+            <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
+              <FileText className="w-4 h-4" />
             </div>
+          </div>
+          <p className="text-3xl font-bold text-slate-900 mt-3 tabular-nums">
+            {invoiceStats.totalInvoices}
+          </p>
+          <p className="text-xs text-slate-500 mt-2 flex items-center justify-between">
+            <span>
+              {invoiceStats.paidCount} Paid · {invoiceStats.partialCount} Partial ·{' '}
+              {invoiceStats.unpaidCount} Unpaid
+            </span>
+            <ArrowRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-indigo-600 transition-colors" />
+          </p>
+        </button>
 
-            <div className="pt-6 flex flex-wrap items-center gap-3">
-              <label className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold py-3 px-4 rounded-xl text-center cursor-pointer shadow-sm shadow-indigo-600/20 transition-all flex items-center justify-center space-x-2">
-                <Upload className="w-4 h-4" />
-                <span>Upload Excel / CSV</span>
-                <input type="file" accept=".xlsx, .xls, .csv" onChange={handleFileUpload} className="hidden" />
-              </label>
+        <button
+          type="button"
+          onClick={() =>
+            onNavigateQuotationsFiltered
+              ? onNavigateQuotationsFiltered('ALL')
+              : setActiveTab('quotations')
+          }
+          className="bg-white rounded-2xl p-5 border border-slate-200 hover:border-emerald-300 hover:shadow-md transition-all text-left cursor-pointer group"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+              Total Quotations
+            </span>
+            <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
+              <FileCheck2 className="w-4 h-4" />
+            </div>
+          </div>
+          <p className="text-3xl font-bold text-slate-900 mt-3 tabular-nums">
+            {quotationStats.total}
+          </p>
+          <p className="text-xs text-slate-500 mt-2 flex items-center justify-between">
+            <span>
+              {quotationStats.approved} Approved · {quotationStats.pendingApproval} Pending ·{' '}
+              {quotationStats.converted} Converted
+            </span>
+            <ArrowRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-emerald-600 transition-colors" />
+          </p>
+        </button>
 
+        <button
+          type="button"
+          onClick={() => setActiveTab('customers')}
+          className="bg-white rounded-2xl p-5 border border-slate-200 hover:border-cyan-300 hover:shadow-md transition-all text-left cursor-pointer group"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+              Total Customers
+            </span>
+            <div className="w-9 h-9 rounded-xl bg-cyan-50 text-cyan-600 flex items-center justify-center">
+              <Users className="w-4 h-4" />
+            </div>
+          </div>
+          <p className="text-3xl font-bold text-slate-900 mt-3 tabular-nums">{customers.length}</p>
+          <p className="text-xs text-slate-500 mt-2 flex items-center justify-between">
+            <span>{importedRowsCount} imported spreadsheet rows</span>
+            <ArrowRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-cyan-600 transition-colors" />
+          </p>
+        </button>
+
+        <button
+          type="button"
+          onClick={() =>
+            onNavigateInvoicesFiltered
+              ? onNavigateInvoicesFiltered('ALL')
+              : setActiveTab('history')
+          }
+          className="bg-white rounded-2xl p-5 border border-slate-200 hover:border-slate-300 hover:shadow-md transition-all text-left cursor-pointer group"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+              Total Invoiced
+            </span>
+            <div className="w-9 h-9 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center">
+              <IndianRupee className="w-4 h-4" />
+            </div>
+          </div>
+          <p className="text-2xl sm:text-3xl font-bold text-slate-900 mt-3 tabular-nums">
+            {formatCurrency(invoiceStats.totalInvoiced, company.currency)}
+          </p>
+          <p className="text-xs text-slate-500 mt-2">
+            Quoted pipeline: {formatCurrency(quotationStats.totalQuotedValue, company.currency)}
+          </p>
+        </button>
+
+        <button
+          type="button"
+          onClick={() =>
+            onNavigateInvoicesFiltered
+              ? onNavigateInvoicesFiltered('Paid')
+              : setActiveTab('history')
+          }
+          className="bg-white rounded-2xl p-5 border border-slate-200 hover:border-emerald-300 hover:shadow-md transition-all text-left cursor-pointer group"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+              Amount Paid
+            </span>
+            <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
+              <CheckCircle2 className="w-4 h-4" />
+            </div>
+          </div>
+          <p className="text-2xl sm:text-3xl font-bold text-emerald-700 mt-3 tabular-nums">
+            {formatCurrency(invoiceStats.totalPaid, company.currency)}
+          </p>
+          <p className="text-xs text-slate-500 mt-2">
+            Collected across {invoiceStats.paidCount + invoiceStats.partialCount} settled invoices
+          </p>
+        </button>
+
+        <button
+          type="button"
+          onClick={() =>
+            onNavigateInvoicesFiltered
+              ? onNavigateInvoicesFiltered('Unpaid')
+              : setActiveTab('history')
+          }
+          className="bg-white rounded-2xl p-5 border border-slate-200 hover:border-amber-300 hover:shadow-md transition-all text-left cursor-pointer group"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+              Outstanding Balance
+            </span>
+            <div className="w-9 h-9 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center">
+              <Wallet className="w-4 h-4" />
+            </div>
+          </div>
+          <p className="text-2xl sm:text-3xl font-bold text-amber-700 mt-3 tabular-nums">
+            {formatCurrency(invoiceStats.outstandingBalance, company.currency)}
+          </p>
+          <p className="text-xs text-slate-500 mt-2">
+            Click to view unpaid & partially paid invoices
+          </p>
+        </button>
+      </div>
+
+      {/* Two-column Workspace Readiness & Recent Activity */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Recent Activity */}
+        <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 p-6">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="text-base font-bold text-slate-900">Recent Activity</h2>
+              <p className="text-xs text-slate-500">Latest invoices and quotations in this workspace</p>
+            </div>
+            <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => onStartGuidedWorkflow('source')}
-                className="bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold py-3 px-4 rounded-xl transition-all flex items-center space-x-1.5 cursor-pointer"
+                onClick={() => setActiveTab('quotations')}
+                className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 cursor-pointer"
               >
-                <span>{totalRows > 0 ? 'Use Current Data' : 'Open Import Guide'}</span>
-                <ArrowRight className="w-4 h-4" />
+                Quotations
+              </button>
+              <span className="text-slate-300">|</span>
+              <button
+                type="button"
+                onClick={() => setActiveTab('history')}
+                className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 cursor-pointer"
+              >
+                All Invoices
               </button>
             </div>
           </div>
 
-          {/* OPTION B: Connect Google Sheets */}
-          <div className="rounded-2xl p-6 border-2 border-slate-200 hover:border-emerald-500 bg-gradient-to-b from-slate-50/60 to-white hover:shadow-md transition-all flex flex-col justify-between">
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="w-12 h-12 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold">
-                  <Globe className="w-6 h-6" />
-                </div>
-                <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full">
-                  Option B • Cloud Sync
-                </span>
+          {recentActivity.length === 0 ? (
+            <div className="border border-dashed border-slate-200 rounded-2xl p-8 text-center space-y-3">
+              <div className="w-12 h-12 rounded-2xl bg-slate-100 text-slate-500 flex items-center justify-center mx-auto">
+                <Clock className="w-6 h-6" />
               </div>
-
               <div>
-                <h3 className="text-lg font-bold text-slate-900">Connect Google Sheets</h3>
-                <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                  Link your Google account to read spreadsheets live from Google Drive. Keep invoice records synchronized directly with your cloud sheets.
+                <p className="text-sm font-semibold text-slate-800">No documents created yet</p>
+                <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
+                  Start with a clean slate — create a manual invoice, prepare a quotation for
+                  approval, or import rows from Excel / Google Sheets.
                 </p>
               </div>
-
-              <div className="space-y-1.5 text-[11px] text-slate-500 bg-white p-3 rounded-xl border border-slate-200">
-                <div className="flex items-center space-x-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Secure read-only authorization</span>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Pick any available sheet & worksheet tab</span>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Automatic column header detection</span>
-                </div>
+              <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('manual')}
+                  className="px-3.5 py-2 rounded-xl bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 cursor-pointer"
+                >
+                  Create First Invoice
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('quotations')}
+                  className="px-3.5 py-2 rounded-xl bg-slate-100 text-slate-800 text-xs font-semibold hover:bg-slate-200 cursor-pointer"
+                >
+                  Create First Quotation
+                </button>
               </div>
             </div>
-
-            <div className="pt-6">
-              <button
-                onClick={() => onStartGuidedWorkflow('source')}
-                className="w-full bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold py-3 px-4 rounded-xl text-center shadow-sm shadow-emerald-600/20 transition-all flex items-center justify-center space-x-2 cursor-pointer"
-              >
-                <Globe className="w-4 h-4" />
-                <span>Connect & Import Google Sheet</span>
-                <ArrowRight className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-
-          {/* OPTION C: Manual Entry */}
-          <div className="rounded-2xl p-6 border-2 border-slate-200 hover:border-violet-500 bg-gradient-to-b from-slate-50/60 to-white hover:shadow-md transition-all flex flex-col justify-between md:col-span-2 lg:col-span-1">
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="w-12 h-12 rounded-2xl bg-violet-100 text-violet-700 flex items-center justify-center font-bold">
-                  <FilePlus2 className="w-6 h-6" />
-                </div>
-                <span className="text-[11px] font-bold uppercase tracking-wider text-violet-700 bg-violet-50 px-2.5 py-1 rounded-full">
-                  Option C • Direct Form
-                </span>
-              </div>
-
-              <div>
-                <h3 className="text-lg font-bold text-slate-900">Manual Invoice Entry</h3>
-                <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                  Create a single multi-item invoice directly without spreadsheets. Pick from saved customers, calculate GST live, and export PDF.
-                </p>
-              </div>
-
-              <div className="space-y-1.5 text-[11px] text-slate-500 bg-white p-3 rounded-xl border border-slate-200">
-                <div className="flex items-center space-x-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Structured 7-section invoice form</span>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Multiple line items, CGST/SGST & IGST</span>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Draft saving & customer directory</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="pt-6">
-              <button
-                onClick={() => setActiveTab('manual')}
-                className="w-full bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold py-3 px-4 rounded-xl text-center shadow-sm transition-all flex items-center justify-center space-x-2 cursor-pointer"
-              >
-                <FilePlus2 className="w-4 h-4" />
-                <span>Open Manual Entry</span>
-                <ArrowRight className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Stats Summary Bar */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-        <div className="bg-white rounded-2xl p-5 shadow-xs border border-slate-200 flex items-center space-x-4">
-          <div className="w-12 h-12 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold">
-            <FileSpreadsheet className="w-6 h-6" />
-          </div>
-          <div>
-            <p className="text-xs font-medium text-slate-500 uppercase">Active Source Data</p>
-            <p className="text-2xl font-bold text-slate-900">{totalRows} Rows</p>
-            <p className="text-xs text-emerald-600 font-medium">Ready across {spreadsheetData.worksheets.length} sheets</p>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-2xl p-5 shadow-xs border border-slate-200 flex items-center space-x-4">
-          <div className="w-12 h-12 rounded-xl bg-cyan-50 text-cyan-600 flex items-center justify-center font-bold">
-            <Layers className="w-6 h-6" />
-          </div>
-          <div>
-            <p className="text-xs font-medium text-slate-500 uppercase">Worksheets Loaded</p>
-            <p className="text-2xl font-bold text-slate-900 tabular-nums">{spreadsheetData.worksheets.length} Sheets</p>
-            <p className="text-xs text-slate-500">Active: {spreadsheetData.activeSheetName || 'None'}</p>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-2xl p-5 shadow-xs border border-slate-200 flex items-center space-x-4">
-          <div className="w-12 h-12 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold">
-            <History className="w-6 h-6" />
-          </div>
-          <div>
-            <p className="text-xs font-medium text-slate-500 uppercase">Invoices Generated</p>
-            <p className="text-2xl font-bold text-slate-900">{generationHistory.length}</p>
-            <p className="text-xs text-emerald-600 font-medium">Stored in history</p>
-          </div>
-        </div>
-
-        <div 
-          onClick={() => setActiveTab('company')}
-          className="bg-white rounded-2xl p-5 shadow-xs border border-slate-200 hover:border-indigo-500 flex items-center space-x-4 cursor-pointer transition-all group"
-        >
-          <div className="w-12 h-12 rounded-xl bg-violet-50 text-violet-600 flex items-center justify-center font-bold group-hover:scale-110 transition-transform">
-            <Building className="w-6 h-6" />
-          </div>
-          <div>
-            <p className="text-xs font-medium text-slate-500 uppercase">Company Profile</p>
-            <p className="text-base font-bold text-slate-900 truncate max-w-[150px]" title={company.displayName}>
-              {company.displayName}
-            </p>
-            <p className="text-xs text-indigo-600 font-medium group-hover:underline">Edit Company Settings →</p>
-          </div>
-        </div>
-      </div>
-
-      {/* Grid: Recent Invoices & Saved Templates */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Recent Invoices Card */}
-        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-            <div className="flex items-center space-x-2">
-              <History className="w-4 h-4 text-indigo-600" />
-              <h3 className="font-bold text-slate-900 text-sm">Recent Generated Invoices</h3>
-            </div>
-            <button
-              onClick={() => setActiveTab('history')}
-              className="text-xs text-indigo-600 hover:text-indigo-700 font-semibold"
-            >
-              View All ({generationHistory.length}) →
-            </button>
-          </div>
-
-          {generationHistory.length > 0 ? (
+          ) : (
             <div className="divide-y divide-slate-100">
-              {generationHistory.slice(0, 4).map((rec) => (
-                <div key={rec.id} className="py-2.5 flex items-center justify-between text-xs">
-                  <div>
-                    <span className="font-mono font-bold text-slate-900">{rec.invoiceNumber}</span>
-                    <p className="text-slate-500 text-[11px]">{rec.customerName}</p>
+              {recentActivity.map((item) => (
+                <div
+                  key={`${item.type}_${item.id}`}
+                  className="py-3 flex items-center justify-between gap-4"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div
+                      className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                        item.type === 'invoice'
+                          ? 'bg-indigo-50 text-indigo-600'
+                          : 'bg-emerald-50 text-emerald-600'
+                      }`}
+                    >
+                      {item.type === 'invoice' ? (
+                        <FileText className="w-4 h-4" />
+                      ) : (
+                        <FileCheck2 className="w-4 h-4" />
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-slate-900 truncate">
+                        {item.number}{' '}
+                        <span className="font-normal text-slate-500">— {item.customerName}</span>
+                      </p>
+                      <p className="text-xs text-slate-500">
+                        {item.type === 'invoice' ? 'Invoice' : 'Quotation'} ·{' '}
+                        {item.date ? new Date(item.date).toLocaleDateString() : 'Today'}
+                      </p>
+                    </div>
                   </div>
-                  <div className="text-right">
-                    <span className="font-mono font-bold text-emerald-600">
-                      {formatCurrency(rec.totalAmount, company.currency)}
+                  <div className="text-right shrink-0">
+                    <p className="text-sm font-bold text-slate-900 tabular-nums">
+                      {formatCurrency(item.amount, company.currency)}
+                    </p>
+                    <span className="inline-block text-[11px] font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 mt-0.5">
+                      {item.status}
                     </span>
-                    <p className="text-[10px] text-slate-400">{rec.generatedDate}</p>
                   </div>
                 </div>
               ))}
-            </div>
-          ) : (
-            <div className="py-8 text-center text-xs text-slate-400">
-              No invoices generated yet. Start with Option A or B above!
             </div>
           )}
         </div>
 
-        {/* Saved Mapping Templates Card */}
-        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-            <div className="flex items-center space-x-2">
-              <Bookmark className="w-4 h-4 text-indigo-600" />
-              <h3 className="font-bold text-slate-900 text-sm">Saved Mapping Templates</h3>
-            </div>
-            <button
-              onClick={() => setActiveTab('fields')}
-              className="text-xs text-indigo-600 hover:text-indigo-700 font-semibold"
-            >
-              Manage Fields →
-            </button>
+        {/* Workspace Setup Checklist */}
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+          <div>
+            <h2 className="text-base font-bold text-slate-900">Workspace Setup</h2>
+            <p className="text-xs text-slate-500">Configure your business tools in any order</p>
           </div>
 
-          {savedTemplates.length > 0 ? (
-            <div className="divide-y divide-slate-100">
-              {savedTemplates.slice(0, 4).map((tmpl) => (
-                <div key={tmpl.id} className="py-2.5 flex items-center justify-between text-xs">
-                  <div>
-                    <span className="font-bold text-slate-800">{tmpl.name}</span>
-                    <p className="text-[11px] text-slate-400 truncate max-w-xs">{tmpl.description}</p>
-                  </div>
-                  <button
-                    onClick={() => onStartGuidedWorkflow('mapping')}
-                    className="text-xs text-indigo-600 hover:text-indigo-700 font-semibold bg-indigo-50 px-2.5 py-1 rounded-lg"
-                  >
-                    Apply
-                  </button>
+          <div className="space-y-2.5">
+            <button
+              type="button"
+              onClick={() => setActiveTab('company')}
+              className="w-full p-3 rounded-xl border border-slate-200 hover:border-indigo-300 flex items-center justify-between text-left transition-colors cursor-pointer"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <Building2 className="w-4 h-4 text-indigo-600 shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-slate-900">Company Profile & GSTIN</p>
+                  <p className="text-[11px] text-slate-500 truncate">
+                    {isCompanyConfigured ? company.legalName || company.displayName : 'Not configured yet'}
+                  </p>
                 </div>
-              ))}
-            </div>
-          ) : (
-            <div className="py-6 text-center text-xs text-slate-400 space-y-1">
-              <p>Default templates available: ZRM, CoachX, Capcut, TRYM 10K, TBT 90 Days.</p>
-              <p className="text-[11px] text-slate-400">Save your custom templates in Step 2 of the guided workflow.</p>
-            </div>
-          )}
+              </div>
+              {isCompanyConfigured ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              ) : (
+                <AlertCircle className="w-4 h-4 text-amber-500 shrink-0" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('integrations')}
+              className="w-full p-3 rounded-xl border border-slate-200 hover:border-indigo-300 flex items-center justify-between text-left transition-colors cursor-pointer"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <Cloud className="w-4 h-4 text-indigo-600 shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-slate-900">Google Drive Folder</p>
+                  <p className="text-[11px] text-slate-500 truncate">
+                    {driveConnection?.isConnected
+                      ? driveConnection.folderName
+                      : 'Optional — connect for cloud backup'}
+                  </p>
+                </div>
+              </div>
+              {driveConnection?.isConnected ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              ) : (
+                <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('integrations')}
+              className="w-full p-3 rounded-xl border border-slate-200 hover:border-indigo-300 flex items-center justify-between text-left transition-colors cursor-pointer"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <Mail className="w-4 h-4 text-indigo-600 shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-slate-900">Email Delivery (SMTP)</p>
+                  <p className="text-[11px] text-slate-500 truncate">
+                    Gmail SMTP or Custom SMTP server
+                  </p>
+                </div>
+              </div>
+              <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onStartGuidedWorkflow(activeSession?.currentStep || 'source')}
+              className="w-full p-3 rounded-xl border border-slate-200 hover:border-indigo-300 flex items-center justify-between text-left transition-colors cursor-pointer"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <Settings className="w-4 h-4 text-indigo-600 shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-slate-900">
+                    {activeSession ? 'Resume Spreadsheet Wizard' : 'Guided Batch Import Wizard'}
+                  </p>
+                  <p className="text-[11px] text-slate-500 truncate">
+                    {importedRowsCount > 0
+                      ? `${importedRowsCount} rows loaded from ${spreadsheetData.fileName}`
+                      : 'Upload Excel/CSV or paste a Google Sheets URL'}
+                  </p>
+                </div>
+              </div>
+              <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
+            </button>
+          </div>
         </div>
       </div>
     </div>

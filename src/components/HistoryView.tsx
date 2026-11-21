@@ -3,29 +3,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
-import { GenerationRecord, CompanySettings, InvoiceTemplate } from '../types';
-import { 
-  History, 
-  Search, 
-  Download, 
-  Printer, 
-  Copy, 
-  RefreshCw, 
-  CheckCircle2, 
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  AlertCircle,
+  CheckCircle2,
+  Clock,
+  Copy,
+  CreditCard,
+  Download,
   FileText,
-  Trash2,
   Mail,
-  Send,
+  RefreshCw,
+  Search,
+  Trash2,
   X,
-  Server,
-  Key,
-  ShieldCheck,
-  AlertCircle
 } from 'lucide-react';
+import { CompanySettings, GenerationRecord, InvoiceTemplate } from '../types';
 import { formatCurrency } from '../utils/calculator';
 import { generateInvoicePDF } from '../utils/pdfGenerator';
-import { EmailService, EmailSendStatus, EmailConfig } from '../utils/emailService';
+import { EmailSendStatus } from '../utils/emailService';
 import { storage } from '../utils/storage';
 
 interface HistoryViewProps {
@@ -35,6 +31,22 @@ interface HistoryViewProps {
   template: InvoiceTemplate;
   emailStatuses?: Record<string, EmailSendStatus>;
   setEmailStatuses?: React.Dispatch<React.SetStateAction<Record<string, EmailSendStatus>>>;
+  initialPaymentFilter?: string;
+  onSendByEmail?: (recordId: string) => void;
+}
+
+type PaymentStatusOption = 'Unpaid' | 'Partially Paid' | 'Paid';
+
+function resolveRecordPaymentStatus(record: GenerationRecord): PaymentStatusOption {
+  const paid = Number(record.paymentAmount ?? record.dataSnapshot?.paymentMade ?? 0);
+  const total = Number(record.totalAmount || 0);
+  if (record.paymentStatus === 'Paid' || (total > 0 && paid >= total - 0.01)) {
+    return 'Paid';
+  }
+  if (record.paymentStatus === 'Partially Paid' || (paid > 0 && paid < total - 0.01)) {
+    return 'Partially Paid';
+  }
+  return 'Unpaid';
 }
 
 export const HistoryView: React.FC<HistoryViewProps> = ({
@@ -44,182 +56,258 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   template,
   emailStatuses: externalEmailStatuses,
   setEmailStatuses: externalSetEmailStatuses,
+  initialPaymentFilter,
+  onSendByEmail,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
-  const [emailModalRecord, setEmailModalRecord] = useState<GenerationRecord | null>(null);
-  const [recipientEmail, setRecipientEmail] = useState('');
-  const [emailSubject, setEmailSubject] = useState('');
-  const [emailBody, setEmailBody] = useState('');
-  const [activeTab, setActiveTab] = useState<'edit' | 'preview'>('edit');
-  const [emailConfig, setEmailConfig] = useState<EmailConfig>(() => storage.loadEmailConfig());
-  const [localEmailStatuses, setLocalEmailStatuses] = useState<Record<string, EmailSendStatus>>(() => storage.loadEmailStatuses());
-  const [isSending, setIsSending] = useState(false);
-  const [isTestingConnection, setIsTestingConnection] = useState(false);
-  const [connectionStatus, setConnectionStatus] = useState<{ success: boolean; message: string } | null>(null);
-  const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-
-  const effectiveEmailStatuses = externalEmailStatuses || localEmailStatuses;
-  const updateEmailStatuses = (recordId: string, status: EmailSendStatus) => {
-    if (externalSetEmailStatuses) {
-      externalSetEmailStatuses(prev => {
-        const next = { ...prev, [recordId]: status };
-        storage.saveEmailStatuses(next);
-        return next;
-      });
-    } else {
-      setLocalEmailStatuses(prev => {
-        const next = { ...prev, [recordId]: status };
-        storage.saveEmailStatuses(next);
-        return next;
-      });
-    }
-  };
-
-  const handleUpdateEmailConfig = (newConfig: EmailConfig) => {
-    setEmailConfig(newConfig);
-    storage.saveEmailConfig(newConfig);
-  };
-
-  const handleTestConnection = async () => {
-    setIsTestingConnection(true);
-    setConnectionStatus(null);
-    try {
-      const res = await EmailService.testConnection(emailConfig);
-      setConnectionStatus(res);
-    } catch {
-      setConnectionStatus({ success: false, message: 'Unexpected connection test failure.' });
-    } finally {
-      setIsTestingConnection(false);
-    }
-  };
-
-  const filteredHistory = generationHistory.filter(record => 
-    record.invoiceNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    record.customerName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    record.worksheetName.toLowerCase().includes(searchTerm.toLowerCase())
+  const [paymentFilter, setPaymentFilter] = useState<string>(initialPaymentFilter || 'ALL');
+  const [confirmClearOpen, setConfirmClearOpen] = useState(false);
+  const [paymentModalRecord, setPaymentModalRecord] = useState<GenerationRecord | null>(null);
+  const [paymentStatusInput, setPaymentStatusInput] = useState<PaymentStatusOption>('Unpaid');
+  const [amountPaidInput, setAmountPaidInput] = useState<string>('0');
+  const [paymentMethodInput, setPaymentMethodInput] = useState<string>('Bank Transfer / NEFT');
+  const [paymentDateInput, setPaymentDateInput] = useState<string>(
+    new Date().toISOString().split('T')[0]
+  );
+  const [paymentRefInput, setPaymentRefInput] = useState<string>('');
+  const [banner, setBanner] = useState<{ type: 'success' | 'info' | 'error'; text: string } | null>(
+    null
   );
 
-  const handleClearHistory = () => {
+  useEffect(() => {
+    if (initialPaymentFilter) {
+      setPaymentFilter(initialPaymentFilter);
+    }
+  }, [initialPaymentFilter]);
+
+  const effectiveEmailStatuses = externalEmailStatuses || {};
+
+  const stats = useMemo(() => {
+    let paidCount = 0;
+    let partialCount = 0;
+    let unpaidCount = 0;
+    let totalBilled = 0;
+    let totalCollected = 0;
+
+    for (const rec of generationHistory) {
+      const total = Number(rec.totalAmount || 0);
+      const paid = Math.min(total, Math.max(0, Number(rec.paymentAmount ?? rec.dataSnapshot?.paymentMade ?? 0)));
+      const st = resolveRecordPaymentStatus(rec);
+      totalBilled += total;
+      totalCollected += st === 'Paid' ? total : paid;
+      if (st === 'Paid') paidCount += 1;
+      else if (st === 'Partially Paid') partialCount += 1;
+      else unpaidCount += 1;
+    }
+
+    return {
+      total: generationHistory.length,
+      paidCount,
+      partialCount,
+      unpaidCount,
+      totalBilled,
+      totalCollected,
+      balanceDue: Math.max(0, totalBilled - totalCollected),
+    };
+  }, [generationHistory]);
+
+  const filteredHistory = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+    return generationHistory.filter((record) => {
+      const st = resolveRecordPaymentStatus(record);
+      if (paymentFilter !== 'ALL' && st !== paymentFilter) return false;
+      if (!q) return true;
+      return (
+        record.invoiceNumber.toLowerCase().includes(q) ||
+        record.customerName.toLowerCase().includes(q) ||
+        record.worksheetName.toLowerCase().includes(q) ||
+        (record.sourceQuotationNumber || '').toLowerCase().includes(q)
+      );
+    });
+  }, [generationHistory, paymentFilter, searchTerm]);
+
+  const handleConfirmClearHistory = () => {
     setGenerationHistory([]);
     if (externalSetEmailStatuses) {
       externalSetEmailStatuses({});
     }
-    setLocalEmailStatuses({});
     storage.saveEmailStatuses({});
+    setConfirmClearOpen(false);
+    setBanner({ type: 'info', text: 'Invoice history cleared for this workspace.' });
+  };
+
+  const handleDeleteRecord = (record: GenerationRecord) => {
+    setGenerationHistory((prev) => prev.filter((r) => r.id !== record.id));
+    setBanner({ type: 'info', text: `Removed invoice ${record.invoiceNumber} from history.` });
   };
 
   const handleDownloadPDF = (record: GenerationRecord) => {
-    const { rowFields, items, discount = 0, additionalCharges = 0, paymentMade = record.paymentAmount ?? 0 } = record.dataSnapshot;
-    const pdf = generateInvoicePDF({ company, items, fields: rowFields, template, discount, additionalCharges, paymentMade });
+    const {
+      rowFields,
+      items,
+      discount = 0,
+      additionalCharges = 0,
+      paymentMade = record.paymentAmount ?? 0,
+    } = record.dataSnapshot;
+    const pdf = generateInvoicePDF({
+      company,
+      items,
+      fields: rowFields,
+      template,
+      discount,
+      additionalCharges,
+      paymentMade,
+    });
     pdf.save(`${record.invoiceNumber.replace(/[/\\?%*:|"<>]/g, '_')}.pdf`);
   };
 
-  const handleRegenerateRecord = (record: GenerationRecord) => {
-    const { rowFields, items, discount = 0, additionalCharges = 0, paymentMade = record.paymentAmount ?? 0 } = record.dataSnapshot;
-    const pdf = generateInvoicePDF({ company, items, fields: rowFields, template, discount, additionalCharges, paymentMade });
-    pdf.save(`${record.invoiceNumber.replace(/[/\\?%*:|"<>]/g, '_')}_regenerated.pdf`);
-  };
-
   const handleDuplicateRecord = (record: GenerationRecord) => {
+    const baseNum = `${record.invoiceNumber}-COPY`;
+    const exists = new Set(generationHistory.map((r) => r.invoiceNumber.toLowerCase()));
+    let nextNum = baseNum;
+    let counter = 2;
+    while (exists.has(nextNum.toLowerCase())) {
+      nextNum = `${baseNum}-${counter++}`;
+    }
+
     const duplicated: GenerationRecord = {
       ...record,
-      id: Math.random().toString(36).substr(2, 9),
-      invoiceNumber: record.invoiceNumber + '-DUP',
+      id: `inv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      invoiceNumber: nextNum,
       generatedDate: new Date().toISOString().split('T')[0],
       revisionNumber: 1,
+      paymentStatus: 'Unpaid',
+      paymentAmount: 0,
+      sourceQuotationId: undefined,
+      sourceQuotationNumber: undefined,
+      dataSnapshot: {
+        ...record.dataSnapshot,
+        paymentMade: 0,
+        rowFields: {
+          ...record.dataSnapshot.rowFields,
+          invoice_number: nextNum,
+          payment_status: 'Unpaid',
+        },
+      },
+      updatedAt: new Date().toISOString(),
     };
-    setGenerationHistory(prev => [duplicated, ...prev]);
+    setGenerationHistory((prev) => [duplicated, ...prev]);
+    setBanner({
+      type: 'success',
+      text: `Duplicated ${record.invoiceNumber} as new Unpaid invoice ${nextNum}.`,
+    });
   };
 
-  const interpolateVariables = (text: string) => {
-    if (!emailModalRecord) return text;
-    const rowFields = emailModalRecord.dataSnapshot?.rowFields || {};
-    return text
-      .replace(/\{\{invoiceNumber\}\}/g, emailModalRecord.invoiceNumber)
-      .replace(/\{\{customerName\}\}/g, emailModalRecord.customerName)
-      .replace(/\{\{totalAmount\}\}/g, formatCurrency(emailModalRecord.totalAmount, company.currency))
-      .replace(/\{\{generatedDate\}\}/g, emailModalRecord.generatedDate)
-      .replace(/\{\{companyName\}\}/g, company.legalName || 'Company')
-      .replace(/\{\{worksheetName\}\}/g, emailModalRecord.worksheetName)
-      .replace(/\{\{dueDate\}\}/g, rowFields['due_date'] || rowFields['DueDate'] || 'N/A')
-      .replace(/\{\{paymentMethod\}\}/g, rowFields['payment_method'] || rowFields['paymentMethod'] || 'N/A')
-      .replace(/\{\{placeOfSupply\}\}/g, rowFields['place_of_supply'] || 'N/A');
-  };
-
-  const handleOpenEmailModal = (record: GenerationRecord) => {
+  const openPaymentModal = (record: GenerationRecord) => {
+    const currentStatus = resolveRecordPaymentStatus(record);
+    const currentPaid = Number(record.paymentAmount ?? record.dataSnapshot?.paymentMade ?? 0);
     const rowFields = record.dataSnapshot?.rowFields || {};
-    const defaultEmail = rowFields['customer_email'] || rowFields['Email'] || `${record.customerName.toLowerCase().replace(/[^a-z0-9]/g, '')}@client.com`;
-    setEmailModalRecord(record);
-    setRecipientEmail(defaultEmail);
-    setEmailSubject(`Tax Invoice {{invoiceNumber}} from {{companyName}}`);
-    setEmailBody(`Dear {{customerName}},\n\nPlease find attached your tax invoice #{{invoiceNumber}} for {{totalAmount}} (Due Date: {{dueDate}}).\n\nPayment Method: {{paymentMethod}}\n\nThank you for your business!\n\nBest regards,\n{{companyName}}`);
-    setActiveTab('edit');
-    setStatusMessage(null);
+    setPaymentModalRecord(record);
+    setPaymentStatusInput(currentStatus);
+    setAmountPaidInput(String(currentPaid));
+    setPaymentMethodInput(rowFields['payment_method'] || 'Bank Transfer / NEFT');
+    setPaymentDateInput(rowFields['payment_date'] || new Date().toISOString().split('T')[0]);
+    setPaymentRefInput(rowFields['transaction_reference'] || '');
   };
 
-  const handleSendEmailSubmit = async (e: React.FormEvent) => {
+  const handleSavePaymentUpdate = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!recipientEmail.trim() || !emailModalRecord) {
-      setStatusMessage({ type: 'error', text: 'Please enter a valid recipient email address.' });
-      return;
-    }
+    if (!paymentModalRecord) return;
 
-    const recordId = emailModalRecord.id;
-    setIsSending(true);
-    setStatusMessage(null);
-    updateEmailStatuses(recordId, 'pending');
+    const total = Number(paymentModalRecord.totalAmount || 0);
+    let paidAmt = parseFloat(amountPaidInput);
+    if (!Number.isFinite(paidAmt) || paidAmt < 0) paidAmt = 0;
 
-    try {
-      const result = await EmailService.sendInvoiceEmail({
-        recipientEmail: recipientEmail.trim(),
-        subject: interpolateVariables(emailSubject),
-        body: interpolateVariables(emailBody),
-        record: emailModalRecord,
-        config: emailConfig,
-      });
-
-      updateEmailStatuses(recordId, result.status);
-      setIsSending(false);
-
-      if (result.success) {
-        setStatusMessage({ type: 'success', text: result.message });
-        setTimeout(() => {
-          setEmailModalRecord(null);
-          setStatusMessage(null);
-        }, 2500);
-      } else {
-        setStatusMessage({ type: 'error', text: result.message });
+    if (paymentStatusInput === 'Paid') {
+      paidAmt = total;
+    } else if (paymentStatusInput === 'Unpaid') {
+      paidAmt = 0;
+    } else {
+      if (paidAmt <= 0 || paidAmt >= total) {
+        setBanner({
+          type: 'error',
+          text: 'For Partially Paid invoices, enter an amount greater than 0 and less than the invoice total.',
+        });
+        return;
       }
-    } catch (err) {
-      setIsSending(false);
-      updateEmailStatuses(recordId, 'failed');
-      setStatusMessage({ type: 'error', text: 'An unexpected error occurred while sending the email.' });
     }
+
+    const roundedPaid = Math.round(paidAmt * 100) / 100;
+    const balanceDue = Math.max(0, Math.round((total - roundedPaid) * 100) / 100);
+
+    setGenerationHistory((prev) =>
+      prev.map((rec) => {
+        if (rec.id !== paymentModalRecord.id) return rec;
+        return {
+          ...rec,
+          paymentStatus: paymentStatusInput,
+          paymentAmount: roundedPaid,
+          updatedAt: new Date().toISOString(),
+          dataSnapshot: {
+            ...rec.dataSnapshot,
+            paymentMade: roundedPaid,
+            rowFields: {
+              ...rec.dataSnapshot.rowFields,
+              payment_status: paymentStatusInput,
+              payment_method: paymentMethodInput,
+              payment_date: paymentDateInput,
+              transaction_reference: paymentRefInput,
+            },
+          },
+        };
+      })
+    );
+
+    setBanner({
+      type: 'success',
+      text: `Updated ${paymentModalRecord.invoiceNumber} to ${paymentStatusInput} (Balance Due: ${formatCurrency(
+        balanceDue,
+        company.currency
+      )}).`,
+    });
+    setPaymentModalRecord(null);
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-      <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-4">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+      {/* Header */}
+      <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Generation History & Versioning</h1>
-          <p className="text-sm text-slate-500">View permanently stored invoices, download PDFs, email clients directly via EmailService (SMTP/Mailgun), and regenerate records.</p>
+          <h1 className="text-2xl font-bold text-slate-900">Invoice History & Payment Tracking</h1>
+          <p className="text-sm text-slate-500 mt-0.5">
+            Track Unpaid, Partially Paid, and Paid invoices, download PDFs, duplicate records, or dispatch via Email Center.
+          </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
-          <div className="relative flex-1 md:w-80">
-            <Search className="absolute left-3.5 top-3 w-4 h-4 text-slate-400" />
+        <div className="flex flex-wrap items-center gap-2.5">
+          <div className="relative flex-1 min-w-[220px]">
+            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
             <input
               type="text"
-              placeholder="Search invoice no or customer..."
+              aria-label="Search invoices"
+              placeholder="Search invoice #, customer, quotation..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-300 rounded-xl pl-10 pr-4 py-2 text-sm text-slate-900 focus:ring-2 focus:ring-indigo-600 outline-none"
+              className="w-full bg-slate-50 border border-slate-300 rounded-xl pl-10 pr-4 py-2 text-xs sm:text-sm text-slate-900 focus:ring-2 focus:ring-indigo-600 outline-none"
             />
           </div>
 
+          <select
+            aria-label="Filter by payment status"
+            value={paymentFilter}
+            onChange={(e) => setPaymentFilter(e.target.value)}
+            className="bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-xs sm:text-sm font-medium text-slate-800 outline-none focus:ring-2 focus:ring-indigo-600"
+          >
+            <option value="ALL">All Payment Statuses</option>
+            <option value="Unpaid">Unpaid</option>
+            <option value="Partially Paid">Partially Paid</option>
+            <option value="Paid">Paid</option>
+          </select>
+
           {generationHistory.length > 0 && (
             <button
-              onClick={handleClearHistory}
+              type="button"
+              onClick={() => setConfirmClearOpen(true)}
               className="flex items-center space-x-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 px-3.5 py-2 rounded-xl text-xs font-bold border border-rose-200 transition-all cursor-pointer whitespace-nowrap"
             >
               <Trash2 className="w-4 h-4" />
@@ -229,108 +317,228 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
         </div>
       </div>
 
+      {/* Inline Banner */}
+      {banner && (
+        <div
+          role="status"
+          className={`p-3.5 rounded-xl border text-xs sm:text-sm flex items-center justify-between gap-2 ${
+            banner.type === 'success'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+              : banner.type === 'error'
+                ? 'bg-rose-50 border-rose-200 text-rose-900'
+                : 'bg-indigo-50 border-indigo-200 text-indigo-900'
+          }`}
+        >
+          <span className="font-medium">{banner.text}</span>
+          <button
+            type="button"
+            aria-label="Dismiss message"
+            onClick={() => setBanner(null)}
+            className="p-1 text-slate-500 hover:text-slate-900 cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Payment Summary KPI Strip */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="bg-white p-4 rounded-xl border border-slate-200">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+            Total Invoices
+          </p>
+          <p className="text-2xl font-bold text-slate-900 mt-1 tabular-nums">{stats.total}</p>
+          <p className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
+            Paid: {stats.paidCount} · Partial: {stats.partialCount} · Unpaid: {stats.unpaidCount}
+          </p>
+        </div>
+        <div className="bg-white p-4 rounded-xl border border-slate-200">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+            Total Billed
+          </p>
+          <p className="text-lg font-bold text-slate-900 mt-1 font-mono tabular-nums truncate">
+            {formatCurrency(stats.totalBilled, company.currency)}
+          </p>
+          <p className="text-[11px] text-slate-500 mt-0.5">Gross invoiced amount</p>
+        </div>
+        <div className="bg-white p-4 rounded-xl border border-slate-200">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-emerald-700">
+            Payments Collected
+          </p>
+          <p className="text-lg font-bold text-emerald-700 mt-1 font-mono tabular-nums truncate">
+            {formatCurrency(stats.totalCollected, company.currency)}
+          </p>
+          <p className="text-[11px] text-slate-500 mt-0.5">Recorded receipts</p>
+        </div>
+        <div className="bg-white p-4 rounded-xl border border-slate-200">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-amber-700">
+            Balance Due
+          </p>
+          <p className="text-lg font-bold text-amber-700 mt-1 font-mono tabular-nums truncate">
+            {formatCurrency(stats.balanceDue, company.currency)}
+          </p>
+          <p className="text-[11px] text-slate-500 mt-0.5">Outstanding receivables</p>
+        </div>
+      </div>
+
+      {/* Invoices Table */}
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead>
-              <tr className="bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-600 uppercase tracking-wider">
-                <th className="py-3 px-4">Invoice No</th>
-                <th className="py-3 px-4">Customer Name</th>
-                <th className="py-3 px-4">Worksheet</th>
-                <th className="py-3 px-4">Generated Date</th>
-                <th className="py-3 px-4">Total Amount</th>
-                <th className="py-3 px-4 text-center">Email Status</th>
-                <th className="py-3 px-4 text-center">PDF Status</th>
+              <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-600 uppercase tracking-wider">
+                <th className="py-3 px-4">Invoice #</th>
+                <th className="py-3 px-4">Customer</th>
+                <th className="py-3 px-4">Source / Date</th>
+                <th className="py-3 px-4 text-right">Total</th>
+                <th className="py-3 px-4 text-right">Balance Due</th>
+                <th className="py-3 px-4 text-center">Payment Status</th>
+                <th className="py-3 px-4 text-center">Email</th>
                 <th className="py-3 px-4 text-right">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-200 text-sm">
+            <tbody className="divide-y divide-slate-200 text-xs sm:text-sm">
               {filteredHistory.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-12 text-center text-slate-400">
-                    No generated invoices found in history. Generate some invoices from the Generation Center!
+                  <td colSpan={8} className="py-12 px-4 text-center text-slate-500">
+                    <FileText className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                    <p className="font-semibold text-slate-700">No invoices found</p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Create an invoice via Manual Entry, Batch Generation, or by converting an Approved Quotation.
+                    </p>
                   </td>
                 </tr>
               ) : (
-                filteredHistory.map(record => {
+                filteredHistory.map((record) => {
                   const emailStatus = effectiveEmailStatuses[record.id];
+                  const paymentStatus = resolveRecordPaymentStatus(record);
+                  const paidAmt =
+                    paymentStatus === 'Paid'
+                      ? record.totalAmount
+                      : Math.max(0, Number(record.paymentAmount ?? record.dataSnapshot?.paymentMade ?? 0));
+                  const balanceDue = Math.max(0, record.totalAmount - paidAmt);
+
                   return (
                     <tr key={record.id} className="hover:bg-slate-50/80 transition-colors">
-                      <td className="py-3 px-4 font-semibold text-slate-900 font-mono">
-                        {record.invoiceNumber}
+                      <td className="py-3 px-4 align-top">
+                        <p className="font-semibold text-slate-900 font-mono">
+                          {record.invoiceNumber}
+                        </p>
+                        {record.sourceQuotationNumber && (
+                          <p className="text-[11px] font-mono text-indigo-600 mt-0.5">
+                            From {record.sourceQuotationNumber}
+                          </p>
+                        )}
                       </td>
-                      <td className="py-3 px-4 text-slate-800 font-medium">
+                      <td className="py-3 px-4 align-top text-slate-800 font-medium">
                         {record.customerName}
                       </td>
-                      <td className="py-3 px-4 text-slate-600">
-                        <span className="bg-slate-100 px-2 py-1 rounded text-xs font-medium">
+                      <td className="py-3 px-4 align-top">
+                        <span className="inline-block bg-slate-100 px-2 py-0.5 rounded text-[11px] font-medium text-slate-700">
                           {record.worksheetName}
                         </span>
+                        <p className="text-[11px] font-mono text-slate-500 mt-0.5">
+                          {record.generatedDate}
+                        </p>
                       </td>
-                      <td className="py-3 px-4 text-slate-600 text-xs">
-                        {record.generatedDate}
-                      </td>
-                      <td className="py-3 px-4 font-semibold text-slate-900">
+                      <td className="py-3 px-4 align-top text-right font-mono font-semibold text-slate-900 tabular-nums whitespace-nowrap">
                         {formatCurrency(record.totalAmount, company.currency)}
                       </td>
-                      <td className="py-3 px-4 text-center">
+                      <td className="py-3 px-4 align-top text-right font-mono font-semibold tabular-nums whitespace-nowrap">
+                        <span className={balanceDue > 0 ? 'text-amber-700' : 'text-emerald-700'}>
+                          {formatCurrency(balanceDue, company.currency)}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 align-top text-center">
+                        <button
+                          type="button"
+                          onClick={() => openPaymentModal(record)}
+                          title="Click to update payment status"
+                          className={`inline-flex items-center space-x-1 px-2.5 py-1 rounded-md border text-[11px] font-semibold cursor-pointer whitespace-nowrap ${
+                            paymentStatus === 'Paid'
+                              ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                              : paymentStatus === 'Partially Paid'
+                                ? 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
+                                : 'bg-rose-50 text-rose-800 border-rose-200 hover:bg-rose-100'
+                          }`}
+                        >
+                          {paymentStatus === 'Paid' ? (
+                            <CheckCircle2 className="w-3 h-3" />
+                          ) : (
+                            <Clock className="w-3 h-3" />
+                          )}
+                          <span>{paymentStatus}</span>
+                        </button>
+                      </td>
+                      <td className="py-3 px-4 align-top text-center">
                         {emailStatus === 'sent' && (
-                          <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-cyan-50 text-cyan-700 border border-cyan-200">
+                          <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-cyan-50 text-cyan-700 border border-cyan-200">
                             <CheckCircle2 className="w-3 h-3 text-cyan-600" />
-                            <span>Email Sent</span>
+                            <span>Sent</span>
                           </span>
                         )}
                         {emailStatus === 'pending' && (
-                          <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">
-                            <RefreshCw className="w-3 h-3 animate-spin text-amber-600" />
-                            <span>Sending...</span>
+                          <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-amber-50 text-amber-700 border border-amber-200">
+                            <RefreshCw className="w-3 h-3 animate-spin" />
+                            <span>Sending</span>
                           </span>
                         )}
                         {emailStatus === 'failed' && (
-                          <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-rose-50 text-rose-700 border border-rose-200">
-                            <AlertCircle className="w-3 h-3 text-rose-600" />
+                          <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-rose-50 text-rose-700 border border-rose-200">
+                            <AlertCircle className="w-3 h-3" />
                             <span>Failed</span>
                           </span>
                         )}
-                        {!emailStatus && (
-                          <span className="text-slate-400 text-xs">Not Sent</span>
-                        )}
+                        {!emailStatus && <span className="text-slate-400 text-[11px]">Not Sent</span>}
                       </td>
-                      <td className="py-3 px-4 text-center">
-                        <span className="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700">
-                          <CheckCircle2 className="w-3 h-3" />
-                          <span>Success</span>
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-right space-x-2">
-                        <button
-                          onClick={() => handleOpenEmailModal(record)}
-                          className="p-1.5 rounded-lg bg-cyan-50 text-cyan-600 hover:bg-cyan-100 transition-colors inline-flex items-center"
-                          title="Email Invoice to Client via EmailService"
-                        >
-                          <Mail className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => handleDownloadPDF(record)}
-                          className="p-1.5 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors inline-flex items-center"
-                          title="Download PDF"
-                        >
-                          <Download className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => handleRegenerateRecord(record)}
-                          className="p-1.5 rounded-lg bg-emerald-50 text-emerald-600 hover:bg-emerald-100 transition-colors inline-flex items-center"
-                          title="Regenerate with Latest Settings"
-                        >
-                          <RefreshCw className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => handleDuplicateRecord(record)}
-                          className="p-1.5 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors inline-flex items-center"
-                          title="Duplicate Invoice"
-                        >
-                          <Copy className="w-4 h-4" />
-                        </button>
+                      <td className="py-3 px-4 align-top text-right">
+                        <div className="inline-flex items-center justify-end gap-1.5">
+                          <button
+                            type="button"
+                            aria-label={`Update payment for ${record.invoiceNumber}`}
+                            onClick={() => openPaymentModal(record)}
+                            className="p-1.5 rounded-lg bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors cursor-pointer"
+                            title="Record / Update Payment"
+                          >
+                            <CreditCard className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`Email ${record.invoiceNumber}`}
+                            onClick={() => onSendByEmail?.(record.id)}
+                            className="p-1.5 rounded-lg bg-cyan-50 text-cyan-700 hover:bg-cyan-100 transition-colors cursor-pointer"
+                            title="Send Invoice via Email Center"
+                          >
+                            <Mail className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`Download PDF ${record.invoiceNumber}`}
+                            onClick={() => handleDownloadPDF(record)}
+                            className="p-1.5 rounded-lg bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors cursor-pointer"
+                            title="Download PDF"
+                          >
+                            <Download className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`Duplicate ${record.invoiceNumber}`}
+                            onClick={() => handleDuplicateRecord(record)}
+                            className="p-1.5 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors cursor-pointer"
+                            title="Duplicate Invoice"
+                          >
+                            <Copy className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`Delete ${record.invoiceNumber}`}
+                            onClick={() => handleDeleteRecord(record)}
+                            className="p-1.5 rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600 transition-colors cursor-pointer"
+                            title="Delete Invoice"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -341,303 +549,170 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
         </div>
       </div>
 
-      {/* Email Invoice Modal */}
-      {emailModalRecord && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl max-w-xl w-full p-6 shadow-2xl space-y-5">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
-              <div className="flex items-center space-x-2">
-                <div className="p-2 bg-cyan-50 text-cyan-600 rounded-xl">
-                  <Mail className="w-5 h-5" />
+      {/* Update Payment Modal */}
+      {paymentModalRecord && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Update Payment for ${paymentModalRecord.invoiceNumber}`}
+          className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4"
+        >
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div>
+                <h3 className="font-bold text-slate-900 text-sm">
+                  Update Payment — {paymentModalRecord.invoiceNumber}
+                </h3>
+                <p className="text-xs text-slate-500">
+                  {paymentModalRecord.customerName} · Total:{' '}
+                  <span className="font-mono font-bold">
+                    {formatCurrency(paymentModalRecord.totalAmount, company.currency)}
+                  </span>
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Close payment modal"
+                onClick={() => setPaymentModalRecord(null)}
+                className="p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSavePaymentUpdate} className="space-y-3 text-xs">
+              <div>
+                <label htmlFor="payment-status-select" className="block font-semibold text-slate-700 mb-1">
+                  Payment Status
+                </label>
+                <select
+                  id="payment-status-select"
+                  value={paymentStatusInput}
+                  onChange={(e) => {
+                    const next = e.target.value as PaymentStatusOption;
+                    setPaymentStatusInput(next);
+                    if (next === 'Paid') {
+                      setAmountPaidInput(String(paymentModalRecord.totalAmount));
+                    } else if (next === 'Unpaid') {
+                      setAmountPaidInput('0');
+                    }
+                  }}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-semibold"
+                >
+                  <option value="Unpaid">Unpaid</option>
+                  <option value="Partially Paid">Partially Paid</option>
+                  <option value="Paid">Paid</option>
+                </select>
+              </div>
+
+              <div>
+                <label htmlFor="payment-amount-input" className="block font-semibold text-slate-700 mb-1">
+                  Amount Received
+                </label>
+                <input
+                  id="payment-amount-input"
+                  type="number"
+                  min={0}
+                  max={paymentModalRecord.totalAmount}
+                  step="0.01"
+                  disabled={paymentStatusInput !== 'Partially Paid'}
+                  value={amountPaidInput}
+                  onChange={(e) => setAmountPaidInput(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono disabled:opacity-60"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="payment-date-input" className="block font-semibold text-slate-700 mb-1">
+                    Payment Date
+                  </label>
+                  <input
+                    id="payment-date-input"
+                    type="date"
+                    value={paymentDateInput}
+                    onChange={(e) => setPaymentDateInput(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono"
+                  />
                 </div>
                 <div>
-                  <h3 className="font-bold text-slate-900 text-base">Email Invoice Preview & Sender</h3>
-                  <p className="text-xs text-slate-500 font-mono">Invoice #{emailModalRecord.invoiceNumber} — {emailModalRecord.customerName}</p>
+                  <label htmlFor="payment-method-input" className="block font-semibold text-slate-700 mb-1">
+                    Payment Method
+                  </label>
+                  <input
+                    id="payment-method-input"
+                    type="text"
+                    value={paymentMethodInput}
+                    onChange={(e) => setPaymentMethodInput(e.target.value)}
+                    placeholder="UPI / NEFT / Card"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50"
+                  />
                 </div>
               </div>
-              <button
-                onClick={() => setEmailModalRecord(null)}
-                className="text-slate-400 hover:text-slate-600 font-bold text-lg cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
 
-            {/* Modal Tabs */}
-            <div className="flex items-center space-x-2 bg-slate-100 p-1 rounded-xl">
-              <button
-                type="button"
-                onClick={() => setActiveTab('edit')}
-                className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
-                  activeTab === 'edit'
-                    ? 'bg-white text-indigo-600 shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                1. Edit Template & Gateway
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab('preview')}
-                className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
-                  activeTab === 'preview'
-                    ? 'bg-white text-indigo-600 shadow-sm'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                2. Live Email Preview
-              </button>
-            </div>
-
-            {statusMessage && (
-              <div className={`p-4 rounded-xl text-xs flex items-center space-x-2 border ${
-                statusMessage.type === 'success' 
-                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200' 
-                  : 'bg-rose-50 text-rose-800 border-rose-200'
-              }`}>
-                {statusMessage.type === 'success' ? (
-                  <CheckCircle2 className="w-5 h-5 text-emerald-600 flex-shrink-0" />
-                ) : (
-                  <AlertCircle className="w-5 h-5 text-rose-600 flex-shrink-0" />
-                )}
-                <span className="font-semibold">{statusMessage.text}</span>
+              <div>
+                <label htmlFor="payment-ref-input" className="block font-semibold text-slate-700 mb-1">
+                  Transaction / UTR Reference
+                </label>
+                <input
+                  id="payment-ref-input"
+                  type="text"
+                  value={paymentRefInput}
+                  onChange={(e) => setPaymentRefInput(e.target.value)}
+                  placeholder="Optional payment reference"
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono"
+                />
               </div>
-            )}
 
-            <form onSubmit={handleSendEmailSubmit} className="space-y-4 text-xs">
-              {activeTab === 'edit' ? (
-                <>
-                  {/* Provider Selector & Test Connection */}
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between bg-slate-50 p-3 rounded-xl border border-slate-200 gap-2">
-                    <div className="flex items-center space-x-3">
-                      <span className="font-bold text-slate-700">Gateway:</span>
-                      <label className="flex items-center space-x-1.5 cursor-pointer">
-                        <input
-                          type="radio"
-                          name="emailProvider"
-                          checked={emailConfig.provider === 'smtp'}
-                          onChange={() => handleUpdateEmailConfig({ ...emailConfig, provider: 'smtp' })}
-                          className="text-indigo-600 focus:ring-indigo-500"
-                        />
-                        <span className="font-medium text-slate-800">Mock SMTP</span>
-                      </label>
-                      <label className="flex items-center space-x-1.5 cursor-pointer">
-                        <input
-                          type="radio"
-                          name="emailProvider"
-                          checked={emailConfig.provider === 'mailgun'}
-                          onChange={() => handleUpdateEmailConfig({ ...emailConfig, provider: 'mailgun' })}
-                          className="text-indigo-600 focus:ring-indigo-500"
-                        />
-                        <span className="font-medium text-slate-800">Mailgun API</span>
-                      </label>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={handleTestConnection}
-                      disabled={isTestingConnection}
-                      className="px-2.5 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-[11px] transition-colors cursor-pointer inline-flex items-center justify-center space-x-1.5 border border-indigo-200"
-                    >
-                      {isTestingConnection ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Server className="w-3 h-3" />}
-                      <span>{isTestingConnection ? 'Testing...' : 'Test Connection'}</span>
-                    </button>
-                  </div>
-
-                  {connectionStatus && (
-                    <div className={`p-2.5 rounded-lg text-[11px] flex items-center space-x-2 border ${
-                      connectionStatus.success ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-rose-50 text-rose-800 border-rose-200'
-                    }`}>
-                      {connectionStatus.success ? <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" /> : <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />}
-                      <span>{connectionStatus.message}</span>
-                    </div>
-                  )}
-
-                  {emailConfig.provider === 'smtp' ? (
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="block font-bold text-slate-700 mb-1">SMTP Server</label>
-                        <input
-                          type="text"
-                          value={emailConfig.smtpServer || ''}
-                          onChange={(e) => handleUpdateEmailConfig({ ...emailConfig, smtpServer: e.target.value })}
-                          className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 font-mono"
-                        />
-                      </div>
-                      <div>
-                        <label className="block font-bold text-slate-700 mb-1">Port</label>
-                        <input
-                          type="text"
-                          value={emailConfig.smtpPort || ''}
-                          onChange={(e) => handleUpdateEmailConfig({ ...emailConfig, smtpPort: e.target.value })}
-                          className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 font-mono"
-                        />
-                      </div>
-                    </div>
-                  ) : (
-                    <div>
-                      <label className="block font-bold text-slate-700 mb-1">Mailgun Domain</label>
-                      <input
-                        type="text"
-                        value={emailConfig.mailgunDomain || ''}
-                        onChange={(e) => handleUpdateEmailConfig({ ...emailConfig, mailgunDomain: e.target.value })}
-                        className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-1.5 font-mono"
-                      />
-                    </div>
-                  )}
-
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">Recipient Email Address <span className="text-rose-500">*</span></label>
-                    <input
-                      type="email"
-                      value={recipientEmail}
-                      onChange={(e) => setRecipientEmail(e.target.value)}
-                      placeholder="client@company.com"
-                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 font-medium outline-none focus:ring-2 focus:ring-indigo-500"
-                      required
-                    />
-                  </div>
-
-                  {/* Template Variables Helper Bar */}
-                  <div className="bg-indigo-50/50 p-2.5 rounded-xl border border-indigo-100 space-y-1.5">
-                    <p className="font-bold text-indigo-900 text-[11px]">Click variable to insert into subject or body:</p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {['{{invoiceNumber}}', '{{customerName}}', '{{totalAmount}}', '{{dueDate}}', '{{companyName}}', '{{paymentMethod}}'].map(variable => (
-                        <button
-                          key={variable}
-                          type="button"
-                          onClick={() => setEmailBody(prev => prev + ' ' + variable)}
-                          className="px-2 py-0.5 bg-white border border-indigo-200 text-indigo-700 rounded-md font-mono text-[10px] hover:bg-indigo-100 transition-colors cursor-pointer"
-                        >
-                          {variable}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">Email Subject Template</label>
-                    <input
-                      type="text"
-                      value={emailSubject}
-                      onChange={(e) => setEmailSubject(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-[11px]"
-                      required
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">Message Body Template</label>
-                    <textarea
-                      rows={5}
-                      value={emailBody}
-                      onChange={(e) => setEmailBody(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-300 rounded-xl p-3 outline-none focus:ring-2 focus:ring-indigo-500 leading-relaxed font-mono text-[11px]"
-                      required
-                    />
-                  </div>
-                </>
-              ) : (
-                /* Live Preview Tab */
-                <div className="space-y-4 bg-slate-50 p-4 rounded-xl border border-slate-200">
-                  <div className="flex items-center justify-between border-b border-slate-200 pb-2">
-                    <span className="font-bold text-slate-700">Live Rendered Email Preview</span>
-                    <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded font-bold">Variables Interpolated</span>
-                  </div>
-
-                  <div className="space-y-2 text-xs">
-                    <div className="flex items-center space-x-2 text-slate-600">
-                      <span className="font-bold text-slate-700 w-16">To:</span>
-                      <span className="font-mono bg-white px-2 py-1 rounded border border-slate-200 flex-1">{recipientEmail || 'client@company.com'}</span>
-                    </div>
-                    <div className="flex items-center space-x-2 text-slate-600">
-                      <span className="font-bold text-slate-700 w-16">From:</span>
-                      <span className="font-mono bg-white px-2 py-1 rounded border border-slate-200 flex-1">{company.email || 'billing@company.com'} ({company.legalName})</span>
-                    </div>
-                    <div className="flex items-center space-x-2 text-slate-600">
-                      <span className="font-bold text-slate-700 w-16">Subject:</span>
-                      <span className="font-bold text-slate-900 bg-white px-2 py-1 rounded border border-slate-200 flex-1">{interpolateVariables(emailSubject)}</span>
-                    </div>
-                  </div>
-
-                  <div className="bg-white p-4 rounded-xl border border-slate-200 space-y-3">
-                    <p className="font-bold text-slate-700 text-[11px] uppercase tracking-wider">Message Content:</p>
-                    <div className="text-slate-800 whitespace-pre-wrap leading-relaxed text-xs bg-slate-50/60 p-3 rounded-lg border border-slate-100 font-sans">
-                      {interpolateVariables(emailBody)}
-                    </div>
-                  </div>
-
-                  <div className="p-3 bg-indigo-50/60 rounded-xl border border-indigo-200 flex items-center justify-between">
-                    <div className="flex items-center space-x-2 text-indigo-900">
-                      <ShieldCheck className="w-4 h-4 text-indigo-600" />
-                      <span className="font-medium">Attached PDF:</span>
-                    </div>
-                    <span className="font-mono font-bold text-indigo-700">
-                      {emailModalRecord.invoiceNumber}.pdf ({formatCurrency(emailModalRecord.totalAmount, company.currency)})
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {activeTab === 'edit' && (
-                <div className="p-3 bg-indigo-50/60 rounded-xl border border-indigo-200 flex items-center justify-between">
-                  <div className="flex items-center space-x-2 text-indigo-900">
-                    <ShieldCheck className="w-4 h-4 text-indigo-600" />
-                    <span className="font-medium">Attached PDF:</span>
-                  </div>
-                  <span className="font-mono font-bold text-indigo-700">
-                    {emailModalRecord.invoiceNumber}.pdf ({formatCurrency(emailModalRecord.totalAmount, company.currency)})
-                  </span>
-                </div>
-              )}
-
-              <div className="flex items-center justify-between pt-2">
-                {activeTab === 'edit' ? (
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('preview')}
-                    className="px-4 py-2 rounded-xl bg-indigo-50 text-indigo-700 font-bold hover:bg-indigo-100 transition-colors cursor-pointer"
-                  >
-                    Preview Email →
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('edit')}
-                    className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-bold hover:bg-slate-200 transition-colors cursor-pointer"
-                  >
-                    ← Back to Edit
-                  </button>
-                )}
-
-                <div className="flex items-center space-x-3">
-                  <button
-                    type="button"
-                    onClick={() => setEmailModalRecord(null)}
-                    className="px-4 py-2 rounded-xl bg-white border border-slate-300 text-slate-700 font-semibold hover:bg-slate-100 cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={isSending}
-                    className="flex items-center space-x-2 bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-300 text-white px-5 py-2.5 rounded-xl font-bold shadow-md shadow-cyan-600/30 cursor-pointer"
-                  >
-                    {isSending ? (
-                      <>
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                        <span>Sending via {emailConfig.provider.toUpperCase()}...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Send className="w-4 h-4" />
-                        <span>Send Invoice Email</span>
-                      </>
-                    )}
-                  </button>
-                </div>
+              <div className="flex justify-end space-x-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setPaymentModalRecord(null)}
+                  className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 font-semibold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer"
+                >
+                  Save Payment
+                </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Clear All Confirmation Modal */}
+      {confirmClearOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Clear invoice history"
+          className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4"
+        >
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-sm w-full p-6 space-y-4">
+            <h3 className="font-bold text-slate-900 text-sm">Clear All Invoice History?</h3>
+            <p className="text-xs text-slate-600">
+              This removes all {generationHistory.length} invoice record(s) from the active workspace.
+            </p>
+            <div className="flex justify-end space-x-2">
+              <button
+                type="button"
+                onClick={() => setConfirmClearOpen(false)}
+                className="px-4 py-2 rounded-lg border border-slate-300 text-xs font-semibold text-slate-700 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmClearHistory}
+                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold cursor-pointer"
+              >
+                Clear All
+              </button>
+            </div>
           </div>
         </div>
       )}

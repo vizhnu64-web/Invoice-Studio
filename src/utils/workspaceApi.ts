@@ -4,323 +4,358 @@
  */
 
 import {
-  AuthenticatedUserProfile,
   BackendSmtpConfig,
+  CompanySettings,
   CustomerRecord,
   EmailDeliveryLogEntry,
   EmailDeliveryMethod,
   GenerationRecord,
+  InvoiceFieldConfig,
+  InvoiceTemplate,
+  MappingProfile,
   QuotationRecord,
-  QuotationStatus,
 } from '../types';
-import { connectGoogleFeature, disconnectGoogleFeature, GoogleOAuthFeature } from './googleSheets';
+import { getActiveWorkspaceId, getTempSessionId } from './storage';
 
-async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
-    credentials: 'include',
-    cache: 'no-store',
+export class WorkspaceApiError extends Error {
+  status: number;
+  code: string;
+  details?: Record<string, any>;
+
+  constructor(status: number, code: string, message: string, details?: Record<string, any>) {
+    super(message);
+    this.name = 'WorkspaceApiError';
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+
+function buildHeaders(overrideFolderId?: string | null): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'x-workspace-session-id': getTempSessionId(),
+  };
+  const folderId = overrideFolderId !== undefined ? overrideFolderId : getActiveWorkspaceId();
+  if (folderId) {
+    headers['x-workspace-folder-id'] = folderId;
+  }
+  return headers;
+}
+
+async function apiRequest<T>(
+  url: string,
+  init?: RequestInit,
+  overrideFolderId?: string | null
+): Promise<T> {
+  const response = await fetch(url, {
     ...init,
     headers: {
-      'Content-Type': 'application/json',
+      ...buildHeaders(overrideFolderId),
       ...(init?.headers || {}),
     },
   });
-  const text = await res.text();
+
+  const text = await response.text();
   let parsed: any = {};
   try {
     parsed = text ? JSON.parse(text) : {};
   } catch {
-    throw new Error(`Unexpected server response (HTTP ${res.status}).`);
+    throw new WorkspaceApiError(
+      response.status,
+      'INVALID_RESPONSE',
+      `Unexpected non-JSON response (${response.status})`
+    );
   }
-  if (!res.ok) {
-    const err: any = new Error(parsed.error || `Request failed with HTTP ${res.status}.`);
-    err.code = parsed.code;
-    err.status = res.status;
-    err.requiresReauth = Boolean(parsed.requiresReauth);
-    throw err;
+
+  if (!response.ok) {
+    throw new WorkspaceApiError(
+      response.status,
+      parsed.code || 'API_ERROR',
+      parsed.error || `Request failed (${response.status})`,
+      parsed.details
+    );
   }
+
   return parsed as T;
 }
 
-export interface WorkspaceBootstrapPayload {
-  userId: string;
-  onboardingCompleted: boolean;
-  workspace: {
-    companySettings: any | null;
-    template: any | null;
-    fields: any[] | null;
-    calculationSettings: any | null;
-    preferences: Record<string, any>;
-    updatedAt: string;
-    version: number;
-  } | null;
-  customers: CustomerRecord[];
-  quotations: QuotationRecord[];
-  invoices: GenerationRecord[];
-  smtpConfig: BackendSmtpConfig;
-  emailLogs: EmailDeliveryLogEntry[];
+export interface DriveBackupFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  modifiedTime?: string;
+  size?: string;
+  webViewLink?: string;
 }
 
-export interface DriveStatusPayload {
+export interface DriveConnectResponse {
+  ok: boolean;
   connected: boolean;
-  rootFolderName: string;
-  rootFolderId: string | null;
-  subfolders: Record<string, string>;
-  subfolderNames: Record<string, string>;
-  lastSyncAt: string | null;
-  syncStatus: string | null;
-  lastError: string | null;
-  trackedFilesCount: number;
+  folderId: string;
+  folderName: string;
+  rootFolderId: string;
+  folderUrl: string;
+  serviceAccountEmail: string | null;
+  restoredExistingWorkspace: boolean;
+  workspace: {
+    company: CompanySettings | null;
+    fieldCatalog: InvoiceFieldConfig[];
+    mappingProfiles: MappingProfile[];
+    layoutConfig: { templates: InvoiceTemplate[] } | null;
+    updatedAt: string;
+  } | null;
+  customers: CustomerRecord[];
+  invoices: GenerationRecord[];
+  quotations: QuotationRecord[];
+  sheetsState: any;
+  emailLogs: EmailDeliveryLogEntry[];
+  backups: DriveBackupFile[];
+  smtpConfig: BackendSmtpConfig;
+  lastSyncedAt: string;
+}
+
+export interface DriveStatusResponse {
+  connected: boolean;
+  storageMode: 'google-drive' | 'temporary';
+  folderId?: string;
+  folderName?: string;
+  rootFolderId?: string;
+  serviceAccountEmail?: string | null;
+  backupCount?: number;
+  invoicePdfCount?: number;
+  quotationPdfCount?: number;
+  backups?: DriveBackupFile[];
+  checkedAt?: string;
 }
 
 export const workspaceApi = {
-  connectGoogle(feature: GoogleOAuthFeature, preferRedirect?: boolean) {
-    return connectGoogleFeature(feature, { preferRedirect });
-  },
+  // ============================================================
+  // GOOGLE DRIVE WORKSPACE STORAGE (SERVICE ACCOUNT)
+  // ============================================================
 
-  disconnectGoogle(feature: 'all' | 'drive' | 'sheets' | 'gmail' = 'all') {
-    return disconnectGoogleFeature(feature);
-  },
-
-  fetchWorkspace(): Promise<WorkspaceBootstrapPayload> {
-    return apiJson<WorkspaceBootstrapPayload>('/api/workspace', { method: 'GET' });
-  },
-
-  saveWorkspace(patch: {
-    onboardingCompleted?: boolean;
-    companySettings?: any;
-    template?: any;
-    fields?: any[];
-    calculationSettings?: any;
-    preferences?: Record<string, any>;
-  }): Promise<any> {
-    return apiJson('/api/workspace', {
-      method: 'PUT',
-      body: JSON.stringify(patch),
-    });
-  },
-
-  saveCustomer(customer: CustomerRecord): Promise<{ customer: CustomerRecord }> {
-    return apiJson('/api/workspace', {
+  async connectDriveFolder(folderUrl: string): Promise<DriveConnectResponse> {
+    return apiRequest<DriveConnectResponse>('/api/drive/connect', {
       method: 'POST',
-      body: JSON.stringify({ customer }),
+      body: JSON.stringify({ folderUrl }),
     });
   },
 
-  deleteCustomer(deleteCustomerId: string): Promise<{ deleted: boolean }> {
-    return apiJson('/api/workspace', {
+  async testDriveConnection(folderUrlOrId?: string): Promise<{
+    ok: boolean;
+    folderId: string;
+    folderName: string;
+    canEdit: boolean;
+    webViewLink?: string;
+    serviceAccountEmail: string | null;
+    testedAt: string;
+  }> {
+    return apiRequest('/api/drive/test', {
       method: 'POST',
-      body: JSON.stringify({ deleteCustomerId }),
+      body: JSON.stringify(folderUrlOrId ? { folderUrl: folderUrlOrId } : {}),
     });
   },
 
-  // Quotations
-  saveQuotation(quotation: QuotationRecord): Promise<{ quotation: QuotationRecord }> {
-    return apiJson('/api/quotations', {
-      method: 'POST',
-      body: JSON.stringify({ quotation }),
-    });
+  async fetchDriveStatus(): Promise<DriveStatusResponse> {
+    return apiRequest<DriveStatusResponse>('/api/drive/status');
   },
 
-  updateQuotationStatus(
-    id: string,
-    payload: { status: QuotationStatus; notes?: string; rejectionReason?: string }
-  ): Promise<{ quotation: QuotationRecord }> {
-    return apiJson(`/api/quotations/${encodeURIComponent(id)}/status`, {
+  async fetchRemoteWorkspace(): Promise<{
+    workspace: {
+      company: CompanySettings | null;
+      fieldCatalog: InvoiceFieldConfig[];
+      mappingProfiles: MappingProfile[];
+      layoutConfig: { templates: InvoiceTemplate[] } | null;
+      updatedAt: string;
+    } | null;
+    customers: CustomerRecord[];
+    invoices: GenerationRecord[];
+    quotations: QuotationRecord[];
+    emailLogs: EmailDeliveryLogEntry[];
+    backups: DriveBackupFile[];
+    smtpConfig: BackendSmtpConfig;
+    lastSyncedAt: string;
+  }> {
+    return apiRequest('/api/workspace');
+  },
+
+  async syncWorkspaceToDrive(payload: {
+    workspace?: {
+      company: CompanySettings;
+      fieldCatalog: InvoiceFieldConfig[];
+      mappingProfiles: MappingProfile[];
+      layoutConfig: { templates: InvoiceTemplate[] };
+      updatedAt: string;
+    };
+    customers?: CustomerRecord[];
+    invoices?: GenerationRecord[];
+    quotations?: QuotationRecord[];
+    emailLogs?: EmailDeliveryLogEntry[];
+  }): Promise<{ ok: boolean; folderId: string; syncedAt: string }> {
+    return apiRequest('/api/drive/sync', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
   },
 
-  convertQuotation(
-    id: string,
-    invoice: GenerationRecord
-  ): Promise<{ quotation: QuotationRecord; invoice: GenerationRecord }> {
-    return apiJson(`/api/quotations/${encodeURIComponent(id)}/convert`, {
-      method: 'POST',
-      body: JSON.stringify({ invoice }),
-    });
-  },
-
-  deleteQuotation(id: string): Promise<{ deleted: boolean }> {
-    return apiJson(`/api/quotations/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-    });
-  },
-
-  // Invoices
-  saveInvoice(invoice: GenerationRecord): Promise<{ invoice: GenerationRecord }> {
-    return apiJson('/api/invoices', {
-      method: 'POST',
-      body: JSON.stringify({ invoice }),
-    });
-  },
-
-  deleteInvoice(id: string): Promise<{ deleted: boolean }> {
-    return apiJson(`/api/invoices/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-    });
-  },
-
-  // Google Drive
-  getDriveStatus(): Promise<DriveStatusPayload> {
-    return apiJson<DriveStatusPayload>('/api/drive/status', { method: 'GET' });
-  },
-
-  syncDrive(snapshot?: {
-    companySettings?: any;
-    template?: any;
-    fields?: any[];
-    calculationSettings?: any;
-    customers?: CustomerRecord[];
-    quotations?: QuotationRecord[];
-    invoices?: GenerationRecord[];
-    emailLogs?: EmailDeliveryLogEntry[];
-  }): Promise<{
-    ok: boolean;
-    rootFolderId: string;
-    filesSynced: number;
-    quotationsSynced: number;
-    invoicesSynced: number;
-    customersSynced: number;
-    emailLogsSynced: number;
-    syncedAt: string;
-  }> {
-    return apiJson('/api/drive/sync', {
-      method: 'POST',
-      body: JSON.stringify(snapshot || {}),
-    });
-  },
-
-  uploadPdfToDrive(params: {
-    documentType: 'quotation' | 'invoice';
-    documentId: string;
+  async uploadPdfToDrive(params: {
+    documentType: 'invoice' | 'quotation';
     fileName: string;
     pdfBase64: string;
-  }): Promise<{ ok: boolean; driveFileId: string; fileName: string; updatedAt: string }> {
-    return apiJson('/api/drive/upload-pdf', {
+  }): Promise<{ ok: boolean; file: DriveBackupFile; uploadedAt: string }> {
+    return apiRequest('/api/drive/upload-pdf', {
       method: 'POST',
       body: JSON.stringify(params),
     });
   },
 
-  restoreFromDrive(): Promise<{
+  async createDriveBackup(): Promise<{
     ok: boolean;
-    restoredSettings: boolean;
-    customersRestored: number;
-    quotationsRestored: number;
-    invoicesRestored: number;
-    conflictsResolved: number;
-    restoredAt: string;
+    backup: DriveBackupFile;
+    backups: DriveBackupFile[];
   }> {
-    return apiJson('/api/drive/restore', { method: 'POST', body: JSON.stringify({}) });
+    return apiRequest('/api/drive/backup', { method: 'POST', body: JSON.stringify({}) });
   },
 
-  createDriveBackup(): Promise<{ ok: boolean; driveFileId: string; fileName: string; createdAt: string }> {
-    return apiJson('/api/drive/backup', { method: 'POST', body: JSON.stringify({}) });
-  },
-
-  // Dual Email Delivery (Gmail API + Backend SMTP)
-  getSmtpConfig(): Promise<{ smtpConfig: BackendSmtpConfig }> {
-    return apiJson('/api/email/smtp-config', { method: 'GET' });
-  },
-
-  saveSmtpConfig(payload: {
-    host: string;
-    port: number;
-    securityMode: 'SSL' | 'STARTTLS' | 'NONE';
-    username: string;
-    password?: string;
-    senderName: string;
-    senderEmail: string;
-  }): Promise<{ smtpConfig: BackendSmtpConfig }> {
-    return apiJson('/api/email/smtp-config', {
-      method: 'PUT',
-      body: JSON.stringify(payload),
+  async restoreDriveBackup(backupFileId: string): Promise<{
+    ok: boolean;
+    restoredAt: string;
+    snapshot: any;
+  }> {
+    return apiRequest('/api/drive/restore', {
+      method: 'POST',
+      body: JSON.stringify({ backupFileId }),
     });
   },
 
-  deleteSmtpConfig(): Promise<{ deleted: boolean; smtpConfig: BackendSmtpConfig }> {
-    return apiJson('/api/email/smtp-config', {
+  // ============================================================
+  // QUOTATIONS CRUD (CONNECTED DRIVE FOLDER)
+  // ============================================================
+
+  async saveRemoteQuotation(quotation: QuotationRecord): Promise<{ ok: boolean; quotations: QuotationRecord[] }> {
+    return apiRequest('/api/quotations', {
+      method: 'POST',
+      body: JSON.stringify({ quotation }),
+    });
+  },
+
+  async deleteRemoteQuotation(id: string): Promise<{ ok: boolean; quotations: QuotationRecord[] }> {
+    return apiRequest(`/api/quotations/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
   },
 
-  testSmtpConnection(override?: {
+  async convertRemoteQuotation(
+    quotationId: string,
+    invoice: GenerationRecord
+  ): Promise<{
+    ok: boolean;
+    invoice: GenerationRecord;
+    quotation: QuotationRecord;
+  }> {
+    return apiRequest(`/api/quotations/${encodeURIComponent(quotationId)}/convert-to-invoice`, {
+      method: 'POST',
+      body: JSON.stringify({ invoice }),
+    });
+  },
+
+  // ============================================================
+  // EMAIL INTEGRATION — GMAIL SMTP & CUSTOM SMTP (NO SIGN-IN)
+  // ============================================================
+
+  async fetchSmtpConfig(): Promise<BackendSmtpConfig> {
+    const res = await apiRequest<{ smtp: BackendSmtpConfig }>('/api/email/smtp-config');
+    return res.smtp;
+  },
+
+  async saveSmtpConfig(input: {
+    provider: EmailDeliveryMethod;
+    host: string;
+    port: number;
+    encryption: 'SSL' | 'STARTTLS' | 'NONE';
+    username: string;
+    password?: string;
+    senderName: string;
+    senderEmail: string;
+    replyTo?: string;
+  }): Promise<BackendSmtpConfig> {
+    const res = await apiRequest<{ ok: boolean; smtp: BackendSmtpConfig }>('/api/email/smtp-config', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    return res.smtp;
+  },
+
+  async deleteSmtpConfig(): Promise<void> {
+    await apiRequest('/api/email/smtp-config', { method: 'DELETE' });
+  },
+
+  async testSmtpConfig(override?: {
+    provider?: EmailDeliveryMethod;
     host?: string;
     port?: number;
-    securityMode?: 'SSL' | 'STARTTLS' | 'NONE';
+    encryption?: 'SSL' | 'STARTTLS' | 'NONE';
     username?: string;
     password?: string;
-  }): Promise<{ ok: boolean; verifiedAt: string }> {
-    return apiJson('/api/email/smtp-test', {
+    senderName?: string;
+    senderEmail?: string;
+    replyTo?: string;
+  }): Promise<{ ok: boolean; host: string; port: number; provider: EmailDeliveryMethod; verifiedAt: string }> {
+    return apiRequest('/api/email/smtp-test', {
       method: 'POST',
       body: JSON.stringify(override || {}),
     });
   },
 
-  sendTestEmail(payload: {
-    method: EmailDeliveryMethod;
-    to?: string;
-    subject?: string;
-    textBody?: string;
-  }): Promise<{
+  async sendTestEmail(recipientEmail: string): Promise<{
     ok: boolean;
-    method: EmailDeliveryMethod;
-    recipientEmail: string;
-    senderEmail: string;
-    providerMessageId: string | null;
+    messageId?: string;
+    provider: EmailDeliveryMethod;
     sentAt: string;
   }> {
-    return apiJson('/api/email/test-send', {
+    return apiRequest('/api/email/test-send', {
       method: 'POST',
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ recipientEmail }),
     });
   },
 
-  sendEmails(payload: {
-    method: EmailDeliveryMethod;
+  async sendRealEmails(params: {
     items: Array<{
       documentType: 'invoice' | 'quotation';
-      documentId: string;
       documentNumber: string;
-      to: string;
+      customerName: string;
+      recipientEmail: string;
       cc?: string;
       bcc?: string;
       subject: string;
-      textBody: string;
-      htmlBody?: string;
-      attachment?: {
-        filename: string;
-        contentBase64: string;
-        contentType?: string;
-      };
+      body: string;
+      pdfBase64?: string;
+      pdfFilename?: string;
     }>;
   }): Promise<{
-    method: EmailDeliveryMethod;
+    ok: boolean;
     sentCount: number;
     failedCount: number;
+    persistedInDrive: boolean;
     results: Array<{
-      documentId: string;
       documentNumber: string;
       recipientEmail: string;
+      status: 'Sent' | 'Failed';
+      messageId?: string;
+      error?: string;
       deliveryMethod: EmailDeliveryMethod;
-      senderEmail: string;
-      status: 'sent' | 'failed';
-      providerMessageId: string | null;
-      errorMessage: string | null;
-      logId: string;
+      sentAt: string;
     }>;
+    logs: EmailDeliveryLogEntry[];
   }> {
-    return apiJson('/api/email/send', {
+    return apiRequest('/api/email/send', {
       method: 'POST',
-      body: JSON.stringify(payload),
+      body: JSON.stringify(params),
     });
   },
 
-  getEmailHistory(limit: number = 100): Promise<{ logs: EmailDeliveryLogEntry[] }> {
-    return apiJson(`/api/email/history?limit=${limit}`, { method: 'GET' });
+  async fetchEmailHistory(): Promise<EmailDeliveryLogEntry[]> {
+    const res = await apiRequest<{ logs: EmailDeliveryLogEntry[] }>('/api/email/history');
+    return res.logs || [];
   },
 };
-
-export type { AuthenticatedUserProfile };

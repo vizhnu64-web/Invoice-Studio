@@ -8,6 +8,9 @@ import {
   AlertCircle,
   Building2,
   CheckCircle2,
+  Eye,
+  FileCheck2,
+  FileText,
   Mail,
   MapPin,
   Pencil,
@@ -18,13 +21,22 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import { CustomerRecord } from '../types';
+import {
+  CompanySettings,
+  CustomerRecord,
+  GenerationRecord,
+  QuotationRecord,
+} from '../types';
+import { formatCurrency } from '../utils/calculator';
 
 interface CustomersViewProps {
   customers: CustomerRecord[];
+  generationHistory: GenerationRecord[];
+  quotations: QuotationRecord[];
+  company: CompanySettings;
   onSaveCustomer: (customer: CustomerRecord) => Promise<void> | void;
   onDeleteCustomer: (customerId: string) => Promise<void> | void;
-  isCloudConnected: boolean;
+  isDriveConnected: boolean;
 }
 
 interface CustomerFormState {
@@ -61,11 +73,28 @@ const EMPTY_FORM: CustomerFormState = {
   country: 'India',
 };
 
+function matchesCustomer(
+  customer: CustomerRecord,
+  name?: string,
+  email?: string
+): boolean {
+  const cName = customer.customerName.trim().toLowerCase();
+  const cEmail = (customer.email || '').trim().toLowerCase();
+  const n = (name || '').trim().toLowerCase();
+  const e = (email || '').trim().toLowerCase();
+  if (cEmail && e && cEmail === e) return true;
+  if (cName && n && cName === n) return true;
+  return false;
+}
+
 export const CustomersView: React.FC<CustomersViewProps> = ({
   customers,
+  generationHistory,
+  quotations,
+  company,
   onSaveCustomer,
   onDeleteCustomer,
-  isCloudConnected,
+  isDriveConnected,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -76,6 +105,50 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [pendingDelete, setPendingDelete] = useState<CustomerRecord | null>(null);
+  const [historyCustomer, setHistoryCustomer] = useState<CustomerRecord | null>(null);
+
+  const customerMetrics = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        invoices: GenerationRecord[];
+        quotations: QuotationRecord[];
+        totalBilled: number;
+        totalPaid: number;
+        outstanding: number;
+      }
+    >();
+
+    for (const c of customers) {
+      const custInvoices = generationHistory.filter((inv) =>
+        matchesCustomer(c, inv.customerName, inv.dataSnapshot?.rowFields?.customer_email)
+      );
+      const custQuotations = quotations.filter((qt) =>
+        matchesCustomer(c, qt.customerName, qt.customerEmail)
+      );
+      let totalBilled = 0;
+      let totalPaid = 0;
+      for (const inv of custInvoices) {
+        const amt = Number(inv.totalAmount || 0);
+        totalBilled += amt;
+        const paid =
+          inv.paymentAmount !== undefined
+            ? Math.min(amt, Math.max(0, Number(inv.paymentAmount)))
+            : inv.paymentStatus === 'Paid'
+              ? amt
+              : 0;
+        totalPaid += paid;
+      }
+      map.set(c.id, {
+        invoices: custInvoices,
+        quotations: custQuotations,
+        totalBilled,
+        totalPaid,
+        outstanding: Math.max(0, totalBilled - totalPaid),
+      });
+    }
+    return map;
+  }, [customers, generationHistory, quotations]);
 
   const filteredCustomers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -154,19 +227,39 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
       return;
     }
 
+    const trimmedGstin = form.gstin.trim().toUpperCase();
+
+    // Duplicate protection (name, email, or GSTIN)
+    const duplicate = customers.find((c) => {
+      if (editingId && c.id === editingId) return false;
+      if (c.customerName.trim().toLowerCase() === trimmedName.toLowerCase()) return true;
+      if (trimmedEmail && c.email && c.email.trim().toLowerCase() === trimmedEmail.toLowerCase()) {
+        return true;
+      }
+      if (trimmedGstin && c.gstin && c.gstin.trim().toUpperCase() === trimmedGstin) {
+        return true;
+      }
+      return false;
+    });
+
+    if (duplicate) {
+      setFormError(
+        `A customer with matching name, email, or GSTIN already exists ("${duplicate.customerName}"). Edit the existing record instead.`
+      );
+      return;
+    }
+
     const record: CustomerRecord = {
       id: editingId || `cust_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       customerName: trimmedName,
       contactPerson: form.contactPerson.trim() || undefined,
       email: trimmedEmail || undefined,
       phone: form.phone.trim() || undefined,
-      gstin: form.gstin.trim().toUpperCase() || undefined,
+      gstin: trimmedGstin || undefined,
       pan: form.pan.trim().toUpperCase() || undefined,
       referenceNumber: form.referenceNumber.trim() || undefined,
       billingAddress: form.billingAddress.trim(),
-      shippingAddress: sameAsBilling
-        ? form.billingAddress.trim()
-        : form.shippingAddress.trim(),
+      shippingAddress: sameAsBilling ? form.billingAddress.trim() : form.shippingAddress.trim(),
       city: form.city.trim() || undefined,
       state: form.state.trim() || undefined,
       postalCode: form.postalCode.trim() || undefined,
@@ -211,6 +304,8 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
     }
   };
 
+  const activeHistoryStats = historyCustomer ? customerMetrics.get(historyCustomer.id) : null;
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
       {/* Page Header */}
@@ -226,9 +321,9 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
             </span>
             <span aria-hidden="true">·</span>
             <span>
-              {isCloudConnected
-                ? 'Saved in Google Drive (Invoice Studio/Application Data/customers.json)'
-                : 'Stored in local browser workspace'}
+              {isDriveConnected
+                ? 'Synced to Google Drive (Invoice Studio/Customers/customers.json)'
+                : 'Temporary browser session — connect Google Drive to back up'}
             </span>
           </div>
         </div>
@@ -302,7 +397,7 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
               </h2>
               <p className="text-xs text-slate-500">
                 {customers.length === 0
-                  ? 'Add your clients once to reuse their billing addresses, email addresses, and GSTIN across manual invoices and quotations.'
+                  ? 'Add your clients once to reuse their billing addresses, email addresses, and GSTIN across invoices and quotations.'
                   : 'Try adjusting your search keywords or add a new customer record.'}
               </p>
             </div>
@@ -324,90 +419,223 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
                 <tr className="bg-slate-50 border-b border-slate-200 text-xs font-semibold text-slate-600">
                   <th className="py-3 px-4">Customer / Company</th>
                   <th className="py-3 px-4">Contact Details</th>
-                  <th className="py-3 px-4">Location</th>
-                  <th className="py-3 px-4">Tax IDs</th>
+                  <th className="py-3 px-4">Location & Tax IDs</th>
+                  <th className="py-3 px-4">Invoices & Quotations</th>
+                  <th className="py-3 px-4 text-right">Outstanding</th>
                   <th className="py-3 px-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 text-xs">
-                {filteredCustomers.map((customer) => (
-                  <tr key={customer.id} className="hover:bg-slate-50/70 transition-colors">
-                    <td className="py-3.5 px-4">
-                      <p className="font-bold text-slate-900">{customer.customerName}</p>
-                      <div className="flex items-center gap-2 text-[11px] text-slate-500 mt-0.5">
-                        {customer.contactPerson && <span>{customer.contactPerson}</span>}
-                        {customer.contactPerson && customer.referenceNumber && (
-                          <span aria-hidden="true">·</span>
-                        )}
-                        {customer.referenceNumber && (
-                          <span className="font-mono">{customer.referenceNumber}</span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="py-3.5 px-4 space-y-1 text-slate-600">
-                      {customer.email ? (
-                        <div className="flex items-center gap-1.5">
-                          <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                          <span className="font-mono text-[11px]">{customer.email}</span>
+                {filteredCustomers.map((customer) => {
+                  const metrics = customerMetrics.get(customer.id);
+                  return (
+                    <tr key={customer.id} className="hover:bg-slate-50/70 transition-colors">
+                      <td className="py-3.5 px-4">
+                        <p className="font-bold text-slate-900">{customer.customerName}</p>
+                        <div className="flex items-center gap-2 text-[11px] text-slate-500 mt-0.5">
+                          {customer.contactPerson && <span>{customer.contactPerson}</span>}
+                          {customer.contactPerson && customer.referenceNumber && (
+                            <span aria-hidden="true">·</span>
+                          )}
+                          {customer.referenceNumber && (
+                            <span className="font-mono">{customer.referenceNumber}</span>
+                          )}
                         </div>
-                      ) : (
-                        <span className="text-slate-400">No email</span>
-                      )}
-                      {customer.phone && (
-                        <div className="flex items-center gap-1.5">
-                          <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                          <span className="font-mono text-[11px] tabular-nums">
-                            {customer.phone}
+                      </td>
+                      <td className="py-3.5 px-4 space-y-1 text-slate-600">
+                        {customer.email ? (
+                          <div className="flex items-center gap-1.5">
+                            <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            <span className="font-mono text-[11px]">{customer.email}</span>
+                          </div>
+                        ) : (
+                          <span className="text-slate-400">No email</span>
+                        )}
+                        {customer.phone && (
+                          <div className="flex items-center gap-1.5">
+                            <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            <span className="font-mono text-[11px] tabular-nums">
+                              {customer.phone}
+                            </span>
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-3.5 px-4 text-slate-600 space-y-0.5">
+                        <div className="flex items-start gap-1.5 max-w-xs">
+                          <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                          <span className="truncate">
+                            {[customer.city, customer.state].filter(Boolean).join(', ') ||
+                              customer.billingAddress ||
+                              'No address'}
                           </span>
                         </div>
-                      )}
-                    </td>
-                    <td className="py-3.5 px-4 text-slate-600">
-                      <div className="flex items-start gap-1.5 max-w-xs">
-                        <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
-                        <div className="min-w-0">
-                          <p className="truncate">{customer.billingAddress || 'No address'}</p>
-                          <p className="text-[11px] text-slate-500">
-                            {[customer.city, customer.state, customer.postalCode]
-                              .filter(Boolean)
-                              .join(', ') || customer.country || ''}
-                          </p>
+                        <div className="font-mono text-[11px] text-slate-500">
+                          GSTIN: {customer.gstin || '—'}
                         </div>
-                      </div>
-                    </td>
-                    <td className="py-3.5 px-4 font-mono text-[11px] text-slate-700 space-y-0.5">
-                      <div>GSTIN: {customer.gstin || '—'}</div>
-                      <div className="text-slate-500">PAN: {customer.pan || '—'}</div>
-                    </td>
-                    <td className="py-3.5 px-4 text-right whitespace-nowrap">
-                      <div className="inline-flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => openEditForm(customer)}
-                          aria-label={`Edit ${customer.customerName}`}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold cursor-pointer"
+                      </td>
+                      <td className="py-3.5 px-4">
+                        <div className="flex items-center gap-2 text-[11px] font-semibold">
+                          <span className="px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-100">
+                            {metrics?.invoices.length || 0} Inv
+                          </span>
+                          <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-100">
+                            {metrics?.quotations.length || 0} Qt
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-500 mt-1">
+                          Billed: {formatCurrency(metrics?.totalBilled || 0, company.currency)}
+                        </p>
+                      </td>
+                      <td className="py-3.5 px-4 text-right font-mono font-bold tabular-nums">
+                        <span
+                          className={
+                            (metrics?.outstanding || 0) > 0 ? 'text-amber-700' : 'text-emerald-700'
+                          }
                         >
-                          <Pencil className="w-3.5 h-3.5" />
-                          <span>Edit</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setPendingDelete(customer)}
-                          aria-label={`Delete ${customer.customerName}`}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold cursor-pointer"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          <span>Delete</span>
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                          {formatCurrency(metrics?.outstanding || 0, company.currency)}
+                        </span>
+                      </td>
+                      <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                        <div className="inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setHistoryCustomer(customer)}
+                            aria-label={`View history for ${customer.customerName}`}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold cursor-pointer"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            <span>History</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openEditForm(customer)}
+                            aria-label={`Edit ${customer.customerName}`}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold cursor-pointer"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                            <span>Edit</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPendingDelete(customer)}
+                            aria-label={`Delete ${customer.customerName}`}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
       </div>
+
+      {/* Customer History Modal */}
+      {historyCustomer && activeHistoryStats && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Document History for ${historyCustomer.customerName}`}
+          className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4 overflow-y-auto"
+        >
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-2xl w-full p-6 space-y-5 my-8">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div>
+                <h2 className="text-base font-bold text-slate-900">
+                  {historyCustomer.customerName} — Account Summary
+                </h2>
+                <p className="text-xs text-slate-500">
+                  {historyCustomer.email || 'No email'} · GSTIN: {historyCustomer.gstin || '—'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setHistoryCustomer(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3 text-xs">
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <p className="text-slate-500">Total Billed</p>
+                <p className="text-sm font-bold text-slate-900 mt-1">
+                  {formatCurrency(activeHistoryStats.totalBilled, company.currency)}
+                </p>
+              </div>
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200">
+                <p className="text-emerald-700">Total Paid</p>
+                <p className="text-sm font-bold text-emerald-900 mt-1">
+                  {formatCurrency(activeHistoryStats.totalPaid, company.currency)}
+                </p>
+              </div>
+              <div className="p-3 rounded-xl bg-amber-50 border border-amber-200">
+                <p className="text-amber-700">Outstanding</p>
+                <p className="text-sm font-bold text-amber-900 mt-1">
+                  {formatCurrency(activeHistoryStats.outstanding, company.currency)}
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-3 max-h-72 overflow-y-auto text-xs">
+              <div>
+                <h3 className="font-bold text-slate-800 flex items-center gap-1.5 mb-2">
+                  <FileText className="w-3.5 h-3.5 text-indigo-600" />
+                  Invoices ({activeHistoryStats.invoices.length})
+                </h3>
+                {activeHistoryStats.invoices.length === 0 ? (
+                  <p className="text-slate-400 italic">No invoices recorded for this customer.</p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {activeHistoryStats.invoices.map((inv) => (
+                      <div
+                        key={inv.id}
+                        className="flex items-center justify-between bg-slate-50 px-3 py-2 rounded-lg border border-slate-100"
+                      >
+                        <span className="font-semibold text-slate-800">{inv.invoiceNumber}</span>
+                        <span className="text-slate-500">{inv.paymentStatus || 'Unpaid'}</span>
+                        <span className="font-mono font-bold text-slate-900">
+                          {formatCurrency(inv.totalAmount, company.currency)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <h3 className="font-bold text-slate-800 flex items-center gap-1.5 mb-2">
+                  <FileCheck2 className="w-3.5 h-3.5 text-emerald-600" />
+                  Quotations ({activeHistoryStats.quotations.length})
+                </h3>
+                {activeHistoryStats.quotations.length === 0 ? (
+                  <p className="text-slate-400 italic">No quotations recorded for this customer.</p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {activeHistoryStats.quotations.map((qt) => (
+                      <div
+                        key={qt.id}
+                        className="flex items-center justify-between bg-slate-50 px-3 py-2 rounded-lg border border-slate-100"
+                      >
+                        <span className="font-semibold text-slate-800">{qt.quotationNumber}</span>
+                        <span className="text-slate-500">{qt.status}</span>
+                        <span className="font-mono font-bold text-slate-900">
+                          {formatCurrency(qt.totalAmount, company.currency)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add / Edit Customer Modal */}
       {isFormOpen && (
@@ -442,10 +670,7 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
             <form onSubmit={handleSubmit} className="space-y-4 text-xs">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label
-                    htmlFor="cust-name"
-                    className="block font-semibold text-slate-700 mb-1"
-                  >
+                  <label htmlFor="cust-name" className="block font-semibold text-slate-700 mb-1">
                     Customer / Company Name *
                   </label>
                   <input
@@ -454,16 +679,13 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
                     required
                     value={form.customerName}
                     onChange={(e) => setForm((f) => ({ ...f, customerName: e.target.value }))}
-                    placeholder="Meridian Logistics Pvt Ltd"
+                    placeholder="Client company or full name"
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50"
                   />
                 </div>
 
                 <div>
-                  <label
-                    htmlFor="cust-contact"
-                    className="block font-semibold text-slate-700 mb-1"
-                  >
+                  <label htmlFor="cust-contact" className="block font-semibold text-slate-700 mb-1">
                     Primary Contact Person
                   </label>
                   <input
@@ -471,16 +693,13 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
                     type="text"
                     value={form.contactPerson}
                     onChange={(e) => setForm((f) => ({ ...f, contactPerson: e.target.value }))}
-                    placeholder="Ananya Verma"
+                    placeholder="Contact person name"
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50"
                   />
                 </div>
 
                 <div>
-                  <label
-                    htmlFor="cust-email"
-                    className="block font-semibold text-slate-700 mb-1"
-                  >
+                  <label htmlFor="cust-email" className="block font-semibold text-slate-700 mb-1">
                     Billing Email
                   </label>
                   <input
@@ -488,16 +707,13 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
                     type="email"
                     value={form.email}
                     onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
-                    placeholder="accounts@meridian.example"
+                    placeholder="billing@clientdomain.com"
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono"
                   />
                 </div>
 
                 <div>
-                  <label
-                    htmlFor="cust-phone"
-                    className="block font-semibold text-slate-700 mb-1"
-                  >
+                  <label htmlFor="cust-phone" className="block font-semibold text-slate-700 mb-1">
                     Phone Number
                   </label>
                   <input
@@ -505,16 +721,13 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
                     type="text"
                     value={form.phone}
                     onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
-                    placeholder="+91 98200 11223"
+                    placeholder="+91 90000 00000"
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono"
                   />
                 </div>
 
                 <div>
-                  <label
-                    htmlFor="cust-gstin"
-                    className="block font-semibold text-slate-700 mb-1"
-                  >
+                  <label htmlFor="cust-gstin" className="block font-semibold text-slate-700 mb-1">
                     GSTIN / Tax ID
                   </label>
                   <input
@@ -522,17 +735,14 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
                     type="text"
                     value={form.gstin}
                     onChange={(e) => setForm((f) => ({ ...f, gstin: e.target.value }))}
-                    placeholder="27AABCM1234F1Z9"
+                    placeholder="15-character GSTIN"
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono uppercase"
                   />
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label
-                      htmlFor="cust-pan"
-                      className="block font-semibold text-slate-700 mb-1"
-                    >
+                    <label htmlFor="cust-pan" className="block font-semibold text-slate-700 mb-1">
                       PAN
                     </label>
                     <input
@@ -540,15 +750,12 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
                       type="text"
                       value={form.pan}
                       onChange={(e) => setForm((f) => ({ ...f, pan: e.target.value }))}
-                      placeholder="AABCM1234F"
+                      placeholder="10-char PAN"
                       className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono uppercase"
                     />
                   </div>
                   <div>
-                    <label
-                      htmlFor="cust-ref"
-                      className="block font-semibold text-slate-700 mb-1"
-                    >
+                    <label htmlFor="cust-ref" className="block font-semibold text-slate-700 mb-1">
                       Reference Code
                     </label>
                     <input
@@ -592,7 +799,7 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
                     type="text"
                     value={form.city}
                     onChange={(e) => setForm((f) => ({ ...f, city: e.target.value }))}
-                    placeholder="Mumbai"
+                    placeholder="City"
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50"
                   />
                 </div>
@@ -605,7 +812,7 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
                     type="text"
                     value={form.state}
                     onChange={(e) => setForm((f) => ({ ...f, state: e.target.value }))}
-                    placeholder="Maharashtra"
+                    placeholder="State"
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50"
                   />
                 </div>
@@ -618,7 +825,7 @@ export const CustomersView: React.FC<CustomersViewProps> = ({
                     type="text"
                     value={form.postalCode}
                     onChange={(e) => setForm((f) => ({ ...f, postalCode: e.target.value }))}
-                    placeholder="400001"
+                    placeholder="PIN / ZIP"
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono"
                   />
                 </div>

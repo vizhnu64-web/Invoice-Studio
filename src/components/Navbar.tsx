@@ -5,10 +5,12 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Building2,
   CheckCircle2,
   ChevronDown,
   Cloud,
+  CloudOff,
   Cpu,
   DownloadCloud,
   FileCheck2,
@@ -17,24 +19,23 @@ import {
   Home,
   Layout,
   ListChecks,
-  LogIn,
+  Loader2,
   Mail,
   Menu,
   SlidersHorizontal,
-  UserCheck,
   Users,
   X,
 } from 'lucide-react';
-import { GoogleAccountUser } from '../utils/googleSheets';
+import { DriveWorkspaceConnection } from '../types';
+import type { DriveSyncState } from '../App';
 
 interface NavbarProps {
   activeTab: string;
   setActiveTab: (tab: string) => void;
   activeDataSourceName: string;
   totalRecordsCount: number;
-  onStartGuidedWorkflow?: () => void;
-  authUser?: GoogleAccountUser | null;
-  onOpenAuthGate?: () => void;
+  driveConnection: DriveWorkspaceConnection | null;
+  driveSyncState?: DriveSyncState;
 }
 
 const PRIMARY_NAV_ITEMS = [
@@ -42,7 +43,7 @@ const PRIMARY_NAV_ITEMS = [
   { id: 'datasource', label: 'Import Data', icon: DownloadCloud },
   { id: 'manual', label: 'Manual Entry', icon: FilePlus2 },
   { id: 'quotations', label: 'Quotations', icon: FileCheck2 },
-  { id: 'generation', label: 'Invoice Generator', icon: Cpu },
+  { id: 'generation', label: 'Invoices', icon: Cpu },
   { id: 'email', label: 'Emailing', icon: Mail },
 ];
 
@@ -55,38 +56,38 @@ const SECONDARY_NAV_ITEMS = [
   },
   {
     id: 'integrations',
-    label: 'Account & Integrations',
-    description: 'Google Account, Drive Storage, Sheets, Gmail & SMTP',
+    label: 'Google Drive & Email',
+    description: 'Connect Drive folder storage, Gmail SMTP & Custom SMTP',
     icon: Cloud,
   },
   {
     id: 'fields',
     label: 'Field Mapping',
-    description: 'Configure columns, formulas & catalog fields',
+    description: 'Configure spreadsheet columns, formulas & catalog fields',
     icon: SlidersHorizontal,
   },
   {
     id: 'workflow',
     label: 'Guided Workflow',
-    description: 'Step-by-step spreadsheet import wizard',
+    description: 'Step-by-step Excel / Google Sheets invoice wizard',
     icon: ListChecks,
   },
   {
     id: 'company',
     label: 'Company Settings',
-    description: 'Branding, GSTIN, logo, signature & bank details',
+    description: 'Business profile, GSTIN, logo, signature & bank details',
     icon: Building2,
   },
   {
     id: 'designer',
     label: 'PDF Layout Designer',
-    description: 'Customize invoice sections & labels',
+    description: 'Customize Invoice & Quotation PDF sections & labels',
     icon: Layout,
   },
   {
     id: 'history',
-    label: 'Generation History',
-    description: 'View, download & inspect generated invoices',
+    label: 'Invoice History',
+    description: 'View, track payments, download & email generated invoices',
     icon: History,
   },
 ];
@@ -96,8 +97,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   setActiveTab,
   activeDataSourceName,
   totalRecordsCount,
-  authUser,
-  onOpenAuthGate,
+  driveConnection,
+  driveSyncState = 'idle',
 }) => {
   const [isMoreOpen, setIsMoreOpen] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -150,7 +151,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 INVOICE STUDIO
               </span>
               <span className="hidden sm:block text-[10px] text-slate-400 truncate mt-0.5">
-                Quotations & Invoice Suite
+                Invoices & Quotations Suite
               </span>
             </div>
           </button>
@@ -181,7 +182,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               );
             })}
 
-            {/* Hamburger-style More Menu */}
+            {/* More Dropdown */}
             <div className="relative" ref={moreMenuRef}>
               <button
                 type="button"
@@ -214,7 +215,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 >
                   <div className="px-3.5 py-1.5 border-b border-slate-100">
                     <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                      Workspace & Integrations
+                      Workspace & Settings
                     </p>
                   </div>
                   <div className="p-1.5 space-y-0.5">
@@ -258,47 +259,52 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </nav>
 
-          {/* Right Account Status + Dataset Pill (2xl) + Mobile Hamburger Button */}
+          {/* Right Workspace Storage Status + Mobile Menu Button (NO Sign-In) */}
           <div className="flex items-center space-x-2 shrink-0">
-            <div className="hidden 2xl:flex items-center space-x-1.5 bg-slate-800/80 px-2.5 py-1.5 rounded-xl border border-slate-700 text-xs text-slate-300">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              <span className="truncate max-w-[110px] font-medium" title={activeDataSourceName}>
-                {activeDataSourceName}
-              </span>
-              <span className="bg-indigo-950 text-indigo-300 px-1.5 py-0.5 rounded-md font-mono text-[10px] font-bold">
-                {totalRecordsCount}
-              </span>
-            </div>
-
-            {authUser?.email ? (
-              <button
-                type="button"
-                onClick={() => handleSelectTab('integrations')}
-                title={`Signed in as ${authUser.email}`}
-                className="hidden sm:inline-flex items-center space-x-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2.5 py-1.5 rounded-xl text-xs font-semibold text-slate-200 transition-colors cursor-pointer"
-              >
-                {authUser.picture ? (
-                  <img
-                    src={authUser.picture}
-                    alt={authUser.name || authUser.email}
-                    className="w-5 h-5 rounded-full object-cover"
-                    referrerPolicy="no-referrer"
-                  />
-                ) : (
-                  <UserCheck className="w-4 h-4 text-emerald-400 shrink-0" />
-                )}
-                <span className="max-w-[100px] truncate">{authUser.name || authUser.email}</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => (onOpenAuthGate ? onOpenAuthGate() : handleSelectTab('integrations'))}
-                className="hidden sm:inline-flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-200 transition-colors cursor-pointer"
-              >
-                <LogIn className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                <span>Sign In</span>
-              </button>
+            {totalRecordsCount > 0 && (
+              <div className="hidden 2xl:flex items-center space-x-1.5 bg-slate-800/80 px-2.5 py-1.5 rounded-xl border border-slate-700 text-xs text-slate-300">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span className="truncate max-w-[110px] font-medium" title={activeDataSourceName}>
+                  {activeDataSourceName || 'Imported Data'}
+                </span>
+                <span className="bg-indigo-950 text-indigo-300 px-1.5 py-0.5 rounded-md font-mono text-[10px] font-bold">
+                  {totalRecordsCount}
+                </span>
+              </div>
             )}
+
+            <button
+              type="button"
+              data-tab="integrations"
+              onClick={() => handleSelectTab('integrations')}
+              title={
+                driveConnection?.isConnected
+                  ? `Connected to Google Drive folder: ${driveConnection.folderName}`
+                  : 'Temporary workspace — click to connect a Google Drive folder for persistent storage'
+              }
+              className={`hidden sm:inline-flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${
+                driveConnection?.isConnected
+                  ? driveSyncState === 'error'
+                    ? 'bg-rose-950/60 border-rose-700/70 text-rose-200 hover:bg-rose-900/70'
+                    : 'bg-emerald-950/60 border-emerald-700/60 text-emerald-200 hover:bg-emerald-900/70'
+                  : 'bg-amber-950/50 border-amber-700/60 text-amber-200 hover:bg-amber-900/60'
+              }`}
+            >
+              {driveConnection?.isConnected ? (
+                driveSyncState === 'syncing' ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                ) : driveSyncState === 'error' ? (
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                ) : (
+                  <Cloud className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
+                )
+              ) : (
+                <CloudOff className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+              )}
+              <span className="max-w-[125px] truncate">
+                {driveConnection?.isConnected ? driveConnection.folderName : 'Connect Drive'}
+              </span>
+            </button>
 
             <button
               type="button"
@@ -307,11 +313,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               aria-label={isMobileMenuOpen ? 'Close navigation menu' : 'Open navigation menu'}
               className="lg:hidden inline-flex items-center space-x-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 cursor-pointer"
             >
-              {isMobileMenuOpen ? (
-                <X className="w-4 h-4" />
-              ) : (
-                <Menu className="w-4 h-4" />
-              )}
+              {isMobileMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
               <span>Menu</span>
             </button>
           </div>
@@ -351,7 +353,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <div className="space-y-1.5 pt-2 border-t border-slate-800">
             <p className="px-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-              More Tools & Settings
+              Settings & Tools
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
               {SECONDARY_NAV_ITEMS.map((item) => {
@@ -378,8 +380,12 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
 
           <div className="pt-2 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400 px-2">
-            <span className="truncate">{activeDataSourceName}</span>
-            <span className="font-mono text-indigo-300 font-bold">{totalRecordsCount} recs</span>
+            <span className="truncate">
+              {driveConnection?.isConnected
+                ? `Drive: ${driveConnection.folderName}`
+                : 'Temporary Workspace (Not Backed Up)'}
+            </span>
+            <span className="font-mono text-indigo-300 font-bold">{totalRecordsCount} rows</span>
           </div>
         </div>
       )}

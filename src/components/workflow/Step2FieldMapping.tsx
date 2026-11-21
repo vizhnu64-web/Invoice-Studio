@@ -88,7 +88,6 @@ export const Step2FieldMapping: React.FC<Step2FieldMappingProps> = ({
   };
 
   const handleClearAll = () => {
-    if (!window.confirm('Are you sure you want to clear all mapped columns?')) return;
     setFields(prev => prev.map(f => ({
       ...f,
       sourceColumn: '',
@@ -96,9 +95,9 @@ export const Step2FieldMapping: React.FC<Step2FieldMappingProps> = ({
     })));
     setFeedbackMsg({
       type: 'warn',
-      text: 'All column mappings cleared.'
+      text: 'All column mappings cleared. Click Auto-Map to restore suggestions.'
     });
-    setTimeout(() => setFeedbackMsg(null), 3000);
+    setTimeout(() => setFeedbackMsg(null), 3500);
   };
 
   const handleUpdateFieldMapping = (fieldId: string, colName: string) => {

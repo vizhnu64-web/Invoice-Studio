@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import * as XLSX from 'xlsx';
 import {
   AlertCircle,
   ArrowDown,
@@ -18,6 +19,7 @@ import {
   Eye,
   FileCheck2,
   FilePlus2,
+  FileSpreadsheet,
   FileText,
   History,
   Mail,
@@ -27,13 +29,16 @@ import {
   ShieldAlert,
   ShieldCheck,
   Trash2,
+  Upload,
   X,
   XCircle,
 } from 'lucide-react';
 import {
   CompanySettings,
   CustomerRecord,
+  DriveWorkspaceConnection,
   GenerationRecord,
+  IntegrationDiagnostics,
   InvoiceFieldConfig,
   InvoiceTemplate,
   ManualInvoiceData,
@@ -65,8 +70,8 @@ import {
 } from '../utils/quotation';
 import { generateInvoicePDF } from '../utils/pdfGenerator';
 import { InvoicePreviewSheet } from './InvoicePreviewSheet';
+import { GoogleSheetsConnectorCard } from './GoogleSheetsConnectorCard';
 import { workspaceApi } from '../utils/workspaceApi';
-import { GoogleAccountUser } from '../utils/googleSheets';
 
 interface QuotationGeneratorViewProps {
   company: CompanySettings;
@@ -76,7 +81,9 @@ interface QuotationGeneratorViewProps {
   quotations: QuotationRecord[];
   setQuotations: React.Dispatch<React.SetStateAction<QuotationRecord[]>>;
   generationHistory: GenerationRecord[];
-  authUser: GoogleAccountUser | null;
+  driveConnection: DriveWorkspaceConnection | null;
+  diagnostics: IntegrationDiagnostics | null;
+  initialStatusFilter?: QuotationStatus | 'ALL';
   onConvertedToInvoice: (
     updatedQuotation: QuotationRecord,
     createdInvoice: GenerationRecord,
@@ -130,12 +137,14 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
   quotations,
   setQuotations,
   generationHistory,
-  authUser,
+  driveConnection,
+  diagnostics,
+  initialStatusFilter,
   onConvertedToInvoice,
   onEmailQuotation,
   onNavigateTab,
 }) => {
-  const [viewMode, setViewMode] = useState<'list' | 'editor'>('list');
+  const [viewMode, setViewMode] = useState<'list' | 'editor' | 'import'>('list');
   const [editingQuotationId, setEditingQuotationId] = useState<string | null>(null);
   const [formData, setFormData] = useState<QuotationData>(() =>
     createDefaultQuotationData(company, quotations)
@@ -146,14 +155,40 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
     text: string;
   } | null>(null);
 
+  // Import state (Excel / CSV or Google Sheets URL)
+  const [importMethod, setImportMethod] = useState<'file' | 'sheets'>('file');
+  const [importedSourceLabel, setImportedSourceLabel] = useState('');
+  const [importedHeaders, setImportedHeaders] = useState<string[]>([]);
+  const [importedRows, setImportedRows] = useState<Record<string, any>[]>([]);
+  const [importMapping, setImportMapping] = useState<Record<string, string>>({
+    quotationNumber: '',
+    customerName: '',
+    customerEmail: '',
+    customerGstin: '',
+    itemName: '',
+    quantity: '',
+    rate: '',
+    gstRate: '',
+    projectName: '',
+    validUntilDate: '',
+  });
+  const [importFileError, setImportFileError] = useState<string | null>(null);
+
   // Filters & sorting for History table
   const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState<string>('ALL');
+  const [statusFilter, setStatusFilter] = useState<string>(initialStatusFilter || 'ALL');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [sortBy, setSortBy] = useState<'newest' | 'amount_desc' | 'valid_until'>('newest');
   const [page, setPage] = useState(1);
   const pageSize = 10;
+
+  useEffect(() => {
+    if (initialStatusFilter) {
+      setStatusFilter(initialStatusFilter);
+      setPage(1);
+    }
+  }, [initialStatusFilter]);
 
   // Modals
   const [previewQuotation, setPreviewQuotation] = useState<QuotationRecord | null>(null);
@@ -166,8 +201,8 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
   const [deleteModalTarget, setDeleteModalTarget] = useState<QuotationRecord | null>(null);
   const [isUploadingDrive, setIsUploadingDrive] = useState(false);
 
-  const actorName = authUser?.name || authUser?.email || company.authorizedPerson || 'Workspace User';
-  const actorEmail = authUser?.email || company.email;
+  const actorName = company.authorizedPerson || company.legalName || 'Workspace User';
+  const actorEmail = company.email || '';
 
   const stats = useMemo(() => computeQuotationStats(quotations), [quotations]);
 
@@ -198,12 +233,188 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
   const paginatedQuotations = filteredQuotations.slice((page - 1) * pageSize, page * pageSize);
 
   const syncQuotationToCloud = async (record: QuotationRecord) => {
-    if (!authUser?.userId) return;
+    if (!driveConnection?.isConnected) return;
     try {
       await workspaceApi.saveQuotation(record);
     } catch {
-      // Local state remains saved; cloud sync retries on next Drive/Workspace sync
+      // Local state remains saved; Drive auto-sync retries on next workspace sync
     }
+  };
+
+  const autoDetectQuotationMapping = (headers: string[]) => {
+    const findHeader = (patterns: RegExp[]) =>
+      headers.find((h) => patterns.some((re) => re.test(h.toLowerCase()))) || '';
+    return {
+      quotationNumber: findHeader([/quote|quotation.*no|qt.*num|ref/]),
+      customerName: findHeader([/customer|client|party|company|name/]),
+      customerEmail: findHeader([/email|mail/]),
+      customerGstin: findHeader([/gstin|gst\s*no|tax\s*id/]),
+      itemName: findHeader([/item|service|product|description|particular/]),
+      quantity: findHeader([/qty|quantity|units|count/]),
+      rate: findHeader([/rate|price|amount|fee|cost|unit\s*price/]),
+      gstRate: findHeader([/gst\s*%|tax\s*%|gst\s*rate|tax\s*rate/]),
+      projectName: findHeader([/project|subject|title|engagement/]),
+      validUntilDate: findHeader([/valid|expiry|due\s*date/]),
+    };
+  };
+
+  const handleLoadImportedDataset = (payload: {
+    sourceLabel: string;
+    headers: string[];
+    rows: Record<string, any>[];
+  }) => {
+    setImportFileError(null);
+    setImportedSourceLabel(payload.sourceLabel);
+    setImportedHeaders(payload.headers);
+    setImportedRows(payload.rows);
+    setImportMapping(autoDetectQuotationMapping(payload.headers));
+  };
+
+  const handleQuotationFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportFileError(null);
+    try {
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data, { type: 'array', raw: false });
+      const firstSheetName = workbook.SheetNames[0];
+      if (!firstSheetName) {
+        setImportFileError('No worksheet found in uploaded file.');
+        return;
+      }
+      const ws = workbook.Sheets[firstSheetName];
+      const matrix = XLSX.utils.sheet_to_json<any[]>(ws, { header: 1, defval: '', raw: false });
+      const nonEmpty = matrix.filter((row) =>
+        Array.isArray(row) && row.some((cell) => String(cell ?? '').trim() !== '')
+      );
+      if (nonEmpty.length < 2) {
+        setImportFileError('File must contain a header row and at least one data row.');
+        return;
+      }
+      const headers = nonEmpty[0].map((c, idx) => String(c ?? '').trim() || `Column_${idx + 1}`);
+      const rows = nonEmpty.slice(1).map((row) => {
+        const obj: Record<string, any> = {};
+        headers.forEach((h, idx) => {
+          obj[h] = String(row[idx] ?? '').trim();
+        });
+        return obj;
+      });
+      handleLoadImportedDataset({
+        sourceLabel: `${file.name} (${firstSheetName})`,
+        headers,
+        rows,
+      });
+    } catch (err: any) {
+      setImportFileError(err?.message || 'Unable to parse spreadsheet file.');
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const parseNumericCell = (raw: any, fallback = 0): number => {
+    const cleaned = String(raw ?? '')
+      .replace(/[₹$€£,\s]/g, '')
+      .replace(/%$/, '')
+      .trim();
+    const num = Number(cleaned);
+    return Number.isFinite(num) ? num : fallback;
+  };
+
+  const handleCommitImportedQuotations = () => {
+    if (importedRows.length === 0) return;
+    if (!importMapping.customerName) {
+      setImportFileError('Map at least the Customer Name column before importing.');
+      return;
+    }
+
+    const existingNums = new Set(quotations.map((q) => q.quotationNumber.trim().toLowerCase()));
+    const created: QuotationRecord[] = [];
+    let skippedDuplicates = 0;
+    let workingList = [...quotations];
+
+    const today = new Date().toISOString().split('T')[0];
+    const defaultValidDate = (() => {
+      const d = new Date();
+      d.setDate(d.getDate() + 15);
+      return d.toISOString().split('T')[0];
+    })();
+
+    for (const row of importedRows) {
+      const customerName = String(row[importMapping.customerName] ?? '').trim();
+      if (!customerName) continue;
+
+      const rawNum = importMapping.quotationNumber
+        ? String(row[importMapping.quotationNumber] ?? '').trim()
+        : '';
+      const quotationNumber = rawNum || generateNextQuotationNumber(workingList);
+      if (existingNums.has(quotationNumber.toLowerCase())) {
+        skippedDuplicates += 1;
+        continue;
+      }
+
+      const itemName = importMapping.itemName
+        ? String(row[importMapping.itemName] ?? '').trim() || 'Quoted Service / Product'
+        : 'Quoted Service / Product';
+      const quantity = Math.max(1, parseNumericCell(importMapping.quantity ? row[importMapping.quantity] : 1, 1));
+      const rate = Math.max(0, parseNumericCell(importMapping.rate ? row[importMapping.rate] : 0, 0));
+      const gstPercentage = Math.max(0, parseNumericCell(importMapping.gstRate ? row[importMapping.gstRate] : 18, 18));
+
+      const base = createDefaultQuotationData(company, workingList);
+      const qData: QuotationData = {
+        ...base,
+        quotationNumber,
+        quotationDate: today,
+        validUntilDate:
+          (importMapping.validUntilDate && String(row[importMapping.validUntilDate] ?? '').trim()) ||
+          defaultValidDate,
+        projectName: importMapping.projectName ? String(row[importMapping.projectName] ?? '').trim() : '',
+        customerName,
+        customerEmail: importMapping.customerEmail ? String(row[importMapping.customerEmail] ?? '').trim() : '',
+        customerGstin: importMapping.customerGstin ? String(row[importMapping.customerGstin] ?? '').trim() : '',
+        items: [
+          {
+            ...createEmptyManualLineItem(gstPercentage),
+            itemName,
+            quantity,
+            rate,
+            gstPercentage,
+          },
+        ],
+      };
+
+      const record = createQuotationRecord({
+        data: qData,
+        company,
+        status: 'Draft',
+        actorName,
+        actorEmail,
+      });
+
+      created.push(record);
+      workingList = [record, ...workingList];
+      existingNums.add(quotationNumber.toLowerCase());
+    }
+
+    if (created.length === 0) {
+      setImportFileError(
+        skippedDuplicates > 0
+          ? `All ${skippedDuplicates} row(s) were skipped because their quotation numbers already exist.`
+          : 'No valid rows with a customer name were found to import.'
+      );
+      return;
+    }
+
+    setQuotations((prev) => [...created, ...prev]);
+    setImportedRows([]);
+    setImportedHeaders([]);
+    setImportedSourceLabel('');
+    setViewMode('list');
+    setBanner({
+      type: 'success',
+      text: `Imported ${created.length} draft quotation${created.length === 1 ? '' : 's'}${
+        skippedDuplicates > 0 ? ` (${skippedDuplicates} duplicate skipped)` : ''
+      }.`,
+    });
   };
 
   const handleOpenCreateNew = () => {
@@ -253,7 +464,6 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
       status: 'Draft',
       actorName,
       actorEmail,
-      ownerUserId: authUser?.userId,
     });
 
     setQuotations((prev) => [duplicated, ...prev]);
@@ -345,7 +555,6 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
       status: targetStatus,
       actorName,
       actorEmail,
-      ownerUserId: authUser?.userId,
       existingRecord: existing,
     });
 
@@ -382,10 +591,10 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
   };
 
   const handleUploadPdfToDrive = async (q: QuotationRecord) => {
-    if (!authUser?.driveConnected) {
+    if (!driveConnection?.isConnected) {
       setBanner({
         type: 'info',
-        text: 'Connect Google Drive in Account & Integrations to save generated PDFs to your Drive.',
+        text: 'Connect a Google Drive folder in Drive & Email Settings to save generated PDFs to your Drive.',
       });
       return;
     }
@@ -420,7 +629,7 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
       );
       setBanner({
         type: 'success',
-        text: `Saved ${uploaded.fileName} to your Google Drive (Invoice Studio/Generated PDFs).`,
+        text: `Saved ${uploaded.fileName} to Google Drive (Invoice Studio/Quotations/PDFs).`,
       });
     } catch (err: any) {
       setBanner({
@@ -458,7 +667,7 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
         rejectionReason: approvalAction === 'Not Approved' ? rejectionReason : undefined,
       });
       setQuotations((prev) => prev.map((q) => (q.id === updated.id ? updated : q)));
-      if (authUser?.userId) {
+      if (driveConnection?.isConnected) {
         workspaceApi
           .updateQuotationStatus(updated.id, {
             status: approvalAction,
@@ -491,7 +700,7 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
           actorEmail,
         });
 
-      if (authUser?.userId) {
+      if (driveConnection?.isConnected) {
         workspaceApi
           .convertQuotation(convertModalTarget.id, createdInvoice)
           .catch(() => {});
@@ -513,7 +722,7 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
     const id = deleteModalTarget.id;
     const num = deleteModalTarget.quotationNumber;
     setQuotations((prev) => prev.filter((q) => q.id !== id));
-    if (authUser?.userId) {
+    if (driveConnection?.isConnected) {
       workspaceApi.deleteQuotation(id).catch(() => {});
     }
     setDeleteModalTarget(null);
@@ -539,8 +748,8 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center space-x-2.5 shrink-0">
-          {viewMode === 'editor' ? (
+        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          {viewMode !== 'list' ? (
             <button
               type="button"
               onClick={() => setViewMode('list')}
@@ -549,14 +758,27 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
               Back to Quotations ({quotations.length})
             </button>
           ) : (
-            <button
-              type="button"
-              onClick={handleOpenCreateNew}
-              className="inline-flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm transition-colors cursor-pointer"
-            >
-              <FilePlus2 className="w-4 h-4" />
-              <span>New Quotation</span>
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setImportFileError(null);
+                  setViewMode('import');
+                }}
+                className="inline-flex items-center space-x-2 px-4 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold transition-colors cursor-pointer"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                <span>Import Excel / Google Sheets</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleOpenCreateNew}
+                className="inline-flex items-center space-x-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm transition-colors cursor-pointer"
+              >
+                <FilePlus2 className="w-4 h-4" />
+                <span>New Quotation</span>
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -987,6 +1209,171 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* IMPORT QUOTATIONS MODE (Excel/CSV + Google Sheets URL) */}
+      {viewMode === 'import' && (
+        <div className="space-y-5">
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
+              <div>
+                <h2 className="text-base font-bold text-slate-900">Import Quotations from Spreadsheet</h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Bulk-create Draft quotations from an Excel/CSV file or a connected Google Sheets URL.
+                </p>
+              </div>
+              <div className="inline-flex bg-slate-100 p-1 rounded-xl">
+                <button
+                  type="button"
+                  onClick={() => setImportMethod('file')}
+                  className={`px-3.5 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-colors ${
+                    importMethod === 'file'
+                      ? 'bg-white text-indigo-700 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Excel / CSV File
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setImportMethod('sheets')}
+                  className={`px-3.5 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-colors ${
+                    importMethod === 'sheets'
+                      ? 'bg-white text-indigo-700 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Google Sheets URL
+                </button>
+              </div>
+            </div>
+
+            {importMethod === 'file' ? (
+              <div className="border-2 border-dashed border-slate-300 rounded-xl p-6 text-center bg-slate-50/70 space-y-3">
+                <Upload className="w-8 h-8 text-indigo-500 mx-auto" />
+                <div>
+                  <p className="text-sm font-bold text-slate-900">Upload Excel (.xlsx, .xls) or CSV file</p>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Leading zeros in quotation IDs and GSTINs are preserved automatically.
+                  </p>
+                </div>
+                <label className="inline-flex items-center space-x-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer">
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>Choose Spreadsheet File</span>
+                  <input
+                    type="file"
+                    accept=".xlsx,.xls,.csv"
+                    onChange={handleQuotationFileUpload}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+            ) : (
+              <GoogleSheetsConnectorCard
+                compact
+                diagnostics={diagnostics}
+                driveConnection={driveConnection}
+                title="Import Quotations from Google Sheets"
+                subtitle="Connect a private sheet shared with the service account or a publicly viewable Google Sheet."
+                onImportedRows={(payload) =>
+                  handleLoadImportedDataset({
+                    sourceLabel: `${payload.spreadsheetTitle} — ${payload.worksheetName}`,
+                    headers: payload.headers,
+                    rows: payload.rows,
+                  })
+                }
+              />
+            )}
+
+            {importFileError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center space-x-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{importFileError}</span>
+              </div>
+            )}
+          </div>
+
+          {importedRows.length > 0 && (
+            <div className="bg-white p-5 rounded-2xl border border-slate-200 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Column Mapping & Preview — {importedSourceLabel}
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    {importedRows.length} row(s) loaded. Map columns below and click Import Quotations.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCommitImportedQuotations}
+                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold inline-flex items-center space-x-1.5 cursor-pointer"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Import {importedRows.length} Quotation(s) as Draft</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
+                {[
+                  { key: 'customerName', label: 'Customer Name *' },
+                  { key: 'quotationNumber', label: 'Quotation # (Auto if blank)' },
+                  { key: 'customerEmail', label: 'Customer Email' },
+                  { key: 'customerGstin', label: 'Customer GSTIN' },
+                  { key: 'projectName', label: 'Project / Subject' },
+                  { key: 'itemName', label: 'Item / Service Name' },
+                  { key: 'quantity', label: 'Quantity' },
+                  { key: 'rate', label: 'Unit Rate / Price' },
+                  { key: 'gstRate', label: 'GST %' },
+                  { key: 'validUntilDate', label: 'Valid Until Date' },
+                ].map((field) => (
+                  <div key={field.key}>
+                    <label className="block font-semibold text-slate-700 mb-1">{field.label}</label>
+                    <select
+                      value={importMapping[field.key] || ''}
+                      onChange={(e) =>
+                        setImportMapping((prev) => ({ ...prev, [field.key]: e.target.value }))
+                      }
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 bg-slate-50 text-xs"
+                    >
+                      <option value="">-- Not mapped --</option>
+                      {importedHeaders.map((h) => (
+                        <option key={h} value={h}>
+                          {h}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+              </div>
+
+              <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                <table className="w-full text-left text-[11px] border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200">
+                      {importedHeaders.slice(0, 8).map((h) => (
+                        <th key={h} className="px-3 py-2 font-bold text-slate-700 whitespace-nowrap">
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {importedRows.slice(0, 5).map((r, idx) => (
+                      <tr key={idx}>
+                        {importedHeaders.slice(0, 8).map((h) => (
+                          <td key={h} className="px-3 py-1.5 font-mono text-slate-600 whitespace-nowrap max-w-[160px] truncate">
+                            {String(r[h] ?? '')}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1807,7 +2194,7 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
                     <Download className="w-3.5 h-3.5" />
                     <span>Download PDF</span>
                   </button>
-                  {authUser?.driveConnected && (
+                  {driveConnection?.isConnected && (
                     <button
                       type="button"
                       disabled={isUploadingDrive}

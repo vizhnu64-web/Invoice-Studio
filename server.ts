@@ -3,23 +3,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import 'dotenv/config';
 import express from 'express';
 import path from 'node:path';
-import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { createServer as createViteServer } from 'vite';
 import {
-  handleAuthDisconnect,
-  handleAuthStatus,
   handleDriveBackup,
+  handleDriveConnect,
   handleDriveRestore,
   handleDriveStatus,
   handleDriveSync,
+  handleDriveTest,
   handleDriveUploadPdf,
   handleEmailHistory,
   handleEmailSend,
   handleEmailTestSend,
-  handleGoogleAuthCallback,
-  handleGoogleAuthStart,
   handleHealth,
   handleInvoices,
   handleQuotations,
@@ -31,87 +29,131 @@ import {
   handleSmtpTest,
   handleWorkspace,
 } from './api/_lib/handlers.js';
+import type { NormalizedRequest, NormalizedResponse } from './api/_lib/http.js';
 
-const PORT = Number(process.env.PORT || 3000);
-const isProduction = process.env.NODE_ENV === 'production';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function extractSubSegments(url: string, prefix: string): string[] {
+  const pathname = (url || '').split('?')[0];
+  return pathname
+    .replace(new RegExp(`^${prefix}/?`), '')
+    .split('/')
+    .filter(Boolean);
+}
 
 async function startServer() {
   const app = express();
-  app.set('trust proxy', 1);
+  app.use(express.json({ limit: '25mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-  // Parse JSON and URL-encoded bodies cleanly for API routes (allow base64 PDF payloads)
-  app.use('/api', express.json({ limit: '25mb' }));
-  app.use('/api', express.urlencoded({ extended: true, limit: '25mb' }));
+  const PORT = Number(process.env.PORT || 3000);
 
-  // Health & Auth
-  app.all('/api/health', (req, res) => void handleHealth(req, res));
-  app.all('/api/auth/google/start', (req, res) => void handleGoogleAuthStart(req, res));
-  app.all('/api/auth/google/callback', (req, res) => void handleGoogleAuthCallback(req, res));
-  app.all('/api/auth/status', (req, res) => void handleAuthStatus(req, res));
-  app.all('/api/auth/disconnect', (req, res) => void handleAuthDisconnect(req, res));
-
-  // Workspace, Onboarding & Customers (Google Drive backed)
-  app.all('/api/workspace', (req, res) => void handleWorkspace(req, res));
-
-  // Quotations (with status transitions & strict approval-gated conversion)
-  app.all('/api/quotations', (req, res) => void handleQuotations(req, res, []));
-  app.all('/api/quotations/:id', (req, res) => void handleQuotations(req, res, [req.params.id]));
-  app.all('/api/quotations/:id/:action', (req, res) =>
-    void handleQuotations(req, res, [req.params.id, req.params.action])
+  // Health & Diagnostics
+  app.all('/api/health', (req, res) =>
+    handleHealth(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
   );
 
-  // Invoices
-  app.all('/api/invoices', (req, res) => void handleInvoices(req, res, []));
-  app.all('/api/invoices/:id', (req, res) => void handleInvoices(req, res, [req.params.id]));
+  // Google Drive Folder Workspace Storage (Service Account)
+  app.all('/api/drive/connect', (req, res) =>
+    handleDriveConnect(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
+  app.all('/api/drive/test', (req, res) =>
+    handleDriveTest(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
+  app.all('/api/drive/status', (req, res) =>
+    handleDriveStatus(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
+  app.all('/api/drive/sync', (req, res) =>
+    handleDriveSync(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
+  app.all('/api/drive/upload-pdf', (req, res) =>
+    handleDriveUploadPdf(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
+  app.all('/api/drive/backup', (req, res) =>
+    handleDriveBackup(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
+  app.all('/api/drive/restore', (req, res) =>
+    handleDriveRestore(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
 
-  // Google Drive Storage
-  app.all('/api/drive/status', (req, res) => void handleDriveStatus(req, res));
-  app.all('/api/drive/sync', (req, res) => void handleDriveSync(req, res));
-  app.all('/api/drive/upload-pdf', (req, res) => void handleDriveUploadPdf(req, res));
-  app.all('/api/drive/restore', (req, res) => void handleDriveRestore(req, res));
-  app.all('/api/drive/backup', (req, res) => void handleDriveBackup(req, res));
+  // Workspace state
+  app.all('/api/workspace', (req, res) =>
+    handleWorkspace(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
 
-  // Google Sheets Import & Sync
-  app.all('/api/sheets/metadata', (req, res) => void handleSheetsMetadata(req, res));
-  app.all('/api/sheets/values', (req, res) => void handleSheetsValues(req, res));
-  app.all('/api/sheets/sync', (req, res) => void handleSheetsSync(req, res));
-  app.all('/api/sheets/data', (req, res) => void handleSheetsData(req, res));
+  // Google Sheets URL Connector (Service Account + Public Fallback)
+  app.all('/api/sheets/metadata', (req, res) =>
+    handleSheetsMetadata(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
+  app.all('/api/sheets/values', (req, res) =>
+    handleSheetsValues(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
+  app.all('/api/sheets/sync', (req, res) =>
+    handleSheetsSync(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
+  app.all('/api/sheets/data', (req, res) =>
+    handleSheetsData(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
 
-  // Dual Email Delivery (Gmail API + Per-User Encrypted SMTP)
-  app.all('/api/email/smtp-config', (req, res) => void handleSmtpConfig(req, res));
-  app.all('/api/email/smtp-test', (req, res) => void handleSmtpTest(req, res));
-  app.all('/api/email/test-send', (req, res) => void handleEmailTestSend(req, res));
-  app.all('/api/email/send', (req, res) => void handleEmailSend(req, res));
-  app.all('/api/email/history', (req, res) => void handleEmailHistory(req, res));
+  // Email Integration (Gmail SMTP & Custom SMTP via Nodemailer)
+  app.all('/api/email/smtp-config', (req, res) =>
+    handleSmtpConfig(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
+  app.all('/api/email/smtp-test', (req, res) =>
+    handleSmtpTest(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
+  app.all('/api/email/test-send', (req, res) =>
+    handleEmailTestSend(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
+  app.all('/api/email/send', (req, res) =>
+    handleEmailSend(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
+  app.all('/api/email/history', (req, res) =>
+    handleEmailHistory(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
 
-  // Ensure unmatched /api/* endpoints return JSON 404 (never SPA HTML)
-  app.use('/api', (_req, res) => {
-    res.status(404).json({ error: 'API endpoint not found' });
+  // Quotations & Invoices CRUD
+  app.all('/api/quotations', (req, res) =>
+    handleQuotations(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse, [])
+  );
+  app.all('/api/quotations/*', (req, res) =>
+    handleQuotations(
+      req as unknown as NormalizedRequest,
+      res as unknown as NormalizedResponse,
+      extractSubSegments(req.originalUrl, '/api/quotations')
+    )
+  );
+  app.all('/api/invoices', (req, res) =>
+    handleInvoices(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse, [])
+  );
+  app.all('/api/invoices/*', (req, res) =>
+    handleInvoices(
+      req as unknown as NormalizedRequest,
+      res as unknown as NormalizedResponse,
+      extractSubSegments(req.originalUrl, '/api/invoices')
+    )
+  );
+
+  // Reject unknown API endpoints cleanly as JSON
+  app.use('/api', (req, res) => {
+    res.status(404).json({ error: `Unknown API endpoint: ${req.originalUrl}` });
   });
 
-  if (!isProduction) {
-    const { createServer: createViteServer } = await import('vite');
+  if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: {
-        middlewareMode: true,
-        hmr: process.env.DISABLE_HMR !== 'true',
-      },
+      server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distDir = path.resolve(import.meta.dirname, 'dist');
-    if (fs.existsSync(distDir)) {
-      app.use(express.static(distDir));
-      app.get('*', (req, res, next) => {
-        if (req.path.startsWith('/api/')) return next();
-        res.sendFile(path.join(distDir, 'index.html'));
-      });
-    }
+    app.use(express.static(path.resolve(__dirname, 'dist')));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+    });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Invoice Studio server listening on http://0.0.0.0:${PORT}`);
+    console.log(`Invoice Studio server running on http://localhost:${PORT}`);
   });
 }
 

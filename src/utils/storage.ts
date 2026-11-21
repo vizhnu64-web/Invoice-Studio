@@ -3,107 +3,44 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { 
-  CompanySettings, 
-  InvoiceFieldConfig, 
-  InvoiceTemplate, 
-  GenerationRecord, 
-  SpreadsheetData, 
-  CalculationSettings,
+import {
   AdvancedAmountCalculationSettings,
-  GstConfigurationSettings,
-  WorkflowSessionState,
-  ManualInvoiceDraft,
-  ManualInvoiceData,
+  CompanySettings,
   CustomerRecord,
+  DriveWorkspaceConnection,
+  EmailDeliveryLogEntry,
+  GenerationRecord,
+  GstConfigurationSettings,
+  InvoiceFieldConfig,
+  InvoiceTemplate,
+  ManualInvoiceDraft,
+  MappingProfile,
   QuotationRecord,
-  EmailDeliveryLogEntry
+  SpreadsheetData,
+  WorkflowSessionState,
 } from '../types';
-import { defaultCompanySettings, defaultFieldCatalog, defaultCalculationSettings } from '../mockData';
-import { EmailConfig, EmailSendStatus, EmailService } from './emailService';
-
-const STORAGE_KEYS = {
-  COMPANY: 'invoice_studio_company_settings_v2',
-  FIELDS: 'invoice_studio_fields_v2',
-  TEMPLATE: 'invoice_studio_template_v2',
-  HISTORY: 'invoice_studio_history_v2',
-  SPREADSHEET: 'invoice_studio_spreadsheet_v2',
-  ACTIVE_PROFILE: 'invoice_studio_active_profile_v2',
-  CALCULATION: 'invoice_studio_calculation_settings_v2',
-  WORKFLOW_SESSION: 'invoice_studio_workflow_session_v2',
-  SAVED_TEMPLATES: 'invoice_studio_saved_templates_v2',
-  EMAIL_CONFIG: 'invoice_studio_email_config_v2',
-  EMAIL_STATUSES: 'invoice_studio_email_statuses_v2',
-  MANUAL_DRAFTS: 'invoice_studio_manual_drafts_v2',
-  MANUAL_WORKING: 'invoice_studio_manual_working_v2',
-  CUSTOMERS: 'invoice_studio_customers_v2',
-  QUOTATIONS: 'invoice_studio_quotations_v2',
-  EMAIL_LOGS: 'invoice_studio_email_logs_v2',
-};
+import {
+  defaultCompanySettings,
+  defaultFieldCatalog,
+  defaultMappingProfiles,
+  defaultTemplates,
+} from '../mockData';
 
 export const EMPTY_SPREADSHEET_DATA: SpreadsheetData = {
-  fileName: 'No file loaded',
-  worksheets: [],
+  fileName: '',
   activeSheetName: '',
+  worksheets: [],
 };
 
-// Active user namespace so cached browser storage is strictly isolated per Google account
-let activeStorageUserId: string | null = null;
-
-function resolveScopedKey(baseKey: string): string {
-  if (!activeStorageUserId) return baseKey;
-  const safeUid = activeStorageUserId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  return `u_${safeUid}__${baseKey}`;
-}
-
-// Fallback in-memory storage for non-browser / Node.js test environments
-const memoryStore: Record<string, string> = {};
-
-function safeGetItem(key: string): string | null {
-  const scoped = resolveScopedKey(key);
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      return window.localStorage.getItem(scoped);
-    }
-  } catch (e) {
-    // Ignore and fallback
-  }
-  return memoryStore[scoped] ?? null;
-}
-
-function safeSetItem(key: string, value: string): void {
-  const scoped = resolveScopedKey(key);
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      window.localStorage.setItem(scoped, value);
-    }
-  } catch (e) {
-    // Ignore and fallback
-  }
-  memoryStore[scoped] = value;
-}
-
-function safeRemoveItem(key: string): void {
-  const scoped = resolveScopedKey(key);
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      window.localStorage.removeItem(scoped);
-    }
-  } catch (e) {
-    // Ignore and fallback
-  }
-  delete memoryStore[scoped];
-}
-
 export const defaultAdvancedAmountSettings: AdvancedAmountCalculationSettings = {
-  quantity: { method: 'automatic', sourceColumn: 'Quantity' },
-  unitRate: { method: 'automatic', sourceColumn: 'Rate' },
+  quantity: { method: 'automatic', fixedValue: 1 },
+  unitRate: { method: 'excel_column', sourceColumn: '' },
   grossAmount: { method: 'automatic' },
   discount: { method: 'fixed', fixedValue: 0 },
   taxableAmount: { method: 'automatic' },
   additionalCharges: { method: 'fixed', fixedValue: 0 },
   lineTotal: { method: 'automatic' },
-  subtotal: { method: 'automatic' }
+  subtotal: { method: 'automatic' },
 };
 
 export const defaultGstSettings: GstConfigurationSettings = {
@@ -111,576 +48,682 @@ export const defaultGstSettings: GstConfigurationSettings = {
   pricingType: 'exclusive',
   rateSource: 'fixed',
   fixedRate: 18,
-  taxType: 'AUTO'
+  taxType: 'AUTO',
 };
 
+const STORAGE_VERSION = 'v3';
+const DRIVE_CONNECTION_KEY = `invoice_studio_${STORAGE_VERSION}_drive_connection`;
+const TEMP_SESSION_KEY = `invoice_studio_${STORAGE_VERSION}_temp_session_id`;
+
+const BASE_KEYS = {
+  COMPANY_PROFILES: 'company_profiles',
+  ACTIVE_COMPANY_ID: 'active_company_id',
+  FIELDS: 'fields',
+  PROFILES: 'profiles',
+  TEMPLATES: 'templates',
+  ACTIVE_TEMPLATE: 'active_template',
+  CALCULATION_SETTINGS: 'calculation_settings',
+  HISTORY: 'history',
+  SPREADSHEET: 'spreadsheet',
+  WORKFLOW_SESSION: 'workflow_session',
+  SAVED_MAPPING_TEMPLATES: 'saved_mapping_templates',
+  CUSTOMERS: 'customers',
+  MANUAL_DRAFTS: 'manual_drafts',
+  ACTIVE_MANUAL_FORM: 'active_manual_form',
+  QUOTATIONS: 'quotations',
+  EMAIL_STATUSES: 'email_statuses',
+  EMAIL_LOGS: 'email_logs',
+  EMAIL_PREFS: 'email_prefs',
+} as const;
+
+let activeWorkspaceId: string | null = null;
+const memoryFallback = new Map<string, string>();
+
+function hasWindowStorage(): boolean {
+  return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+}
+
+function getTempStorage(): Storage | null {
+  if (typeof window !== 'undefined' && typeof window.sessionStorage !== 'undefined') {
+    return window.sessionStorage;
+  }
+  return null;
+}
+
+/**
+ * Generates or retrieves an ephemeral per-tab session ID used ONLY when no Google Drive folder is connected.
+ * Keeps temporary browser tabs strictly isolated from each other and ensures fresh visits start clean.
+ */
+export function getTempSessionId(): string {
+  const ss = getTempStorage();
+  if (ss) {
+    let existing = ss.getItem(TEMP_SESSION_KEY);
+    if (!existing) {
+      existing = `tmp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+      ss.setItem(TEMP_SESSION_KEY, existing);
+    }
+    return existing;
+  }
+  if (!memoryFallback.has(TEMP_SESSION_KEY)) {
+    memoryFallback.set(
+      TEMP_SESSION_KEY,
+      `tmp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
+    );
+  }
+  return memoryFallback.get(TEMP_SESSION_KEY)!;
+}
+
+/**
+ * Returns the active workspace identifier:
+ * - Connected Google Drive folderId when connected
+ * - null when operating in a temporary unbacked-up session
+ */
+export function getActiveWorkspaceId(): string | null {
+  if (activeWorkspaceId) return activeWorkspaceId;
+  const conn = loadDriveConnection();
+  if (conn?.isConnected && conn.folderId) {
+    activeWorkspaceId = conn.folderId;
+    return activeWorkspaceId;
+  }
+  return null;
+}
+
+/**
+ * Switches the active workspace scope. Must be called when connecting, switching, or disconnecting a Drive folder.
+ */
+export function setActiveWorkspaceId(folderId: string | null): void {
+  activeWorkspaceId = folderId && folderId.trim() ? folderId.trim() : null;
+}
+
+function buildScopedKey(baseKey: string, workspaceId?: string | null): string {
+  const scope = workspaceId !== undefined ? workspaceId : getActiveWorkspaceId();
+  if (scope) {
+    return `invoice_studio_${STORAGE_VERSION}_ws_${scope}_${baseKey}`;
+  }
+  return `invoice_studio_${STORAGE_VERSION}_tmp_${getTempSessionId()}_${baseKey}`;
+}
+
+function readRaw(baseKey: string, workspaceId?: string | null): string | null {
+  const scope = workspaceId !== undefined ? workspaceId : getActiveWorkspaceId();
+  const fullKey = buildScopedKey(baseKey, scope);
+
+  if (scope) {
+    if (hasWindowStorage()) {
+      return window.localStorage.getItem(fullKey);
+    }
+    return memoryFallback.get(fullKey) ?? null;
+  }
+
+  // Temporary unbacked-up workspace uses sessionStorage only (never leaks to future visitors or other businesses)
+  const ss = getTempStorage();
+  if (ss) {
+    return ss.getItem(fullKey);
+  }
+  return memoryFallback.get(fullKey) ?? null;
+}
+
+function writeRaw(baseKey: string, value: string, workspaceId?: string | null): void {
+  const scope = workspaceId !== undefined ? workspaceId : getActiveWorkspaceId();
+  const fullKey = buildScopedKey(baseKey, scope);
+
+  try {
+    if (scope) {
+      if (hasWindowStorage()) {
+        window.localStorage.setItem(fullKey, value);
+        return;
+      }
+    } else {
+      const ss = getTempStorage();
+      if (ss) {
+        ss.setItem(fullKey, value);
+        return;
+      }
+    }
+    memoryFallback.set(fullKey, value);
+  } catch (err) {
+    console.warn('Browser storage quota reached:', err);
+  }
+}
+
+function removeRaw(baseKey: string, workspaceId?: string | null): void {
+  const scope = workspaceId !== undefined ? workspaceId : getActiveWorkspaceId();
+  const fullKey = buildScopedKey(baseKey, scope);
+  if (scope) {
+    if (hasWindowStorage()) window.localStorage.removeItem(fullKey);
+  } else {
+    const ss = getTempStorage();
+    if (ss) ss.removeItem(fullKey);
+  }
+  memoryFallback.delete(fullKey);
+}
+
+/**
+ * Clears all cached records for a specific workspace (or current temporary workspace)
+ * to guarantee strict isolation when disconnecting or switching Drive folders.
+ */
+export function clearWorkspaceCaches(workspaceId?: string | null): void {
+  for (const key of Object.values(BASE_KEYS)) {
+    removeRaw(key, workspaceId);
+  }
+}
+
+// ============================================================
+// DRIVE CONNECTION METADATA (NON-SENSITIVE ONLY — NO SECRETS)
+// ============================================================
+
+export function loadDriveConnection(): DriveWorkspaceConnection | null {
+  try {
+    const raw = hasWindowStorage()
+      ? window.localStorage.getItem(DRIVE_CONNECTION_KEY)
+      : memoryFallback.get(DRIVE_CONNECTION_KEY) ?? null;
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as DriveWorkspaceConnection;
+    if (!parsed || !parsed.folderId || !parsed.isConnected) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function saveDriveConnection(connection: DriveWorkspaceConnection): void {
+  const safePayload: DriveWorkspaceConnection = {
+    folderUrl: connection.folderUrl,
+    folderId: connection.folderId,
+    folderName: connection.folderName,
+    rootFolderId: connection.rootFolderId,
+    isConnected: Boolean(connection.isConnected),
+    lastSyncedAt: connection.lastSyncedAt,
+    connectedAt: connection.connectedAt || new Date().toISOString(),
+    serviceAccountEmail: connection.serviceAccountEmail || null,
+  };
+  const serialized = JSON.stringify(safePayload);
+  if (hasWindowStorage()) {
+    window.localStorage.setItem(DRIVE_CONNECTION_KEY, serialized);
+  } else {
+    memoryFallback.set(DRIVE_CONNECTION_KEY, serialized);
+  }
+  setActiveWorkspaceId(safePayload.folderId);
+}
+
+export function clearDriveConnection(): void {
+  const previousFolderId = getActiveWorkspaceId();
+  if (previousFolderId) {
+    clearWorkspaceCaches(previousFolderId);
+  }
+  if (hasWindowStorage()) {
+    window.localStorage.removeItem(DRIVE_CONNECTION_KEY);
+  }
+  memoryFallback.delete(DRIVE_CONNECTION_KEY);
+  setActiveWorkspaceId(null);
+  clearWorkspaceCaches(null);
+}
+
+function createFreshCompanyDefaults(): CompanySettings {
+  return {
+    ...defaultCompanySettings,
+    brandPalette: { ...defaultCompanySettings.brandPalette },
+    typography: { ...defaultCompanySettings.typography },
+    assets: { ...defaultCompanySettings.assets },
+    content: {
+      ...defaultCompanySettings.content,
+      customTextBlocks: [],
+    },
+    currency: { ...defaultCompanySettings.currency },
+    bankAccounts: [],
+  };
+}
+
 export const storage = {
-  setActiveStorageUser(userId: string | null): void {
-    activeStorageUserId = userId ? userId.trim() || null : null;
+  getActiveWorkspaceId,
+  setActiveWorkspaceId,
+  setActiveStorageUser: setActiveWorkspaceId,
+  clearWorkspaceCaches,
+  clearAllUserWorkspaceCaches: () => {
+    const current = getActiveWorkspaceId();
+    if (current) clearWorkspaceCaches(current);
+    clearWorkspaceCaches(null);
   },
+  loadDriveConnection,
+  saveDriveConnection,
+  clearDriveConnection,
+  getTempSessionId,
 
-  getActiveStorageUser(): string | null {
-    return activeStorageUserId;
-  },
-
-  clearAllUserWorkspaceCaches(): void {
-    const allBaseKeys = Object.values(STORAGE_KEYS);
+  // Company Profiles
+  loadCompanyProfiles: (): CompanySettings[] => {
     try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        const toRemove: string[] = [];
-        for (let i = 0; i < window.localStorage.length; i++) {
-          const k = window.localStorage.key(i);
-          if (!k) continue;
-          if (
-            k.startsWith('invoice_studio_') ||
-            k.startsWith('u_') && k.includes('__invoice_studio_')
-          ) {
-            toRemove.push(k);
-          }
+      const saved = readRaw(BASE_KEYS.COMPANY_PROFILES);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map((p: any) => ({
+            ...createFreshCompanyDefaults(),
+            ...p,
+            brandPalette: { ...defaultCompanySettings.brandPalette, ...(p.brandPalette || {}) },
+            typography: { ...defaultCompanySettings.typography, ...(p.typography || {}) },
+            assets: { ...defaultCompanySettings.assets, ...(p.assets || {}) },
+            content: { ...defaultCompanySettings.content, ...(p.content || {}) },
+            currency: { ...defaultCompanySettings.currency, ...(p.currency || {}) },
+            bankAccounts: Array.isArray(p.bankAccounts) ? p.bankAccounts : [],
+          }));
         }
-        toRemove.forEach((k) => window.localStorage.removeItem(k));
+      }
+    } catch (err) {
+      console.error('Failed to load company profiles', err);
+    }
+    return [createFreshCompanyDefaults()];
+  },
+
+  saveCompanyProfiles: (profiles: CompanySettings[]) => {
+    writeRaw(BASE_KEYS.COMPANY_PROFILES, JSON.stringify(profiles));
+  },
+
+  loadActiveCompanyId: (): string => {
+    return readRaw(BASE_KEYS.ACTIVE_COMPANY_ID) || defaultCompanySettings.profileId;
+  },
+
+  saveActiveCompanyId: (id: string) => {
+    writeRaw(BASE_KEYS.ACTIVE_COMPANY_ID, id);
+  },
+
+  loadCompany: (): CompanySettings => {
+    const profiles = storage.loadCompanyProfiles();
+    const activeId = storage.loadActiveCompanyId();
+    return profiles.find((p) => p.profileId === activeId) || profiles[0] || createFreshCompanyDefaults();
+  },
+
+  saveCompany: (company: CompanySettings) => {
+    const profiles = storage.loadCompanyProfiles();
+    const idx = profiles.findIndex((p) => p.profileId === company.profileId);
+    if (idx >= 0) {
+      profiles[idx] = company;
+    } else {
+      profiles.push(company);
+    }
+    storage.saveCompanyProfiles(profiles);
+    storage.saveActiveCompanyId(company.profileId);
+  },
+
+  loadCompanySettings: (): CompanySettings => storage.loadCompany(),
+  saveCompanySettings: (company: CompanySettings) => storage.saveCompany(company),
+
+  // Field Catalog
+  loadFields: (company?: CompanySettings): InvoiceFieldConfig[] => {
+    try {
+      const saved = readRaw(BASE_KEYS.FIELDS);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
     } catch {
-      // Ignore storage access errors
+      // fallback
     }
-    for (const k of Object.keys(memoryStore)) {
-      if (
-        k.startsWith('invoice_studio_') ||
-        (k.startsWith('u_') && k.includes('__invoice_studio_')) ||
-        allBaseKeys.includes(k)
-      ) {
-        delete memoryStore[k];
-      }
-    }
+    const base = defaultFieldCatalog.map((f) => ({ ...f }));
+    if (!company) return base;
+    return base.map((f) => {
+      if (f.id === 'company_legal_name') return { ...f, value: company.legalName, defaultValue: company.legalName };
+      if (f.id === 'company_gstin') return { ...f, value: company.gstin, defaultValue: company.gstin };
+      if (f.id === 'company_email') return { ...f, value: company.email, defaultValue: company.email };
+      return f;
+    });
   },
 
-  loadCompanySettings(): CompanySettings {
-    try {
-      const data = safeGetItem(STORAGE_KEYS.COMPANY);
-      if (data) {
-        const parsed = JSON.parse(data);
-        return {
-          ...defaultCompanySettings,
-          ...parsed,
-          brandPalette: { ...defaultCompanySettings.brandPalette, ...(parsed.brandPalette || {}) },
-          typography: { ...defaultCompanySettings.typography, ...(parsed.typography || {}) },
-          assets: { ...defaultCompanySettings.assets, ...(parsed.assets || {}) },
-          content: { ...defaultCompanySettings.content, ...(parsed.content || {}) },
-          currency: { ...defaultCompanySettings.currency, ...(parsed.currency || {}) },
-          bankAccounts: Array.isArray(parsed.bankAccounts) && parsed.bankAccounts.length > 0 
-            ? parsed.bankAccounts 
-            : defaultCompanySettings.bankAccounts
-        };
-      }
-    } catch (e) {
-      console.warn('Failed to load company settings from storage:', e);
-    }
-    return defaultCompanySettings;
+  saveFields: (fields: InvoiceFieldConfig[]) => {
+    writeRaw(BASE_KEYS.FIELDS, JSON.stringify(fields));
   },
 
-  saveCompanySettings(settings: CompanySettings): boolean {
+  // Mapping Profiles
+  loadProfiles: (): MappingProfile[] => {
     try {
-      safeSetItem(STORAGE_KEYS.COMPANY, JSON.stringify(settings));
-      return true;
-    } catch (e) {
-      console.error('Failed to save company settings to storage:', e);
-      return false;
-    }
-  },
-
-  loadFields(company?: CompanySettings): InvoiceFieldConfig[] {
-    try {
-      const data = safeGetItem(STORAGE_KEYS.FIELDS);
-      if (data) {
-        const parsed = JSON.parse(data);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          // Sync with company settings defaults if provided
-          if (company) {
-            return parsed.map((f: InvoiceFieldConfig) => {
-              if (f.id === 'company_legal_name' && !f.value) return { ...f, value: company.legalName, defaultValue: company.legalName };
-              if (f.id === 'company_address' && !f.value) {
-                const addr = `${company.addressLine1}${company.addressLine2 ? ', ' + company.addressLine2 : ''}, ${company.city}, ${company.state} - ${company.pinCode}`;
-                return { ...f, value: addr, defaultValue: addr };
-              }
-              if (f.id === 'company_gstin' && !f.value) return { ...f, value: company.gstin, defaultValue: company.gstin };
-              if (f.id === 'company_email' && !f.value) return { ...f, value: company.email, defaultValue: company.email };
-              return f;
-            });
-          }
-          return parsed;
-        }
-      }
-    } catch (e) {
-      console.warn('Failed to load fields from storage:', e);
-    }
-    
-    // Default fallback with company synchronization
-    if (company) {
-      return defaultFieldCatalog.map(f => {
-        if (f.id === 'company_legal_name') return { ...f, value: company.legalName, defaultValue: company.legalName };
-        if (f.id === 'company_address') {
-          const addr = `${company.addressLine1}${company.addressLine2 ? ', ' + company.addressLine2 : ''}, ${company.city}, ${company.state} - ${company.pinCode}`;
-          return { ...f, value: addr, defaultValue: addr };
-        }
-        if (f.id === 'company_gstin') return { ...f, value: company.gstin, defaultValue: company.gstin };
-        if (f.id === 'company_email') return { ...f, value: company.email, defaultValue: company.email };
-        return f;
-      });
-    }
-    return defaultFieldCatalog;
-  },
-
-  saveFields(fields: InvoiceFieldConfig[]): boolean {
-    try {
-      safeSetItem(STORAGE_KEYS.FIELDS, JSON.stringify(fields));
-      return true;
-    } catch (e) {
-      console.error('Failed to save fields to storage:', e);
-      return false;
-    }
-  },
-
-  loadTemplate(): InvoiceTemplate {
-    const defaultTemplate: InvoiceTemplate = {
-      id: 'modern-clean-v1',
-      name: 'Modern Corporate Clean',
-      isDefault: true,
-      orientation: 'portrait',
-      primaryColor: '#0f172a',
-      fontFamily: 'Inter',
-      showSections: {
-        companyHeader: true,
-        invoiceDetails: true,
-        billTo: true,
-        subject: true,
-        itemTable: true,
-        taxSummary: true,
-        amountInWords: true,
-        paymentSummary: true,
-        notes: true,
-        bankDetails: true,
-        signature: true,
-        terms: true,
-        footer: true
-      },
-      labels: {
-        invoice_title: 'TAX INVOICE',
-        bill_to: 'Billed To (Customer Details):',
-        subtotal: 'Subtotal'
-      }
-    };
-
-    try {
-      const data = safeGetItem(STORAGE_KEYS.TEMPLATE);
-      if (data) {
-        const parsed = JSON.parse(data);
-        return {
-          ...defaultTemplate,
-          ...parsed,
-          showSections: { ...defaultTemplate.showSections, ...(parsed.showSections || {}) },
-          labels: { ...defaultTemplate.labels, ...(parsed.labels || {}) }
-        };
-      }
-    } catch (e) {
-      console.warn('Failed to load template from storage:', e);
-    }
-    return defaultTemplate;
-  },
-
-  saveTemplate(template: InvoiceTemplate): boolean {
-    try {
-      safeSetItem(STORAGE_KEYS.TEMPLATE, JSON.stringify(template));
-      return true;
-    } catch (e) {
-      console.error('Failed to save template to storage:', e);
-      return false;
-    }
-  },
-
-  loadHistory(): GenerationRecord[] {
-    try {
-      const data = safeGetItem(STORAGE_KEYS.HISTORY);
-      if (data) {
-        const parsed = JSON.parse(data);
-        if (Array.isArray(parsed)) {
-          return parsed.map((rec: GenerationRecord) => {
-            const rf = rec.dataSnapshot?.rowFields || {};
-            return {
-              ...rec,
-              paymentMethod: rec.paymentMethod || rf['payment_method'] || 'UPI',
-              paymentStatus: rec.paymentStatus || rf['payment_status'] || 'Paid',
-              paymentDate: rec.paymentDate || rf['payment_date'] || rec.generatedDate,
-              paymentReference: rec.paymentReference || rf['payment_reference'] || '',
-              paymentAmount: rec.paymentAmount !== undefined ? rec.paymentAmount : Number(rf['amount_paid'] || rec.totalAmount || 0),
-              paymentNotes: rec.paymentNotes || rf['payment_notes'] || ''
-            };
-          });
-        }
-      }
-    } catch (e) {
-      console.warn('Failed to load history from storage:', e);
-    }
-    return [];
-  },
-
-  saveHistory(records: GenerationRecord[]): boolean {
-    try {
-      safeSetItem(STORAGE_KEYS.HISTORY, JSON.stringify(records));
-      return true;
-    } catch (e) {
-      console.error('Failed to save history to storage:', e);
-      return false;
-    }
-  },
-
-  loadSpreadsheetData(): SpreadsheetData {
-    try {
-      const data = safeGetItem(STORAGE_KEYS.SPREADSHEET);
-      if (data) {
-        const parsed = JSON.parse(data);
-        if (parsed && Array.isArray(parsed.worksheets) && parsed.worksheets.length > 0) {
-          return parsed;
-        }
-      }
-    } catch (e) {
-      console.warn('Failed to load spreadsheet data from storage:', e);
-    }
-    return EMPTY_SPREADSHEET_DATA;
-  },
-
-  saveSpreadsheetData(data: SpreadsheetData): boolean {
-    try {
-      safeSetItem(STORAGE_KEYS.SPREADSHEET, JSON.stringify(data));
-      return true;
-    } catch (e) {
-      console.error('Failed to save spreadsheet data to storage:', e);
-      return false;
-    }
-  },
-
-  loadCalculationSettings(): CalculationSettings {
-    try {
-      const data = safeGetItem(STORAGE_KEYS.CALCULATION);
-      if (data) {
-        const parsed = JSON.parse(data);
-        return {
-          ...defaultCalculationSettings,
-          ...parsed
-        };
-      }
-    } catch (e) {
-      console.warn('Failed to load calculation settings from storage:', e);
-    }
-    return defaultCalculationSettings;
-  },
-
-  saveCalculationSettings(settings: CalculationSettings): boolean {
-    try {
-      safeSetItem(STORAGE_KEYS.CALCULATION, JSON.stringify(settings));
-      return true;
-    } catch (e) {
-      console.error('Failed to save calculation settings to storage:', e);
-      return false;
-    }
-  },
-
-  loadWorkflowSession(): WorkflowSessionState | null {
-    try {
-      const data = safeGetItem(STORAGE_KEYS.WORKFLOW_SESSION);
-      if (data) {
-        const parsed = JSON.parse(data);
-        if (parsed && parsed.currentStep) {
-          return {
-            currentStep: parsed.currentStep || 'source',
-            completedSteps: Array.isArray(parsed.completedSteps) ? parsed.completedSteps : [],
-            selectedWorksheetName: parsed.selectedWorksheetName || '',
-            headerRowIndex: typeof parsed.headerRowIndex === 'number' ? parsed.headerRowIndex : 0,
-            startRowIndex: typeof parsed.startRowIndex === 'number' ? parsed.startRowIndex : 0,
-            endRowIndex: parsed.endRowIndex,
-            amountSettings: { ...defaultAdvancedAmountSettings, ...(parsed.amountSettings || {}) },
-            gstSettings: { ...defaultGstSettings, ...(parsed.gstSettings || {}) },
-            customEditedRows: parsed.customEditedRows || {},
-            updatedAt: parsed.updatedAt || new Date().toISOString()
-          };
-        }
-      }
-    } catch (e) {
-      console.warn('Failed to load workflow session from storage:', e);
-    }
-    return null;
-  },
-
-  saveWorkflowSession(session: WorkflowSessionState): boolean {
-    try {
-      safeSetItem(STORAGE_KEYS.WORKFLOW_SESSION, JSON.stringify(session));
-      return true;
-    } catch (e) {
-      console.error('Failed to save workflow session to storage:', e);
-      return false;
-    }
-  },
-
-  clearWorkflowSession(): boolean {
-    try {
-      safeRemoveItem(STORAGE_KEYS.WORKFLOW_SESSION);
-      return true;
-    } catch (e) {
-      console.error('Failed to clear workflow session:', e);
-      return false;
-    }
-  },
-
-  loadSavedTemplates(): Array<{ id: string; name: string; description: string; mappings: Record<string, string>; amountSettings?: any; gstSettings?: any; updatedAt: string }> {
-    try {
-      const data = safeGetItem(STORAGE_KEYS.SAVED_TEMPLATES);
-      if (data) {
-        const parsed = JSON.parse(data);
+      const saved = readRaw(BASE_KEYS.PROFILES);
+      if (saved) {
+        const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) return parsed;
       }
-    } catch (e) {
-      console.warn('Failed to load saved templates:', e);
+    } catch {
+      // empty by default
+    }
+    return [...defaultMappingProfiles];
+  },
+
+  saveProfiles: (profiles: MappingProfile[]) => {
+    writeRaw(BASE_KEYS.PROFILES, JSON.stringify(profiles));
+  },
+
+  // PDF Templates
+  loadTemplates: (): InvoiceTemplate[] => {
+    try {
+      const saved = readRaw(BASE_KEYS.TEMPLATES);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {
+      // fallback
+    }
+    return defaultTemplates.map((t) => ({
+      ...t,
+      showSections: { ...t.showSections },
+      labels: { ...t.labels },
+    }));
+  },
+
+  saveTemplates: (templates: InvoiceTemplate[]) => {
+    writeRaw(BASE_KEYS.TEMPLATES, JSON.stringify(templates));
+  },
+
+  loadTemplate: (): InvoiceTemplate => {
+    try {
+      const saved = readRaw(BASE_KEYS.ACTIVE_TEMPLATE);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && parsed.showSections) return parsed;
+      }
+    } catch {
+      // fallback
+    }
+    const first = defaultTemplates[0];
+    return {
+      ...first,
+      showSections: { ...first.showSections },
+      labels: { ...first.labels },
+    };
+  },
+
+  saveTemplate: (template: InvoiceTemplate) => {
+    writeRaw(BASE_KEYS.ACTIVE_TEMPLATE, JSON.stringify(template));
+  },
+
+  // Calculation Settings
+  loadCalculationSettings: (): { mode: 'calculated' | 'excel_amount'; taxInclusive: boolean } => {
+    try {
+      const saved = readRaw(BASE_KEYS.CALCULATION_SETTINGS);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed.mode === 'string') return parsed;
+      }
+    } catch {
+      // fallback
+    }
+    return { mode: 'calculated', taxInclusive: false };
+  },
+
+  saveCalculationSettings: (settings: { mode: 'calculated' | 'excel_amount'; taxInclusive: boolean }) => {
+    writeRaw(BASE_KEYS.CALCULATION_SETTINGS, JSON.stringify(settings));
+  },
+
+  // Invoices History
+  loadHistory: (): GenerationRecord[] => {
+    try {
+      const saved = readRaw(BASE_KEYS.HISTORY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {
+      // empty on fresh visit
     }
     return [];
   },
 
-  saveMappingTemplate(template: { id?: string; name: string; description?: string; mappings?: Record<string, string>; fields?: any[]; amountSettings?: any; gstSettings?: any }): boolean {
-    try {
-      const current = this.loadSavedTemplates();
-      // Support both mappings record or array of fields
-      let mappingsRecord: Record<string, string> = template.mappings || {};
-      if (Array.isArray(template.fields)) {
-        template.fields.forEach(f => {
-          if (f.key || f.id) {
-            mappingsRecord[f.key || f.id] = f.mappedColumn || f.sourceColumn || '';
-          }
-        });
-      }
+  saveHistory: (history: GenerationRecord[]) => {
+    writeRaw(BASE_KEYS.HISTORY, JSON.stringify(history));
+  },
 
-      const newTemplate = {
-        id: template.id || `template_${Date.now()}`,
-        name: template.name,
-        description: template.description || '',
-        mappings: mappingsRecord,
-        amountSettings: template.amountSettings,
-        gstSettings: template.gstSettings,
-        updatedAt: new Date().toISOString()
-      };
-      const filtered = current.filter(t => t.id !== newTemplate.id && t.name !== newTemplate.name);
-      safeSetItem(STORAGE_KEYS.SAVED_TEMPLATES, JSON.stringify([newTemplate, ...filtered]));
-      return true;
-    } catch (e) {
-      console.error('Failed to save mapping template:', e);
-      return false;
+  // Imported Spreadsheet
+  loadSpreadsheet: (): SpreadsheetData => {
+    try {
+      const saved = readRaw(BASE_KEYS.SPREADSHEET);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && Array.isArray(parsed.worksheets)) return parsed;
+      }
+    } catch {
+      // empty on fresh visit
+    }
+    return { ...EMPTY_SPREADSHEET_DATA, worksheets: [] };
+  },
+
+  saveSpreadsheet: (data: SpreadsheetData) => {
+    writeRaw(BASE_KEYS.SPREADSHEET, JSON.stringify(data));
+  },
+
+  loadSpreadsheetData: (): SpreadsheetData => storage.loadSpreadsheet(),
+  saveSpreadsheetData: (data: SpreadsheetData) => storage.saveSpreadsheet(data),
+
+  // Workflow Session & Saved Mapping Templates
+  loadWorkflowSession: (): WorkflowSessionState | null => {
+    try {
+      const saved = readRaw(BASE_KEYS.WORKFLOW_SESSION);
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
     }
   },
 
-  loadEmailConfig(): EmailConfig {
-    try {
-      const data = safeGetItem(STORAGE_KEYS.EMAIL_CONFIG);
-      if (data) {
-        const parsed = JSON.parse(data);
-        return {
-          ...EmailService.getDefaultConfig(),
-          ...parsed,
-        };
-      }
-    } catch (e) {
-      console.warn('Failed to load email config from storage:', e);
-    }
-    return EmailService.getDefaultConfig();
+  saveWorkflowSession: (session: WorkflowSessionState) => {
+    writeRaw(BASE_KEYS.WORKFLOW_SESSION, JSON.stringify(session));
   },
 
-  saveEmailConfig(config: EmailConfig): boolean {
+  clearWorkflowSession: () => {
+    removeRaw(BASE_KEYS.WORKFLOW_SESSION);
+  },
+
+  loadSavedTemplates: (): Array<{ id: string; name: string; [key: string]: any }> => {
     try {
-      safeSetItem(STORAGE_KEYS.EMAIL_CONFIG, JSON.stringify(config));
-      return true;
-    } catch (e) {
-      console.error('Failed to save email config to storage:', e);
-      return false;
+      const saved = readRaw(BASE_KEYS.SAVED_MAPPING_TEMPLATES);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {
+      // empty
+    }
+    return [];
+  },
+
+  saveMappingTemplate: (templateItem: { id?: string; name: string; [key: string]: any }) => {
+    const existing = storage.loadSavedTemplates();
+    const item = {
+      ...templateItem,
+      id: templateItem.id || `tpl_${Date.now()}`,
+      updatedAt: new Date().toISOString(),
+    };
+    const next = [item, ...existing.filter((t) => t.id !== item.id)];
+    writeRaw(BASE_KEYS.SAVED_MAPPING_TEMPLATES, JSON.stringify(next));
+    return next;
+  },
+
+  // Customers
+  loadCustomers: (): CustomerRecord[] => {
+    try {
+      const saved = readRaw(BASE_KEYS.CUSTOMERS);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {
+      // empty on fresh visit
+    }
+    return [];
+  },
+
+  saveCustomers: (customers: CustomerRecord[]) => {
+    writeRaw(BASE_KEYS.CUSTOMERS, JSON.stringify(customers));
+  },
+
+  saveCustomer: (customer: CustomerRecord): CustomerRecord[] => {
+    const existing = storage.loadCustomers();
+    const idx = existing.findIndex((c) => c.id === customer.id);
+    const updated =
+      idx >= 0
+        ? existing.map((c, i) => (i === idx ? customer : c))
+        : [customer, ...existing];
+    storage.saveCustomers(updated);
+    return updated;
+  },
+
+  deleteCustomer: (id: string): CustomerRecord[] => {
+    const updated = storage.loadCustomers().filter((c) => c.id !== id);
+    storage.saveCustomers(updated);
+    return updated;
+  },
+
+  // Manual Drafts & Active Manual Form
+  loadManualDrafts: (): ManualInvoiceDraft[] => {
+    try {
+      const saved = readRaw(BASE_KEYS.MANUAL_DRAFTS);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {
+      // empty
+    }
+    return [];
+  },
+
+  saveManualDraft: (draft: ManualInvoiceDraft): ManualInvoiceDraft[] => {
+    const existing = storage.loadManualDrafts();
+    const idx = existing.findIndex((d) => d.id === draft.id);
+    const updated =
+      idx >= 0 ? existing.map((d, i) => (i === idx ? draft : d)) : [draft, ...existing];
+    writeRaw(BASE_KEYS.MANUAL_DRAFTS, JSON.stringify(updated));
+    return updated;
+  },
+
+  deleteManualDraft: (id: string): ManualInvoiceDraft[] => {
+    const updated = storage.loadManualDrafts().filter((d) => d.id !== id);
+    writeRaw(BASE_KEYS.MANUAL_DRAFTS, JSON.stringify(updated));
+    return updated;
+  },
+
+  loadActiveManualForm: (): any | null => {
+    try {
+      const saved = readRaw(BASE_KEYS.ACTIVE_MANUAL_FORM);
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
     }
   },
 
-  loadEmailStatuses(): Record<string, EmailSendStatus> {
+  saveActiveManualForm: (formData: any) => {
+    if (!formData) {
+      removeRaw(BASE_KEYS.ACTIVE_MANUAL_FORM);
+      return;
+    }
+    writeRaw(BASE_KEYS.ACTIVE_MANUAL_FORM, JSON.stringify(formData));
+  },
+
+  // Quotations
+  loadQuotations: (): QuotationRecord[] => {
     try {
-      const data = safeGetItem(STORAGE_KEYS.EMAIL_STATUSES);
-      if (data) {
-        return JSON.parse(data);
+      const saved = readRaw(BASE_KEYS.QUOTATIONS);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
       }
-    } catch (e) {
-      console.warn('Failed to load email statuses from storage:', e);
+    } catch {
+      // empty on fresh visit
+    }
+    return [];
+  },
+
+  saveQuotations: (quotations: QuotationRecord[]) => {
+    writeRaw(BASE_KEYS.QUOTATIONS, JSON.stringify(quotations));
+  },
+
+  // Email Statuses, Delivery Logs & Non-Sensitive Template Preferences (NEVER SMTP passwords)
+  loadEmailStatuses: (): Record<string, any> => {
+    try {
+      const saved = readRaw(BASE_KEYS.EMAIL_STATUSES);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+    } catch {
+      // empty
     }
     return {};
   },
 
-  saveEmailStatuses(statuses: Record<string, EmailSendStatus>): boolean {
-    try {
-      safeSetItem(STORAGE_KEYS.EMAIL_STATUSES, JSON.stringify(statuses));
-      return true;
-    } catch (e) {
-      console.error('Failed to save email statuses to storage:', e);
-      return false;
-    }
+  saveEmailStatuses: (statuses: Record<string, any>) => {
+    writeRaw(BASE_KEYS.EMAIL_STATUSES, JSON.stringify(statuses));
   },
 
-  loadManualDrafts(): ManualInvoiceDraft[] {
+  loadEmailLogs: (): EmailDeliveryLogEntry[] => {
     try {
-      const data = safeGetItem(STORAGE_KEYS.MANUAL_DRAFTS);
-      if (data) {
-        const parsed = JSON.parse(data);
+      const saved = readRaw(BASE_KEYS.EMAIL_LOGS);
+      if (saved) {
+        const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) return parsed;
       }
-    } catch (e) {
-      console.warn('Failed to load manual drafts from storage:', e);
+    } catch {
+      // empty
     }
     return [];
   },
 
-  saveManualDraft(draft: ManualInvoiceDraft): boolean {
-    try {
-      const existing = this.loadManualDrafts();
-      const filtered = existing.filter(d => d.id !== draft.id);
-      safeSetItem(STORAGE_KEYS.MANUAL_DRAFTS, JSON.stringify([draft, ...filtered]));
-      return true;
-    } catch (e) {
-      console.error('Failed to save manual draft to storage:', e);
-      return false;
-    }
+  saveEmailLogs: (logs: EmailDeliveryLogEntry[]) => {
+    writeRaw(BASE_KEYS.EMAIL_LOGS, JSON.stringify(logs.slice(0, 500)));
   },
 
-  deleteManualDraft(id: string): boolean {
+  loadEmailConfig: (): {
+    senderName: string;
+    senderEmail: string;
+    replyTo: string;
+    defaultCc: string;
+    defaultBcc: string;
+    subjectTemplate: string;
+    bodyTemplate: string;
+  } => {
     try {
-      const existing = this.loadManualDrafts();
-      const filtered = existing.filter(d => d.id !== id);
-      safeSetItem(STORAGE_KEYS.MANUAL_DRAFTS, JSON.stringify(filtered));
-      return true;
-    } catch (e) {
-      console.error('Failed to delete manual draft from storage:', e);
-      return false;
-    }
-  },
-
-  loadActiveManualForm(): ManualInvoiceData | null {
-    try {
-      const data = safeGetItem(STORAGE_KEYS.MANUAL_WORKING);
-      if (data) {
-        return JSON.parse(data);
+      const saved = readRaw(BASE_KEYS.EMAIL_PREFS);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === 'object') {
+          // Strip any legacy sensitive keys if ever present
+          return {
+            senderName: String(parsed.senderName || ''),
+            senderEmail: String(parsed.senderEmail || ''),
+            replyTo: String(parsed.replyTo || ''),
+            defaultCc: String(parsed.defaultCc || ''),
+            defaultBcc: String(parsed.defaultBcc || ''),
+            subjectTemplate: String(
+              parsed.subjectTemplate || 'Invoice {invoice_number} from {company_name}'
+            ),
+            bodyTemplate: String(
+              parsed.bodyTemplate ||
+                'Dear {customer_name},\n\nPlease find attached Invoice {invoice_number} for {amount}.\n\nBest regards,\n{company_name}'
+            ),
+          };
+        }
       }
-    } catch (e) {
-      console.warn('Failed to load active manual form from storage:', e);
+    } catch {
+      // default
     }
-    return null;
+    return {
+      senderName: '',
+      senderEmail: '',
+      replyTo: '',
+      defaultCc: '',
+      defaultBcc: '',
+      subjectTemplate: 'Invoice {invoice_number} from {company_name}',
+      bodyTemplate:
+        'Dear {customer_name},\n\nPlease find attached Invoice {invoice_number} for {amount}.\n\nBest regards,\n{company_name}',
+    };
   },
 
-  saveActiveManualForm(data: ManualInvoiceData): boolean {
-    try {
-      safeSetItem(STORAGE_KEYS.MANUAL_WORKING, JSON.stringify(data));
-      return true;
-    } catch (e) {
-      console.error('Failed to save active manual form to storage:', e);
-      return false;
-    }
+  saveEmailConfig: (prefs: Record<string, any>) => {
+    // Strictly never store passwords or API keys in localStorage
+    const safePrefs = {
+      senderName: String(prefs?.senderName || ''),
+      senderEmail: String(prefs?.senderEmail || ''),
+      replyTo: String(prefs?.replyTo || ''),
+      defaultCc: String(prefs?.defaultCc || ''),
+      defaultBcc: String(prefs?.defaultBcc || ''),
+      subjectTemplate: String(prefs?.subjectTemplate || ''),
+      bodyTemplate: String(prefs?.bodyTemplate || ''),
+    };
+    writeRaw(BASE_KEYS.EMAIL_PREFS, JSON.stringify(safePrefs));
   },
-
-  clearActiveManualForm(): boolean {
-    try {
-      safeRemoveItem(STORAGE_KEYS.MANUAL_WORKING);
-      return true;
-    } catch (e) {
-      console.error('Failed to clear active manual form:', e);
-      return false;
-    }
-  },
-
-  loadCustomers(): CustomerRecord[] {
-    try {
-      const data = safeGetItem(STORAGE_KEYS.CUSTOMERS);
-      if (data) {
-        const parsed = JSON.parse(data);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch (e) {
-      console.warn('Failed to load customer directory from storage:', e);
-    }
-    return [];
-  },
-
-  saveCustomer(customer: CustomerRecord): boolean {
-    try {
-      const existing = this.loadCustomers();
-      const filtered = existing.filter(c => c.id !== customer.id);
-      safeSetItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify([customer, ...filtered]));
-      return true;
-    } catch (e) {
-      console.error('Failed to save customer to directory:', e);
-      return false;
-    }
-  },
-
-  saveCustomers(customers: CustomerRecord[]): boolean {
-    try {
-      safeSetItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(customers));
-      return true;
-    } catch (e) {
-      console.error('Failed to save customers to directory:', e);
-      return false;
-    }
-  },
-
-  deleteCustomer(id: string): boolean {
-    try {
-      const existing = this.loadCustomers();
-      const filtered = existing.filter(c => c.id !== id);
-      safeSetItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(filtered));
-      return true;
-    } catch (e) {
-      console.error('Failed to delete customer from directory:', e);
-      return false;
-    }
-  },
-
-  loadQuotations(): QuotationRecord[] {
-    try {
-      const data = safeGetItem(STORAGE_KEYS.QUOTATIONS);
-      if (data) {
-        const parsed = JSON.parse(data);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch (e) {
-      console.warn('Failed to load quotations from storage:', e);
-    }
-    return [];
-  },
-
-  saveQuotations(quotations: QuotationRecord[]): boolean {
-    try {
-      safeSetItem(STORAGE_KEYS.QUOTATIONS, JSON.stringify(quotations));
-      return true;
-    } catch (e) {
-      console.error('Failed to save quotations to storage:', e);
-      return false;
-    }
-  },
-
-  loadEmailLogs(): EmailDeliveryLogEntry[] {
-    try {
-      const data = safeGetItem(STORAGE_KEYS.EMAIL_LOGS);
-      if (data) {
-        const parsed = JSON.parse(data);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch (e) {
-      console.warn('Failed to load email logs from storage:', e);
-    }
-    return [];
-  },
-
-  saveEmailLogs(logs: EmailDeliveryLogEntry[]): boolean {
-    try {
-      safeSetItem(STORAGE_KEYS.EMAIL_LOGS, JSON.stringify(logs));
-      return true;
-    } catch (e) {
-      console.error('Failed to save email logs to storage:', e);
-      return false;
-    }
-  }
 };

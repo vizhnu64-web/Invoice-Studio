@@ -3,61 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SpreadsheetData } from '../types';
-import { deduplicateHeaders } from './calculator';
+import { IntegrationDiagnostics, SpreadsheetData } from '../types';
+import { getActiveWorkspaceId, getTempSessionId } from './storage';
 
-export type SyncStatusState =
-  | 'Not Connected'
-  | 'Connecting Google Account'
-  | 'Authorizing'
-  | 'Fetching Spreadsheet'
-  | 'Reading Sheet Data'
-  | 'Processing Records'
-  | 'Saving Records'
-  | 'Updating Data Table'
-  | 'Sync Successful'
-  | 'Sync Successful — No Changes'
-  | 'Sync Failed';
-
-export type GoogleOAuthFeature = 'signin' | 'drive' | 'sheets' | 'gmail';
-
-export interface GoogleAccountUser {
-  userId?: string;
-  email: string;
-  name: string | null;
-  picture: string | null;
-  createdAt?: string;
-  lastLoginAt?: string;
-  onboardingCompleted?: boolean;
-  driveConnected?: boolean;
-  sheetsConnected?: boolean;
-  gmailConnected?: boolean;
-  smtpConfigured?: boolean;
-  driveRootFolderId?: string | null;
-  driveLastSyncAt?: string | null;
-  driveSyncStatus?: string | null;
-}
-
-export interface IntegrationDiagnostics {
-  googleOAuthConfigured: boolean;
-  encryptionConfigured: boolean;
-  sessionConfigured: boolean;
-  storageProvider?: 'google-drive';
-  redirectUri: string;
-  missingEnvVars: string[];
-  readyForGoogleSync: boolean;
-}
-
-export interface AuthStatusResponse {
-  authenticated: boolean;
-  user: GoogleAccountUser | null;
-  scopes: string[];
-  hasRefreshToken?: boolean;
-  connectedAt?: string;
-  diagnostics: IntegrationDiagnostics;
-}
-
-export interface SheetMetadataItem {
+export interface GoogleSheetMetadataTab {
   sheetId: number;
   title: string;
   index: number;
@@ -65,13 +14,28 @@ export interface SheetMetadataItem {
   columnCount: number;
 }
 
-export interface SheetMetadata {
+export interface GoogleSpreadsheetMetadata {
   spreadsheetId: string;
-  title: string;
-  sheets: SheetMetadataItem[];
+  spreadsheetTitle: string;
+  spreadsheetUrl: string;
+  accessMode: 'service-account' | 'public-readonly';
+  sheets: GoogleSheetMetadataTab[];
 }
 
-export interface SyncStats {
+export interface GoogleSheetValuesResponse {
+  spreadsheetId: string;
+  spreadsheetTitle: string;
+  sheetTitle: string;
+  rangeUsed: string;
+  accessMode: 'service-account' | 'public-readonly';
+  headers: string[];
+  rows: Record<string, any>[];
+  headerRowIndex: number;
+  rawRowCount: number;
+  skippedEmptyRows: number;
+}
+
+export interface GoogleSheetSyncStats {
   rowsRetrieved: number;
   validRowsCount: number;
   createdCount: number;
@@ -81,138 +45,237 @@ export interface SyncStats {
   deletedCount: number;
 }
 
-export interface SyncHistoryItem {
-  id: string;
+export interface GoogleSheetSyncResponse {
   spreadsheetId: string;
   spreadsheetTitle: string;
-  sheetName: string;
-  status: 'synced' | 'no_changes' | 'failed';
-  rowsRetrieved: number;
-  createdCount: number;
-  updatedCount: number;
-  unchangedCount: number;
-  skippedCount: number;
-  errorMessage: string | null;
-  createdAt: string;
-}
-
-export interface SyncResultPayload {
-  status?: 'synced' | 'no_changes';
-  lastSyncStatus?: 'synced' | 'no_changes';
-  spreadsheetId: string;
   spreadsheetUrl: string;
-  title: string;
-  selectedSheetName: string;
-  selectedRange: string;
-  headerRowIndex: number;
-  sheetsMeta: SheetMetadataItem[];
+  accessMode: 'service-account' | 'public-readonly';
+  persistedInDrive: boolean;
+  lastSyncedAt: string;
+  availableSheets: GoogleSheetMetadataTab[];
   worksheets: Array<{
     name: string;
     headers: string[];
     rows: Record<string, any>[];
-    headerRowIndex?: number;
-    rangeUsed?: string;
+    headerRowIndex: number;
+    rangeUsed: string;
   }>;
-  totalRows: number;
-  lastSyncAt: string;
-  stats?: SyncStats;
-  lastSyncStats?: SyncStats;
+  stats: GoogleSheetSyncStats;
 }
 
-export interface PersistedSheetsResponse {
-  spreadsheet: SyncResultPayload | null;
-  history: SyncHistoryItem[];
+export interface GoogleSheetSyncHistoryItem {
+  id: string;
+  spreadsheetId: string;
+  spreadsheetTitle: string;
+  worksheetName: string;
+  status: 'success' | 'failed';
+  rowsRetrieved: number;
+  validRowsCount: number;
+  createdCount: number;
+  updatedCount: number;
+  unchangedCount: number;
+  skippedCount: number;
+  errorMessage?: string;
+  syncedAt: string;
 }
 
-declare global {
-  interface Window {
-    google?: {
-      accounts?: {
-        oauth2?: {
-          initCodeClient: (config: {
-            client_id: string;
-            scope: string;
-            ux_mode?: 'popup' | 'redirect';
-            state?: string;
-            select_account?: boolean;
-            redirect_uri?: string;
-            callback: (response: {
-              code?: string;
-              scope?: string;
-              state?: string;
-              error?: string;
-              error_description?: string;
-            }) => void;
-            error_callback?: (err: { type?: string; message?: string }) => void;
-          }) => {
-            requestCode: () => void;
-          };
-        };
-      };
-    };
+export class SheetsApiError extends Error {
+  status: number;
+  code: string;
+  details?: Record<string, any>;
+
+  constructor(status: number, code: string, message: string, details?: Record<string, any>) {
+    super(message);
+    this.name = 'SheetsApiError';
+    this.status = status;
+    this.code = code;
+    this.details = details;
   }
+}
+
+export function extractGoogleSheetId(urlOrId: string): string | null {
+  const clean = (urlOrId || '').trim();
+  if (!clean) return null;
+  const match = clean.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  if (match?.[1]) return match[1];
+  if (/^[a-zA-Z0-9-_]{20,100}$/.test(clean)) return clean;
+  return null;
+}
+
+export function extractDriveFolderId(urlOrId: string): string | null {
+  const clean = (urlOrId || '').trim();
+  if (!clean) return null;
+  const matchFolder = clean.match(/\/folders\/([a-zA-Z0-9_-]{10,120})/);
+  if (matchFolder?.[1]) return matchFolder[1];
+  const matchParam = clean.match(/[?&]id=([a-zA-Z0-9_-]{10,120})/);
+  if (matchParam?.[1]) return matchParam[1];
+  if (/^[a-zA-Z0-9_-]{15,120}$/.test(clean)) return clean;
+  return null;
+}
+
+function buildWorkspaceHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'x-workspace-session-id': getTempSessionId(),
+  };
+  const folderId = getActiveWorkspaceId();
+  if (folderId) {
+    headers['x-workspace-folder-id'] = folderId;
+  }
+  return headers;
+}
+
+async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      ...buildWorkspaceHeaders(),
+      ...(init?.headers || {}),
+    },
+  });
+
+  const text = await response.text();
+  let parsed: any = {};
+  try {
+    parsed = text ? JSON.parse(text) : {};
+  } catch {
+    throw new SheetsApiError(
+      response.status,
+      'INVALID_SERVER_RESPONSE',
+      `Unexpected response from server (${response.status}).`
+    );
+  }
+
+  if (!response.ok) {
+    throw new SheetsApiError(
+      response.status,
+      parsed.code || 'API_ERROR',
+      parsed.error || `Request failed with status ${response.status}`,
+      parsed.details
+    );
+  }
+
+  return parsed as T;
+}
+
+export async function fetchServerDiagnostics(): Promise<IntegrationDiagnostics> {
+  const res = await apiJson<{ status: string; diagnostics: IntegrationDiagnostics }>('/api/health');
+  return res.diagnostics;
+}
+
+export async function validateGoogleSpreadsheet(
+  urlOrId: string
+): Promise<GoogleSpreadsheetMetadata> {
+  return apiJson<GoogleSpreadsheetMetadata>('/api/sheets/metadata', {
+    method: 'POST',
+    body: JSON.stringify({ url: urlOrId }),
+  });
+}
+
+export async function fetchGoogleSheetWorksheetValues(params: {
+  urlOrId: string;
+  sheetTitle: string;
+  range?: string;
+  headerRowIndex?: number | 'auto';
+}): Promise<GoogleSheetValuesResponse> {
+  return apiJson<GoogleSheetValuesResponse>('/api/sheets/values', {
+    method: 'POST',
+    body: JSON.stringify({
+      url: params.urlOrId,
+      sheetTitle: params.sheetTitle,
+      range: params.range || undefined,
+      headerRowIndex: params.headerRowIndex ?? 'auto',
+    }),
+  });
+}
+
+export async function syncGoogleSpreadsheet(params: {
+  urlOrId: string;
+  selectedSheets?: string[];
+  syncAllSheets?: boolean;
+  range?: string;
+  headerRowIndex?: number | 'auto';
+}): Promise<GoogleSheetSyncResponse> {
+  return apiJson<GoogleSheetSyncResponse>('/api/sheets/sync', {
+    method: 'POST',
+    body: JSON.stringify({
+      url: params.urlOrId,
+      selectedSheets: params.selectedSheets,
+      syncAllSheets: Boolean(params.syncAllSheets),
+      range: params.range || undefined,
+      headerRowIndex: params.headerRowIndex ?? 'auto',
+    }),
+  });
+}
+
+export async function fetchPersistedGoogleSheets(): Promise<{
+  activeSpreadsheet: {
+    spreadsheetId: string;
+    spreadsheetTitle: string;
+    spreadsheetUrl: string;
+    lastSyncedAt: string;
+    worksheets: Array<{
+      name: string;
+      headers: string[];
+      rows: Record<string, any>[];
+      headerRowIndex: number;
+      rangeUsed: string;
+    }>;
+  } | null;
+  syncHistory: GoogleSheetSyncHistoryItem[];
+}> {
+  return apiJson('/api/sheets/data');
 }
 
 export function extractSpreadsheetId(urlOrId: string): string {
-  const clean = (urlOrId || '').trim();
-  if (!clean) throw new Error('Spreadsheet URL or ID cannot be blank.');
-
-  const match = clean.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
-  if (match && match[1]) {
-    return match[1];
+  const id = extractGoogleSheetId(urlOrId);
+  if (!id) {
+    throw new Error('Invalid Google Sheets URL or ID. Please paste a valid Google Sheets link.');
   }
-
-  if (/^[a-zA-Z0-9-_]{20,100}$/.test(clean)) {
-    return clean;
-  }
-
-  throw new Error(
-    'Invalid Google Sheets URL or ID. Please paste a valid spreadsheet link (e.g. https://docs.google.com/spreadsheets/d/...)'
-  );
+  return id;
 }
 
-/**
- * Pure value parser kept exported for deterministic parsing & unit tests.
- */
 export function parseValuesToSpreadsheetData(
   title: string,
-  sheetsMeta: { title: string }[],
+  sheets: Array<{ title: string }>,
   sheetValuesMap: Record<string, any[][]>
 ): SpreadsheetData {
-  const worksheets = sheetsMeta.map((sheet) => {
-    const rawValues = sheetValuesMap[sheet.title] || [];
-    if (rawValues.length === 0) {
+  const worksheets = sheets.map((sheet) => {
+    const rawRows = sheetValuesMap[sheet.title] || [];
+    if (rawRows.length === 0) {
       return { name: sheet.title, headers: [], rows: [] };
     }
 
-    const rawHeaders = (rawValues[0] || []).map((h: any) => String(h || '').trim());
-    const validHeaders = rawHeaders.filter(Boolean);
-    const headers = deduplicateHeaders(validHeaders);
+    const headerRowIndex = rawRows.findIndex((row) =>
+      Array.isArray(row) && row.some((cell) => String(cell ?? '').trim() !== '')
+    );
 
-    if (headers.length === 0 || rawValues.length <= 1) {
+    if (headerRowIndex === -1) {
       return { name: sheet.title, headers: [], rows: [] };
     }
+
+    const rawHeaders = rawRows[headerRowIndex] || [];
+    const seen = new Map<string, number>();
+    const headers = rawHeaders.map((h, idx) => {
+      const base = String(h ?? '').trim() || `Col_${idx + 1}`;
+      const count = seen.get(base) || 0;
+      seen.set(base, count + 1);
+      return count === 0 ? base : `${base} (${count + 1})`;
+    });
 
     const rows: Record<string, any>[] = [];
-    for (let r = 1; r < rawValues.length; r++) {
-      const rowVals = rawValues[r] || [];
+    for (let i = headerRowIndex + 1; i < rawRows.length; i++) {
+      const cells = rawRows[i];
+      if (!Array.isArray(cells)) continue;
+      const hasValue = cells.some((c) => String(c ?? '').trim() !== '');
+      if (!hasValue) continue;
+
       const rowObj: Record<string, any> = {};
-      let hasData = false;
-
-      headers.forEach((header, hIdx) => {
-        const originalIdx = rawHeaders.indexOf(header);
-        const val = originalIdx >= 0 ? rowVals[originalIdx] : rowVals[hIdx];
-        if (val !== undefined && val !== null && String(val).trim() !== '') {
-          hasData = true;
-          rowObj[header] = val;
-        } else {
-          rowObj[header] = '';
-        }
+      headers.forEach((header, idx) => {
+        const val = cells[idx];
+        rowObj[header] = val === undefined || val === null ? '' : String(val);
       });
-
-      if (hasData) {
-        rows.push(rowObj);
-      }
+      rows.push(rowObj);
     }
 
     return {
@@ -222,267 +285,25 @@ export function parseValuesToSpreadsheetData(
     };
   });
 
-  const activeSheet =
-    worksheets.find((w) => w.rows.length > 0)?.name || worksheets[0]?.name || 'Sheet1';
-
+  const cleanTitle = (title || 'Google Sheet').trim();
+  const fileName = cleanTitle.endsWith('.gsheet') ? cleanTitle : `${cleanTitle}.gsheet`;
   return {
-    fileName: `${title}.gsheet`,
+    fileName,
+    activeSheetName: worksheets[0]?.name || '',
     worksheets,
-    activeSheetName: activeSheet,
   };
 }
 
-export function syncedPayloadToSpreadsheetData(payload: SyncResultPayload): SpreadsheetData {
-  const worksheets = (payload.worksheets || []).map((ws) => ({
-    name: ws.name,
-    headers: Array.isArray(ws.headers) ? ws.headers : [],
-    rows: Array.isArray(ws.rows) ? ws.rows : [],
-  }));
-
-  const activeSheetName =
-    worksheets.find((w) => w.name === payload.selectedSheetName && w.rows.length > 0)?.name ||
-    worksheets.find((w) => w.rows.length > 0)?.name ||
-    worksheets[0]?.name ||
-    '';
-
+export function buildSpreadsheetDataFromSync(syncResult: GoogleSheetSyncResponse): SpreadsheetData {
+  const firstSheet = syncResult.worksheets[0]?.name || '';
   return {
-    fileName: `${payload.title || 'Google Sheet'}.gsheet`,
-    worksheets,
-    activeSheetName,
+    fileName: `${syncResult.spreadsheetTitle} (Google Sheets)`,
+    activeSheetName: firstSheet,
+    worksheets: syncResult.worksheets.map((ws) => ({
+      name: ws.name,
+      headers: ws.headers,
+      rows: ws.rows,
+    })),
   };
 }
 
-async function parseJsonApiResponse<T>(res: Response): Promise<T> {
-  const text = await res.text();
-  let parsed: any = {};
-  try {
-    parsed = text ? JSON.parse(text) : {};
-  } catch {
-    throw new Error(`Unexpected server response (HTTP ${res.status}).`);
-  }
-  if (!res.ok) {
-    const err: any = new Error(parsed.error || `Request failed with HTTP ${res.status}.`);
-    err.code = parsed.code;
-    err.requiresReauth = Boolean(parsed.requiresReauth);
-    err.status = res.status;
-    throw err;
-  }
-  return parsed as T;
-}
-
-export async function fetchAuthStatus(): Promise<AuthStatusResponse> {
-  const res = await fetch('/api/auth/status', {
-    method: 'GET',
-    credentials: 'include',
-    cache: 'no-store',
-  });
-  return parseJsonApiResponse<AuthStatusResponse>(res);
-}
-
-async function ensureGisScriptLoaded(timeoutMs: number = 6000): Promise<boolean> {
-  if (typeof window === 'undefined') return false;
-  if (window.google?.accounts?.oauth2?.initCodeClient) return true;
-
-  const existing = document.querySelector<HTMLScriptElement>(
-    'script[src*="accounts.google.com/gsi/client"]'
-  );
-  if (!existing) {
-    const script = document.createElement('script');
-    script.src = 'https://accounts.google.com/gsi/client';
-    script.async = true;
-    script.defer = true;
-    document.head.appendChild(script);
-  }
-
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (window.google?.accounts?.oauth2?.initCodeClient) return true;
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  return Boolean(window.google?.accounts?.oauth2?.initCodeClient);
-}
-
-export async function connectGoogleFeature(
-  feature: GoogleOAuthFeature = 'signin',
-  options?: {
-    onPhaseChange?: (phase: SyncStatusState) => void;
-    preferRedirect?: boolean;
-    returnTo?: string;
-  }
-): Promise<{
-  authenticated: boolean;
-  user: GoogleAccountUser;
-  scopes: string[];
-}> {
-  options?.onPhaseChange?.('Connecting Google Account');
-
-  const query = new URLSearchParams({ feature });
-  if (options?.returnTo) query.set('returnTo', options.returnTo);
-
-  const startRes = await fetch(`/api/auth/google/start?${query.toString()}`, {
-    method: 'GET',
-    credentials: 'include',
-    cache: 'no-store',
-  });
-  const startData = await parseJsonApiResponse<{
-    authUrl: string;
-    state: string;
-    clientId: string;
-    scopes: string[];
-  }>(startRes);
-
-  const clientId = (import.meta.env.VITE_GOOGLE_CLIENT_ID || startData.clientId || '').trim();
-  if (!clientId) {
-    throw new Error(
-      'Google OAuth Client ID is not configured (VITE_GOOGLE_CLIENT_ID / GOOGLE_CLIENT_ID).'
-    );
-  }
-
-  if (options?.preferRedirect) {
-    options?.onPhaseChange?.('Authorizing');
-    window.location.assign(startData.authUrl);
-    return new Promise(() => {});
-  }
-
-  const gisLoaded = await ensureGisScriptLoaded();
-  if (!gisLoaded || !window.google?.accounts?.oauth2?.initCodeClient) {
-    options?.onPhaseChange?.('Authorizing');
-    window.location.assign(startData.authUrl);
-    return new Promise(() => {});
-  }
-
-  options?.onPhaseChange?.('Authorizing');
-
-  return new Promise((resolve, reject) => {
-    try {
-      const codeClient = window.google!.accounts!.oauth2!.initCodeClient({
-        client_id: clientId,
-        scope: startData.scopes.join(' '),
-        ux_mode: 'popup',
-        state: startData.state,
-        select_account: feature === 'signin',
-        callback: async (response) => {
-          if (response.error || !response.code) {
-            reject(
-              new Error(
-                response.error_description ||
-                  (response.error === 'access_denied'
-                    ? 'Google authorization was cancelled or denied.'
-                    : `Google authorization failed (${response.error || 'no_code'}).`)
-              )
-            );
-            return;
-          }
-
-          try {
-            const exchangeRes = await fetch('/api/auth/google/callback', {
-              method: 'POST',
-              credentials: 'include',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                code: response.code,
-                state: response.state || startData.state,
-                redirectUri: 'postmessage',
-                feature,
-              }),
-            });
-
-            const exchanged = await parseJsonApiResponse<{
-              authenticated: boolean;
-              user: GoogleAccountUser;
-              scopes: string[];
-            }>(exchangeRes);
-
-            resolve(exchanged);
-          } catch (err) {
-            reject(err);
-          }
-        },
-        error_callback: (err) => {
-          const type = err?.type || 'popup_error';
-          if (type === 'popup_closed') {
-            reject(new Error('Google sign-in popup was closed before completing authorization.'));
-          } else if (type === 'popup_failed_to_open') {
-            reject(
-              new Error(
-                'Popup blocked by browser. Allow popups or use Standard Redirect Sign-In.'
-              )
-            );
-          } else {
-            reject(new Error(err?.message || 'Google Identity Services authorization failed.'));
-          }
-        },
-      });
-
-      codeClient.requestCode();
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
-
-export async function connectGoogleAccount(options?: {
-  onPhaseChange?: (phase: SyncStatusState) => void;
-  preferRedirect?: boolean;
-}): Promise<{
-  authenticated: boolean;
-  user: GoogleAccountUser;
-  scopes: string[];
-}> {
-  return connectGoogleFeature('sheets', options);
-}
-
-export async function disconnectGoogleFeature(
-  feature: 'all' | 'drive' | 'sheets' | 'gmail' = 'all'
-): Promise<{ disconnected: boolean; feature: string; signedOut: boolean }> {
-  const res = await fetch('/api/auth/disconnect', {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ feature }),
-  });
-  return parseJsonApiResponse<{ disconnected: boolean; feature: string; signedOut: boolean }>(res);
-}
-
-export async function disconnectGoogleAccount(): Promise<void> {
-  await disconnectGoogleFeature('all');
-}
-
-export async function validateGoogleSpreadsheet(spreadsheetUrl: string): Promise<SheetMetadata> {
-  extractSpreadsheetId(spreadsheetUrl);
-  const res = await fetch(
-    `/api/sheets/metadata?spreadsheetUrl=${encodeURIComponent(spreadsheetUrl.trim())}`,
-    {
-      method: 'GET',
-      credentials: 'include',
-      cache: 'no-store',
-    }
-  );
-  return parseJsonApiResponse<SheetMetadata>(res);
-}
-
-export async function syncGoogleSpreadsheet(params: {
-  spreadsheetUrl: string;
-  sheetName?: string;
-  range?: string;
-  headerRowIndex?: number | 'auto';
-  syncAllSheets?: boolean;
-}): Promise<SyncResultPayload> {
-  extractSpreadsheetId(params.spreadsheetUrl);
-  const res = await fetch('/api/sheets/sync', {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
-  return parseJsonApiResponse<SyncResultPayload>(res);
-}
-
-export async function fetchPersistedGoogleSheets(): Promise<PersistedSheetsResponse> {
-  const res = await fetch('/api/sheets/data', {
-    method: 'GET',
-    credentials: 'include',
-    cache: 'no-store',
-  });
-  return parseJsonApiResponse<PersistedSheetsResponse>(res);
-}

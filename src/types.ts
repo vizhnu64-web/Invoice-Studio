@@ -273,6 +273,7 @@ export interface GenerationRecord {
   sourceName: string;
   worksheetName: string;
   generatedDate: string;
+  updatedAt?: string;
   totalAmount: number;
   gstAmount: number;
   templateId: string;
@@ -291,7 +292,6 @@ export interface GenerationRecord {
   sourceQuotationNumber?: string;
   driveFileId?: string;
   pdfDriveFileId?: string;
-  updatedAt?: string;
 }
 
 export interface CustomerRecord {
@@ -387,6 +387,8 @@ export interface ManualInvoiceData {
   deliveryInstructions: string;
   additionalRemarks: string;
   customFooterText: string;
+
+  // Optional conversion link
   sourceQuotationId?: string;
   sourceQuotationNumber?: string;
 }
@@ -427,12 +429,12 @@ export interface SpreadsheetData {
   activeSheetName: string;
 }
 
-export type GuidedWorkflowStep = 
-  | 'source' 
-  | 'mapping' 
-  | 'amount_calc' 
-  | 'gst_calc' 
-  | 'review' 
+export type GuidedWorkflowStep =
+  | 'source'
+  | 'mapping'
+  | 'amount_calc'
+  | 'gst_calc'
+  | 'review'
   | 'finalize';
 
 export type CalculationMethod = 'excel_column' | 'automatic' | 'fixed' | 'manual' | 'formula';
@@ -441,7 +443,7 @@ export interface FieldCalculationConfig {
   method: CalculationMethod;
   sourceColumn?: string;
   fixedValue?: number;
-  formula?: string; // e.g. "Quantity * Unit_Price"
+  formula?: string;
 }
 
 export interface AdvancedAmountCalculationSettings {
@@ -460,7 +462,7 @@ export interface GstConfigurationSettings {
   enabled: boolean;
   pricingType: 'inclusive' | 'exclusive';
   rateSource: 'fixed' | 'column';
-  fixedRate: number; // e.g. 18
+  fixedRate: number;
   rateColumn?: string;
   taxType: 'AUTO' | 'CGST_SGST' | 'IGST';
 }
@@ -478,13 +480,17 @@ export interface WorkflowSessionState {
   updatedAt: string;
 }
 
+// ============================================================
+// QUOTATION GENERATOR & LIFECYCLE
+// ============================================================
+
 export type QuotationStatus =
   | 'Draft'
   | 'Pending Approval'
   | 'Approved'
   | 'Not Approved'
-  | 'Expired'
-  | 'Converted to Invoice';
+  | 'Converted to Invoice'
+  | 'Expired';
 
 export interface QuotationApprovalHistoryEntry {
   id: string;
@@ -575,53 +581,69 @@ export interface QuotationRecord {
   updatedAt: string;
 }
 
-export type EmailDeliveryMethod = 'gmail' | 'smtp';
+// ============================================================
+// GOOGLE DRIVE WORKSPACE CONNECTION & DIAGNOSTICS (NO SIGN-IN)
+// ============================================================
+
+export interface DriveWorkspaceConnection {
+  folderUrl: string;
+  folderId: string;
+  folderName: string;
+  rootFolderId?: string;
+  isConnected: boolean;
+  lastSyncedAt?: string;
+  connectedAt?: string;
+  serviceAccountEmail?: string | null;
+}
+
+export interface IntegrationDiagnostics {
+  serviceAccountConfigured: boolean;
+  serviceAccountEmail: string | null;
+  projectId: string | null;
+  smtpEncryptionConfigured: boolean;
+  missingEnvVars: string[];
+  readyForGoogleDrive: boolean;
+  readyForGoogleSheets: boolean;
+  storageProvider: 'google-drive-service-account';
+}
+
+// ============================================================
+// EMAIL INTEGRATION — GMAIL SMTP & CUSTOM SMTP (NO SIGN-IN)
+// ============================================================
+
+export type EmailDeliveryMethod = 'gmail_smtp' | 'custom_smtp';
 
 export interface BackendSmtpConfig {
   configured: boolean;
+  persistedInDrive: boolean;
+  provider: EmailDeliveryMethod;
   host: string;
   port: number;
-  securityMode: 'SSL' | 'STARTTLS' | 'NONE';
+  encryption: 'SSL' | 'STARTTLS' | 'NONE';
   username: string;
-  hasPassword: boolean;
   senderName: string;
   senderEmail: string;
-  verifiedAt?: string | null;
+  replyTo?: string;
+  hasPassword: boolean;
+  updatedAt?: string;
+  lastVerifiedAt?: string;
 }
 
 export interface EmailDeliveryLogEntry {
   id: string;
-  userId?: string;
-  documentType: 'invoice' | 'quotation';
-  documentId: string;
+  documentType: 'invoice' | 'quotation' | 'test';
   documentNumber: string;
+  customerName: string;
   recipientEmail: string;
   cc?: string;
   bcc?: string;
-  deliveryMethod: EmailDeliveryMethod;
-  senderEmail: string;
   subject: string;
-  status: 'sent' | 'failed';
-  providerMessageId?: string | null;
-  errorMessage?: string | null;
-  createdAt: string;
+  deliveryMethod: EmailDeliveryMethod;
+  status: 'Sent' | 'Failed';
+  messageId?: string;
+  errorMessage?: string;
+  sentAt: string;
 }
 
-export interface AuthenticatedUserProfile {
-  userId: string;
-  email: string;
-  name: string | null;
-  picture: string | null;
-  createdAt: string;
-  lastLoginAt: string;
-  onboardingCompleted: boolean;
-  driveConnected: boolean;
-  sheetsConnected: boolean;
-  gmailConnected: boolean;
-  smtpConfigured: boolean;
-  driveRootFolderId?: string | null;
-  driveLastSyncAt?: string | null;
-  driveSyncStatus?: string | null;
-}
 
 

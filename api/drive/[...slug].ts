@@ -5,9 +5,11 @@
 
 import {
   handleDriveBackup,
+  handleDriveConnect,
   handleDriveRestore,
   handleDriveStatus,
   handleDriveSync,
+  handleDriveTest,
   handleDriveUploadPdf,
 } from '../_lib/handlers.js';
 import { NormalizedRequest, NormalizedResponse, sendJson } from '../_lib/http.js';
@@ -22,6 +24,8 @@ function extractDrivePath(req: NormalizedRequest): string {
 
 export default async function handler(req: NormalizedRequest, res: NormalizedResponse) {
   const route = extractDrivePath(req);
+  if (route === 'connect') return handleDriveConnect(req, res);
+  if (route === 'test') return handleDriveTest(req, res);
   if (route === 'status') return handleDriveStatus(req, res);
   if (route === 'sync') return handleDriveSync(req, res);
   if (route === 'upload-pdf') return handleDriveUploadPdf(req, res);

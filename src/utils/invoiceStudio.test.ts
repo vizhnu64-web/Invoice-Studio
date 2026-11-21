@@ -84,18 +84,20 @@ describe('Invoice Studio - Automated Logic & PDF Generation Test Suite', () => {
     assert.strictEqual(summary.balanceDue, 47200);
   });
 
-  test('5. Default Mock Datasets & Mapping Profiles', () => {
-    assert.strictEqual(sampleSpreadsheetData.worksheets.length, 5);
-    assert.strictEqual(defaultMappingProfiles.length, 5);
+  test('5. Fresh Visitor Clean Defaults (Zero Preloaded Demo Data)', () => {
+    assert.strictEqual(sampleSpreadsheetData.worksheets.length, 0);
+    assert.strictEqual(defaultMappingProfiles.length, 0);
     assert.strictEqual(defaultFieldCatalog.length > 10, true);
-    assert.strictEqual(defaultCompanySettings.legalName, 'TBT VENTURES PRIVATE LIMITED');
+    assert.strictEqual(defaultCompanySettings.legalName, '');
+    assert.strictEqual(defaultCompanySettings.gstin, '');
+    assert.strictEqual(defaultCompanySettings.bankAccounts.length, 0);
   });
 
   test('6. PDF Generation Engine Execution with Standard Settings', () => {
     const item = calculateItemTotals({
       serialNumber: 1,
-      itemName: 'Test Mentorship',
-      itemDescription: 'Full 90 Days Mentorship Program',
+      itemName: 'Advisory Retainer Service',
+      itemDescription: 'Quarterly Business Consulting',
       quantity: 1,
       rate: 10000,
       gstPercentage: 18,
@@ -103,18 +105,18 @@ describe('Invoice Studio - Automated Logic & PDF Generation Test Suite', () => {
     });
 
     const fields = {
-      company_legal_name: defaultCompanySettings.legalName,
-      company_address: 'Gurugram, Haryana',
-      company_gstin: defaultCompanySettings.gstin,
+      company_legal_name: 'Example Business Pvt Ltd',
+      company_address: 'Mumbai, Maharashtra',
+      company_gstin: '27AAAAA0000A1Z5',
       invoice_title: 'TAX INVOICE',
-      invoice_number: '2627/11/TBT/01',
+      invoice_number: 'INV-2026-001',
       invoice_date: '2026-11-01',
       due_date: '2026-11-15',
-      place_of_supply: 'Haryana (06)',
-      customer_name: 'Aarav Sharma',
-      customer_business: 'Sharma Enterprises',
-      customer_address: 'Gurgaon, Haryana',
-      customer_gstin: '06AABCS1234Q1ZU',
+      place_of_supply: 'Maharashtra (27)',
+      customer_name: 'Client Contact',
+      customer_business: 'Client Company Pvt Ltd',
+      customer_address: 'Pune, Maharashtra',
+      customer_gstin: '27BBBBB1111B1Z2',
       subject_description: 'Consulting Services',
       notes_content: 'Thank you for your business.',
       terms_content: 'Net 15 days payment terms.'
@@ -1082,22 +1084,24 @@ describe('Invoice Studio - Automated Logic & PDF Generation Test Suite', () => {
     assert.strictEqual(report.results[2].invoiceNumber, 'INV-103');
   });
 
-  test('31. Storage - Email Configuration & Status Persistence', async () => {
+  test('31. Storage - Email Preferences & Status Persistence (Never Stores Secrets)', async () => {
     const { storage } = await import('./storage');
 
-    // Save custom email configuration
+    // Save non-secret email preferences; any sensitive keys passed must be stripped
     storage.saveEmailConfig({
-      provider: 'mailgun',
-      mailgunDomain: 'custom.mybusiness.com',
-      apiKey: 'secret-key-xyz',
+      senderName: 'My Business Accounts',
       senderEmail: 'invoices@mybusiness.com',
-      senderDisplayName: 'My Business Accounts'
+      replyTo: 'support@mybusiness.com',
+      apiKey: 'secret-key-must-never-persist',
+      password: 'secret-password-must-never-persist',
     });
 
     const loadedConfig = storage.loadEmailConfig();
-    assert.strictEqual(loadedConfig.provider, 'mailgun');
-    assert.strictEqual(loadedConfig.mailgunDomain, 'custom.mybusiness.com');
+    assert.strictEqual(loadedConfig.senderName, 'My Business Accounts');
     assert.strictEqual(loadedConfig.senderEmail, 'invoices@mybusiness.com');
+    assert.strictEqual(loadedConfig.replyTo, 'support@mybusiness.com');
+    assert.strictEqual('apiKey' in loadedConfig, false);
+    assert.strictEqual('password' in loadedConfig, false);
 
     // Save and load email statuses
     storage.saveEmailStatuses({

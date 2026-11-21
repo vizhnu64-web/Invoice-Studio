@@ -251,7 +251,9 @@ export const GenerationCenter: React.FC<GenerationCenterProps> = ({
 
       newRecords.push({
         id: Math.random().toString(36).substr(2, 9),
-        invoiceNumber: rowFields['invoice_number'] || `2627/11/TBT/${i+1}`,
+        invoiceNumber:
+          rowFields['invoice_number'] ||
+          `INV-${new Date().getFullYear()}-${String(i + 1).padStart(3, '0')}`,
         customerName: rowFields['customer_name'] || 'Customer',
         sourceType: 'excel',
         sourceName: spreadsheetData.fileName,
@@ -260,7 +262,7 @@ export const GenerationCenter: React.FC<GenerationCenterProps> = ({
         totalAmount: summary.totalInvoiceAmount,
         gstAmount: summary.totalTax,
         templateId: template.id,
-        profileId: 'profile_tbt90days',
+        profileId: 'default',
         revisionNumber: isRegenerate ? 2 : 1,
         status: 'success',
         dataSnapshot: { rowFields, items },

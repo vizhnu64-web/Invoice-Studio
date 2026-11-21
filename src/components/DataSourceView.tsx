@@ -4,7 +4,11 @@
  */
 
 import React, { useMemo, useState } from 'react';
-import { SpreadsheetData } from '../types';
+import {
+  DriveWorkspaceConnection,
+  IntegrationDiagnostics,
+  SpreadsheetData,
+} from '../types';
 import {
   FileSpreadsheet,
   Upload,
@@ -23,6 +27,8 @@ import { GoogleSheetsConnectorCard } from './GoogleSheetsConnectorCard';
 interface DataSourceViewProps {
   spreadsheetData: SpreadsheetData;
   setSpreadsheetData: React.Dispatch<React.SetStateAction<SpreadsheetData>>;
+  diagnostics?: IntegrationDiagnostics | null;
+  driveConnection?: DriveWorkspaceConnection | null;
 }
 
 const PREVIEW_PAGE_SIZE = 50;
@@ -30,6 +36,8 @@ const PREVIEW_PAGE_SIZE = 50;
 export const DataSourceView: React.FC<DataSourceViewProps> = ({
   spreadsheetData,
   setSpreadsheetData,
+  diagnostics,
+  driveConnection,
 }) => {
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
@@ -38,7 +46,7 @@ export const DataSourceView: React.FC<DataSourceViewProps> = ({
 
   const handleClearData = () => {
     setSpreadsheetData({
-      fileName: 'No file uploaded',
+      fileName: '',
       worksheets: [],
       activeSheetName: '',
     });
@@ -55,16 +63,18 @@ export const DataSourceView: React.FC<DataSourceViewProps> = ({
     reader.onload = (evt) => {
       try {
         const bstr = evt.target?.result;
-        const workbook = XLSX.read(bstr, { type: 'binary' });
+        const workbook = XLSX.read(bstr, { type: 'binary', raw: false });
 
         const newWorksheets = workbook.SheetNames.map((sheetName) => {
           const worksheet = workbook.Sheets[sheetName];
-          const json = XLSX.utils.sheet_to_json<Record<string, any>>(worksheet, { header: 1 });
+          const json = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1, raw: false });
           if (json.length === 0) return { name: sheetName, headers: [], rows: [] };
 
-          const rawHeaders = (json[0] as string[]).filter(Boolean);
+          const rawHeaders = (json[0] as any[]).map((h) => String(h ?? '').trim()).filter(Boolean);
           const headers = deduplicateHeaders(rawHeaders);
-          const rawRows = XLSX.utils.sheet_to_json<Record<string, any>>(worksheet);
+          const rawRows = XLSX.utils
+            .sheet_to_json<Record<string, any>>(worksheet, { raw: false, defval: '' })
+            .filter((row) => Object.values(row).some((v) => String(v ?? '').trim() !== ''));
           return {
             name: sheetName,
             headers,
@@ -83,7 +93,7 @@ export const DataSourceView: React.FC<DataSourceViewProps> = ({
         setTimeout(() => setSuccessMessage(''), 4000);
       } catch (err) {
         console.error('Error parsing file:', err);
-        setErrorMessage('Failed to parse Excel file. Please ensure it is a valid XLSX, XLS or CSV file.');
+        setErrorMessage('Failed to parse file. Please ensure it is a valid XLSX, XLS or CSV file.');
         setTimeout(() => setErrorMessage(''), 5000);
       }
     };
@@ -110,7 +120,7 @@ export const DataSourceView: React.FC<DataSourceViewProps> = ({
     return filteredRows.slice(start, start + PREVIEW_PAGE_SIZE);
   }, [filteredRows, safePage]);
 
-  const isGoogleSource = spreadsheetData.fileName.toLowerCase().endsWith('.gsheet');
+  const isGoogleSource = spreadsheetData.fileName.toLowerCase().includes('google sheets');
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
@@ -118,10 +128,10 @@ export const DataSourceView: React.FC<DataSourceViewProps> = ({
       <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">
-            Data Source Connector (Excel & Google Sheets)
+            Data Source Connector (Excel / CSV & Google Sheets)
           </h1>
           <p className="text-sm text-slate-500">
-            Upload Excel workbooks or connect directly to Google Sheets with backend OAuth 2.0 authorization and persistent synchronization.
+            Upload Excel or CSV files, or paste a Google Sheets URL directly — no sign-in required.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -159,7 +169,7 @@ export const DataSourceView: React.FC<DataSourceViewProps> = ({
             </div>
             <div>
               <h2 className="text-lg font-bold text-slate-900">Excel / CSV Data Source</h2>
-              <p className="text-xs text-slate-500">Supports XLSX, XLS and CSV formats</p>
+              <p className="text-xs text-slate-500">Supports XLSX, XLS and CSV formats (preserves leading zeros)</p>
             </div>
           </div>
 
@@ -167,7 +177,7 @@ export const DataSourceView: React.FC<DataSourceViewProps> = ({
             <div className="w-12 h-12 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
               <Upload className="w-6 h-6" />
             </div>
-            <span className="text-sm font-semibold text-slate-800">Click to upload Excel file</span>
+            <span className="text-sm font-semibold text-slate-800">Click to upload Excel or CSV file</span>
             <span className="text-xs text-slate-400 mt-1">or drag and drop your workbook here</span>
             <input type="file" accept=".xlsx, .xls, .csv" onChange={handleFileUpload} className="hidden" />
           </label>
@@ -176,7 +186,7 @@ export const DataSourceView: React.FC<DataSourceViewProps> = ({
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-semibold text-slate-700">Current Source:</span>
               <span className="text-xs font-mono font-medium text-slate-900 bg-white px-2 py-1 rounded border border-slate-200 truncate max-w-[260px]">
-                {spreadsheetData.fileName}
+                {spreadsheetData.fileName || 'No file loaded'}
               </span>
             </div>
             <div className="flex items-center justify-between gap-2">
@@ -190,11 +200,15 @@ export const DataSourceView: React.FC<DataSourceViewProps> = ({
                 }}
                 className="bg-white border border-slate-300 text-slate-900 text-xs rounded-lg px-2.5 py-1 outline-none font-medium"
               >
-                {spreadsheetData.worksheets.map((ws) => (
-                  <option key={ws.name} value={ws.name}>
-                    {ws.name} ({ws.rows.length} rows)
-                  </option>
-                ))}
+                {spreadsheetData.worksheets.length === 0 ? (
+                  <option value="">No worksheets loaded</option>
+                ) : (
+                  spreadsheetData.worksheets.map((ws) => (
+                    <option key={ws.name} value={ws.name}>
+                      {ws.name} ({ws.rows.length} rows)
+                    </option>
+                  ))
+                )}
               </select>
             </div>
           </div>
@@ -207,6 +221,8 @@ export const DataSourceView: React.FC<DataSourceViewProps> = ({
             setPreviewPage(1);
             setSpreadsheetData(updater);
           }}
+          diagnostics={diagnostics}
+          driveConnection={driveConnection}
         />
       </div>
 

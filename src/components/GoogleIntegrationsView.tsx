@@ -6,44 +6,54 @@
 import React, { useEffect, useState } from 'react';
 import {
   AlertCircle,
+  Archive,
+  Check,
   CheckCircle2,
   Cloud,
-  DownloadCloud,
+  CloudOff,
+  Copy,
   FolderTree,
   HardDrive,
+  Info,
   KeyRound,
-  LogOut,
+  Loader2,
   Mail,
   RefreshCw,
+  RotateCcw,
+  Save,
   Send,
-  Server,
   ShieldCheck,
-  Table2,
   Trash2,
-  UserCheck,
+  Unlink,
+  Wifi,
 } from 'lucide-react';
-import { BackendSmtpConfig } from '../types';
 import {
-  GoogleAccountUser,
+  BackendSmtpConfig,
+  DriveWorkspaceConnection,
+  EmailDeliveryMethod,
   IntegrationDiagnostics,
-} from '../utils/googleSheets';
-import { DriveStatusPayload, workspaceApi } from '../utils/workspaceApi';
+} from '../types';
+import type { DriveSyncState } from '../App';
+import { extractDriveFolderId } from '../utils/googleSheets';
+import {
+  DriveBackupFile,
+  DriveConnectResponse,
+  workspaceApi,
+} from '../utils/workspaceApi';
 
 interface GoogleIntegrationsViewProps {
-  authUser: GoogleAccountUser | null;
+  driveConnection: DriveWorkspaceConnection | null;
+  driveSyncState: DriveSyncState;
+  driveSyncError: string | null;
   diagnostics: IntegrationDiagnostics | null;
   smtpConfig: BackendSmtpConfig;
   setSmtpConfig: React.Dispatch<React.SetStateAction<BackendSmtpConfig>>;
-  onRefreshAuthAndWorkspace: () => Promise<void>;
-  onSignOutComplete: () => void;
-  onSyncWorkspaceSnapshot: () => Promise<{
-    filesSynced: number;
-    quotationsSynced: number;
-    invoicesSynced: number;
-    customersSynced: number;
-  }>;
+  onDriveConnected: (response: DriveConnectResponse) => void;
+  onDisconnectDrive: () => void;
+  onManualSync: () => Promise<any>;
+  onRestoredSnapshot: (snapshot: any) => void;
   onNavigateTab: (tab: string) => void;
-  localCounts?: {
+  localCounts: {
     quotations: number;
     invoices: number;
     customers: number;
@@ -51,878 +61,1036 @@ interface GoogleIntegrationsViewProps {
   };
 }
 
-const DRIVE_SUBFOLDERS = [
-  { name: 'Application Data', detail: 'workspace-state.json, customers, quotations, invoices, smtp-config.enc.json' },
-  { name: 'Company Assets', detail: 'Logos, signatures, and brand files' },
-  { name: 'Generated PDFs', detail: 'Exported quotation & invoice PDFs' },
-  { name: 'Email Records', detail: 'email-logs.json delivery history' },
-  { name: 'Backups', detail: 'Timestamped full-workspace JSON snapshots' },
+const DRIVE_FOLDER_TREE = [
+  'Invoice Studio/',
+  '  ├── Company Settings/',
+  '  ├── Customers/',
+  '  ├── Imported Data/',
+  '  ├── Invoices/',
+  '  │     ├── PDFs/',
+  '  │     └── Records/',
+  '  ├── Quotations/',
+  '  │     ├── PDFs/',
+  '  │     └── Records/',
+  '  ├── Email History/',
+  '  └── Backups/',
 ];
 
 export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
-  authUser,
+  driveConnection,
+  driveSyncState,
+  driveSyncError,
   diagnostics,
   smtpConfig,
   setSmtpConfig,
-  onRefreshAuthAndWorkspace,
-  onSignOutComplete,
-  onSyncWorkspaceSnapshot,
+  onDriveConnected,
+  onDisconnectDrive,
+  onManualSync,
+  onRestoredSnapshot,
   onNavigateTab,
   localCounts,
 }) => {
-  const [driveStatus, setDriveStatus] = useState<DriveStatusPayload | null>(null);
-  const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{
-    type: 'success' | 'error' | 'info';
-    text: string;
-  } | null>(null);
+  // Drive Folder Connection State
+  const [folderUrlInput, setFolderUrlInput] = useState(driveConnection?.folderUrl || '');
+  const [driveLoading, setDriveLoading] = useState(false);
+  const [driveTesting, setDriveTesting] = useState(false);
+  const [driveSyncing, setDriveSyncing] = useState(false);
+  const [driveBackupLoading, setDriveBackupLoading] = useState(false);
+  const [driveRestoringId, setDriveRestoringId] = useState<string | null>(null);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [driveError, setDriveError] = useState<string | null>(null);
+  const [driveSuccess, setDriveSuccess] = useState<string | null>(null);
+  const [permissionEmailHint, setPermissionEmailHint] = useState<string | null>(null);
+  const [copiedEmail, setCopiedEmail] = useState(false);
+  const [backups, setBackups] = useState<DriveBackupFile[]>([]);
+  const [pdfCounts, setPdfCounts] = useState<{ invoices: number; quotations: number }>({
+    invoices: 0,
+    quotations: 0,
+  });
 
-  // Gmail & SMTP test email inputs
-  const [gmailTestTo, setGmailTestTo] = useState(authUser?.email || '');
-  const [smtpTestTo, setSmtpTestTo] = useState(authUser?.email || smtpConfig.senderEmail || '');
-  const [confirmDeleteSmtp, setConfirmDeleteSmtp] = useState(false);
-
-  // SMTP form state (password is write-only, never prefilled or saved in browser storage)
-  const [smtpHost, setSmtpHost] = useState(smtpConfig.host || '');
-  const [smtpPort, setSmtpPort] = useState(String(smtpConfig.port || 587));
-  const [smtpSecurity, setSmtpSecurity] = useState<'SSL' | 'STARTTLS' | 'NONE'>(
-    smtpConfig.securityMode || 'STARTTLS'
+  // SMTP Email Configuration State (Option A: Gmail SMTP | Option B: Custom SMTP)
+  const [smtpProvider, setSmtpProvider] = useState<EmailDeliveryMethod>(
+    smtpConfig.provider || 'gmail_smtp'
+  );
+  const [smtpHost, setSmtpHost] = useState(smtpConfig.host || 'smtp.gmail.com');
+  const [smtpPort, setSmtpPort] = useState<number>(smtpConfig.port || 465);
+  const [smtpEncryption, setSmtpEncryption] = useState<'SSL' | 'STARTTLS' | 'NONE'>(
+    smtpConfig.encryption || 'SSL'
   );
   const [smtpUsername, setSmtpUsername] = useState(smtpConfig.username || '');
   const [smtpPassword, setSmtpPassword] = useState('');
   const [smtpSenderName, setSmtpSenderName] = useState(smtpConfig.senderName || '');
   const [smtpSenderEmail, setSmtpSenderEmail] = useState(smtpConfig.senderEmail || '');
+  const [smtpReplyTo, setSmtpReplyTo] = useState(smtpConfig.replyTo || '');
+  const [testEmailRecipient, setTestEmailRecipient] = useState('');
+
+  const [smtpSaving, setSmtpSaving] = useState(false);
+  const [smtpTesting, setSmtpTesting] = useState(false);
+  const [smtpSendingTest, setSmtpSendingTest] = useState(false);
+  const [confirmDeleteSmtp, setConfirmDeleteSmtp] = useState(false);
+  const [smtpError, setSmtpError] = useState<string | null>(null);
+  const [smtpSuccess, setSmtpSuccess] = useState<string | null>(null);
 
   useEffect(() => {
-    setSmtpHost(smtpConfig.host || '');
-    setSmtpPort(String(smtpConfig.port || 587));
-    setSmtpSecurity(smtpConfig.securityMode || 'STARTTLS');
+    setFolderUrlInput(driveConnection?.folderUrl || '');
+  }, [driveConnection?.folderUrl]);
+
+  useEffect(() => {
+    setSmtpProvider(smtpConfig.provider || 'gmail_smtp');
+    setSmtpHost(
+      smtpConfig.provider === 'gmail_smtp' ? 'smtp.gmail.com' : smtpConfig.host || ''
+    );
+    setSmtpPort(smtpConfig.port || (smtpConfig.provider === 'gmail_smtp' ? 465 : 587));
+    setSmtpEncryption(smtpConfig.encryption || 'SSL');
     setSmtpUsername(smtpConfig.username || '');
     setSmtpSenderName(smtpConfig.senderName || '');
     setSmtpSenderEmail(smtpConfig.senderEmail || '');
-    if (smtpConfig.senderEmail && !smtpTestTo) {
-      setSmtpTestTo(smtpConfig.senderEmail);
-    }
+    setSmtpReplyTo(smtpConfig.replyTo || '');
   }, [smtpConfig]);
 
   useEffect(() => {
-    if (authUser?.email) {
-      setGmailTestTo((prev) => prev || authUser.email);
-      setSmtpTestTo((prev) => prev || authUser.email);
-    }
-  }, [authUser?.email]);
-
-  useEffect(() => {
-    if (!authUser?.userId) {
-      setDriveStatus(null);
+    if (!driveConnection?.isConnected) {
+      setBackups([]);
+      setPdfCounts({ invoices: 0, quotations: 0 });
       return;
     }
+    let active = true;
     workspaceApi
-      .getDriveStatus()
-      .then((res) => setDriveStatus(res))
+      .fetchDriveStatus()
+      .then((status) => {
+        if (!active) return;
+        setBackups(status.backups || []);
+        setPdfCounts({
+          invoices: status.invoicePdfCount || 0,
+          quotations: status.quotationPdfCount || 0,
+        });
+      })
       .catch(() => {});
-  }, [authUser?.userId, authUser?.driveConnected]);
+    return () => {
+      active = false;
+    };
+  }, [driveConnection?.isConnected, driveConnection?.folderId]);
 
-  const runAction = async (key: string, fn: () => Promise<void>) => {
-    setBusyAction(key);
-    setNotice(null);
+  const serviceAccountEmail =
+    permissionEmailHint ||
+    driveConnection?.serviceAccountEmail ||
+    diagnostics?.serviceAccountEmail ||
+    null;
+
+  const handleCopyServiceEmail = async () => {
+    if (!serviceAccountEmail) return;
     try {
-      await fn();
-    } catch (err: any) {
-      setNotice({
-        type: 'error',
-        text: err?.message || 'Operation failed. Please check your configuration and try again.',
-      });
-    } finally {
-      setBusyAction(null);
+      await navigator.clipboard.writeText(serviceAccountEmail);
+      setCopiedEmail(true);
+      setTimeout(() => setCopiedEmail(false), 2000);
+    } catch {
+      // Fallback ignored
     }
   };
 
-  const handleConnectFeature = (
-    feature: 'signin' | 'drive' | 'sheets' | 'gmail',
-    preferRedirect: boolean = false
-  ) =>
-    runAction(`connect_${feature}`, async () => {
-      await workspaceApi.connectGoogle(feature, preferRedirect);
-      await onRefreshAuthAndWorkspace();
-      if (feature === 'signin' || feature === 'drive') {
-        const st = await workspaceApi.getDriveStatus().catch(() => null);
-        if (st) setDriveStatus(st);
-      }
-      setNotice({
-        type: 'success',
-        text:
-          feature === 'signin'
-            ? 'Signed in with your Google Account and connected your Google Drive workspace.'
-            : `Connected ${feature.toUpperCase()} permission cleanly.`,
-      });
-    });
-
-  const handleDisconnectFeature = (feature: 'all' | 'drive' | 'sheets' | 'gmail') =>
-    runAction(`disconnect_${feature}`, async () => {
-      await workspaceApi.disconnectGoogle(feature);
-      if (feature === 'all') {
-        setDriveStatus(null);
-        onSignOutComplete();
-        setNotice({
-          type: 'info',
-          text: 'Signed out cleanly and cleared local workspace cache. Your files remain safely stored in your Google Drive.',
-        });
-      } else {
-        await onRefreshAuthAndWorkspace();
-        setNotice({
-          type: 'info',
-          text: `Disconnected ${feature.toUpperCase()} permission.`,
-        });
-      }
-    });
-
-  const handleSyncDrive = () =>
-    runAction('drive_sync', async () => {
-      const res = await onSyncWorkspaceSnapshot();
-      const st = await workspaceApi.getDriveStatus().catch(() => null);
-      if (st) setDriveStatus(st);
-      await onRefreshAuthAndWorkspace();
-      setNotice({
-        type: 'success',
-        text: `Synced ${res.filesSynced} files to Google Drive (${res.customersSynced} customers, ${res.quotationsSynced} quotations, ${res.invoicesSynced} invoices).`,
-      });
-    });
-
-  const handleBackupDrive = () =>
-    runAction('drive_backup', async () => {
-      const res = await workspaceApi.createDriveBackup();
-      setNotice({
-        type: 'success',
-        text: `Created backup snapshot "${res.fileName}" inside Invoice Studio/Backups.`,
-      });
-    });
-
-  const handleRestoreDrive = () =>
-    runAction('drive_restore', async () => {
-      const res = await workspaceApi.restoreFromDrive();
-      await onRefreshAuthAndWorkspace();
-      setNotice({
-        type: 'success',
-        text: `Restored from Google Drive: ${res.customersRestored} customers, ${res.quotationsRestored} quotations, ${res.invoicesRestored} invoices.`,
-      });
-    });
-
-  const handleSendTestEmail = (method: 'gmail' | 'smtp') =>
-    runAction(`test_email_${method}`, async () => {
-      if (!authUser?.userId) {
-        throw new Error('Sign in with Google first to send a test email via the backend server.');
-      }
-      const targetEmail = (method === 'gmail' ? gmailTestTo : smtpTestTo).trim();
-      if (!targetEmail) {
-        throw new Error('Enter a recipient email address for the test email.');
-      }
-      const res = await workspaceApi.sendTestEmail({
-        method,
-        to: targetEmail,
-      });
-      await onRefreshAuthAndWorkspace();
-      setNotice({
-        type: 'success',
-        text: `Test email delivered via ${method.toUpperCase()} from ${res.senderEmail} to ${res.recipientEmail}.`,
-      });
-    });
-
-  const handleSaveSmtp = (e: React.FormEvent) => {
+  const handleConnectDrive = async (e: React.FormEvent) => {
     e.preventDefault();
-    void runAction('save_smtp', async () => {
-      if (!authUser?.userId) {
-        throw new Error(
-          'Sign in with Google first so your encrypted SMTP configuration can be saved to your private Google Drive.'
-        );
+    setDriveError(null);
+    setDriveSuccess(null);
+    setPermissionEmailHint(null);
+
+    const trimmed = folderUrlInput.trim();
+    const extracted = extractDriveFolderId(trimmed);
+    if (!extracted) {
+      setDriveError(
+        'Invalid Google Drive folder URL. Paste a link like https://drive.google.com/drive/folders/<folder-id>.'
+      );
+      return;
+    }
+
+    setDriveLoading(true);
+    try {
+      const response = await workspaceApi.connectDriveFolder(trimmed);
+      onDriveConnected(response);
+      setBackups(response.backups || []);
+      setDriveSuccess(
+        response.restoredExistingWorkspace
+          ? `Connected to "${response.folderName}" and restored existing Invoice Studio records.`
+          : `Connected to "${response.folderName}" and initialized an empty Invoice Studio workspace.`
+      );
+    } catch (err: any) {
+      setDriveError(err?.message || 'Failed to connect Google Drive folder.');
+      if (err?.details?.serviceAccountEmail) {
+        setPermissionEmailHint(err.details.serviceAccountEmail);
       }
-      const res = await workspaceApi.saveSmtpConfig({
-        host: smtpHost,
-        port: Number(smtpPort) || 587,
-        securityMode: smtpSecurity,
-        username: smtpUsername,
-        password: smtpPassword || undefined,
-        senderName: smtpSenderName,
-        senderEmail: smtpSenderEmail,
-      });
-      setSmtpConfig(res.smtpConfig);
-      setSmtpPassword('');
-      setConfirmDeleteSmtp(false);
-      await onRefreshAuthAndWorkspace();
-      setNotice({
-        type: 'success',
-        text: 'SMTP configuration encrypted with AES-256-GCM and saved to Invoice Studio/Application Data/smtp-config.enc.json.',
-      });
-    });
+    } finally {
+      setDriveLoading(false);
+    }
   };
 
-  const handleTestSmtpConnection = () =>
-    runAction('test_smtp', async () => {
-      if (!authUser?.userId) {
-        throw new Error('Sign in with Google first to test your SMTP server connection.');
+  const handleTestDrive = async () => {
+    setDriveError(null);
+    setDriveSuccess(null);
+    setPermissionEmailHint(null);
+    const targetUrl = folderUrlInput.trim() || driveConnection?.folderUrl || '';
+    if (!targetUrl) {
+      setDriveError('Paste a Google Drive folder URL before testing the connection.');
+      return;
+    }
+    setDriveTesting(true);
+    try {
+      const res = await workspaceApi.testDriveConnection(targetUrl);
+      setDriveSuccess(
+        `Connection verified! Folder "${res.folderName}" is reachable with Editor permissions.`
+      );
+    } catch (err: any) {
+      setDriveError(err?.message || 'Google Drive connection test failed.');
+      if (err?.details?.serviceAccountEmail) {
+        setPermissionEmailHint(err.details.serviceAccountEmail);
       }
-      const res = await workspaceApi.testSmtpConnection({
-        host: smtpHost,
-        port: Number(smtpPort) || 587,
-        securityMode: smtpSecurity,
-        username: smtpUsername,
-        password: smtpPassword || undefined,
-      });
-      setSmtpConfig((prev) => ({ ...prev, verifiedAt: res.verifiedAt }));
-      setNotice({
-        type: 'success',
-        text: `SMTP handshake verified cleanly at ${new Date(res.verifiedAt).toLocaleTimeString()}.`,
-      });
-    });
+    } finally {
+      setDriveTesting(false);
+    }
+  };
 
-  const handleDeleteSmtp = () =>
-    runAction('delete_smtp', async () => {
-      const res = await workspaceApi.deleteSmtpConfig();
-      setSmtpConfig(res.smtpConfig);
-      setSmtpHost('');
-      setSmtpPort('587');
-      setSmtpSecurity('STARTTLS');
+  const handleManualDriveSync = async () => {
+    setDriveError(null);
+    setDriveSuccess(null);
+    setDriveSyncing(true);
+    try {
+      const res = await onManualSync();
+      if (res?.syncedAt) {
+        setDriveSuccess(`Workspace synced to Google Drive at ${new Date(res.syncedAt).toLocaleTimeString()}.`);
+      }
+    } catch (err: any) {
+      setDriveError(err?.message || 'Sync to Google Drive failed.');
+    } finally {
+      setDriveSyncing(false);
+    }
+  };
+
+  const handleCreateBackup = async () => {
+    setDriveError(null);
+    setDriveSuccess(null);
+    setDriveBackupLoading(true);
+    try {
+      await onManualSync();
+      const res = await workspaceApi.createDriveBackup();
+      setBackups(res.backups || []);
+      setDriveSuccess(`Created backup snapshot "${res.backup.name}" in Backups/.`);
+    } catch (err: any) {
+      setDriveError(err?.message || 'Failed to create Google Drive backup.');
+    } finally {
+      setDriveBackupLoading(false);
+    }
+  };
+
+  const handleRestoreBackup = async (backupFileId: string) => {
+    setDriveError(null);
+    setDriveSuccess(null);
+    setDriveRestoringId(backupFileId);
+    try {
+      const res = await workspaceApi.restoreDriveBackup(backupFileId);
+      onRestoredSnapshot(res.snapshot);
+      setDriveSuccess('Backup restored successfully into your workspace.');
+    } catch (err: any) {
+      setDriveError(err?.message || 'Failed to restore selected backup.');
+    } finally {
+      setDriveRestoringId(null);
+    }
+  };
+
+  const handleSelectSmtpProvider = (provider: EmailDeliveryMethod) => {
+    setSmtpProvider(provider);
+    setSmtpError(null);
+    setSmtpSuccess(null);
+    if (provider === 'gmail_smtp') {
+      setSmtpHost('smtp.gmail.com');
+      setSmtpPort(465);
+      setSmtpEncryption('SSL');
+    } else {
+      if (smtpHost === 'smtp.gmail.com') setSmtpHost('');
+      setSmtpPort(587);
+      setSmtpEncryption('STARTTLS');
+    }
+  };
+
+  const handleSaveSmtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSmtpError(null);
+    setSmtpSuccess(null);
+    setSmtpSaving(true);
+    try {
+      const saved = await workspaceApi.saveSmtpConfig({
+        provider: smtpProvider,
+        host: smtpProvider === 'gmail_smtp' ? 'smtp.gmail.com' : smtpHost.trim(),
+        port: Number(smtpPort),
+        encryption: smtpEncryption,
+        username: smtpUsername.trim(),
+        password: smtpPassword.trim() || undefined,
+        senderName: smtpSenderName.trim(),
+        senderEmail: (smtpSenderEmail || smtpUsername).trim(),
+        replyTo: smtpReplyTo.trim() || undefined,
+      });
+      setSmtpConfig(saved);
+      setSmtpPassword('');
+      setSmtpSuccess(
+        saved.persistedInDrive
+          ? 'SMTP settings encrypted and saved to your Google Drive workspace.'
+          : 'SMTP settings encrypted in server session memory. Connect a Google Drive folder to persist them across sessions.'
+      );
+    } catch (err: any) {
+      setSmtpError(err?.message || 'Failed to save SMTP configuration.');
+    } finally {
+      setSmtpSaving(false);
+    }
+  };
+
+  const handleTestSmtp = async () => {
+    setSmtpError(null);
+    setSmtpSuccess(null);
+    setSmtpTesting(true);
+    try {
+      const res = await workspaceApi.testSmtpConfig({
+        provider: smtpProvider,
+        host: smtpProvider === 'gmail_smtp' ? 'smtp.gmail.com' : smtpHost.trim(),
+        port: Number(smtpPort),
+        encryption: smtpEncryption,
+        username: smtpUsername.trim(),
+        password: smtpPassword.trim() || undefined,
+        senderName: smtpSenderName.trim(),
+        senderEmail: (smtpSenderEmail || smtpUsername).trim(),
+        replyTo: smtpReplyTo.trim() || undefined,
+      });
+      setSmtpSuccess(`SMTP connection verified successfully (${res.host}:${res.port}).`);
+    } catch (err: any) {
+      setSmtpError(err?.message || 'SMTP connection verification failed.');
+    } finally {
+      setSmtpTesting(false);
+    }
+  };
+
+  const handleSendTestEmail = async () => {
+    setSmtpError(null);
+    setSmtpSuccess(null);
+    if (!testEmailRecipient.trim()) {
+      setSmtpError('Enter a recipient email address for the test email.');
+      return;
+    }
+    setSmtpSendingTest(true);
+    try {
+      const res = await workspaceApi.sendTestEmail(testEmailRecipient.trim());
+      setSmtpSuccess(
+        `Test email sent to ${testEmailRecipient.trim()} (Message ID: ${res.messageId || 'confirmed'}).`
+      );
+    } catch (err: any) {
+      setSmtpError(err?.message || 'Failed to send test email.');
+    } finally {
+      setSmtpSendingTest(false);
+    }
+  };
+
+  const handleDeleteSmtp = async () => {
+    setSmtpError(null);
+    setSmtpSuccess(null);
+    try {
+      await workspaceApi.deleteSmtpConfig();
+      setSmtpConfig({
+        configured: false,
+        persistedInDrive: false,
+        provider: 'gmail_smtp',
+        host: 'smtp.gmail.com',
+        port: 465,
+        encryption: 'SSL',
+        username: '',
+        senderName: '',
+        senderEmail: '',
+        replyTo: '',
+        hasPassword: false,
+      });
       setSmtpUsername('');
       setSmtpPassword('');
       setSmtpSenderName('');
       setSmtpSenderEmail('');
+      setSmtpReplyTo('');
       setConfirmDeleteSmtp(false);
-      await onRefreshAuthAndWorkspace();
-      setNotice({
-        type: 'info',
-        text: 'Removed saved SMTP configuration from your Google Drive.',
-      });
-    });
+      setSmtpSuccess('SMTP configuration removed.');
+    } catch (err: any) {
+      setSmtpError(err?.message || 'Failed to delete SMTP configuration.');
+    }
+  };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
-      {/* Header */}
-      <div className="bg-white p-6 rounded-2xl border border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="text-2xl font-bold text-slate-900 flex items-start sm:items-center gap-2.5">
-            <Cloud className="w-6 h-6 text-indigo-600 shrink-0 mt-1 sm:mt-0" />
-            <span>Account, Google Drive &amp; Email Settings</span>
-          </h1>
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+      {/* Page Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">Google Drive & Email Settings</h1>
           <p className="text-sm text-slate-500 mt-1">
-            Manage Google OAuth sign-in, your private Google Drive storage folder, Google Sheets
-            import access, Gmail sending, and encrypted SMTP credentials.
+            Connect your business Google Drive folder for persistent storage and configure Gmail
+            SMTP or Custom SMTP for direct document delivery — no application sign-in required.
           </p>
         </div>
-
-        <div className="flex flex-col lg:items-end gap-1.5 text-xs shrink-0">
-          <div className="inline-flex items-center gap-1.5 font-semibold text-slate-800 whitespace-nowrap">
-            <UserCheck
-              className={`w-4 h-4 shrink-0 ${
-                authUser ? 'text-emerald-600' : 'text-slate-400'
-              }`}
-            />
-            <span className="font-mono">{authUser?.email || 'Local Workspace Mode'}</span>
-          </div>
-          {localCounts && (
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500 font-mono tabular-nums">
-              <span className="whitespace-nowrap">{localCounts.customers} customers</span>
-              <span aria-hidden="true">·</span>
-              <span className="whitespace-nowrap">{localCounts.quotations} quotations</span>
-              <span aria-hidden="true">·</span>
-              <span className="whitespace-nowrap">{localCounts.invoices} invoices</span>
-              <span aria-hidden="true">·</span>
-              <span className="whitespace-nowrap">{localCounts.emailLogs} email logs</span>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Environment Diagnostics Notice (only when server env vars are missing) */}
-      {diagnostics && !diagnostics.readyForGoogleSync && (
-        <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1.5">
-          <div className="flex items-center gap-2 font-bold">
-            <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-            <span>Google OAuth Environment Variables Needed for Live Cloud Connections</span>
-          </div>
-          <p className="text-amber-800">
-            Missing server environment variable(s):{' '}
-            <span className="font-mono font-semibold">
-              {diagnostics.missingEnvVars.join(', ')}
-            </span>
-            . Set these in your Vercel Project Settings (or local <span className="font-mono">.env</span>)
-            to enable live Google Sign-In, Drive storage, Sheets import, Gmail delivery, and
-            encrypted SMTP persistence.
-          </p>
-          <p className="text-[11px] text-amber-700 font-mono">
-            Authorized OAuth Redirect URI: {diagnostics.redirectUri}
-          </p>
-        </div>
-      )}
-
-      {notice && (
-        <div
-          role="status"
-          className={`p-4 rounded-xl border text-xs font-medium flex items-center gap-2 ${
-            notice.type === 'success'
-              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-              : notice.type === 'error'
-                ? 'bg-rose-50 border-rose-200 text-rose-900'
-                : 'bg-indigo-50 border-indigo-200 text-indigo-900'
-          }`}
+        <button
+          type="button"
+          onClick={() => onNavigateTab('email')}
+          className="px-4 py-2 rounded-xl bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 inline-flex items-center gap-2 self-start sm:self-auto cursor-pointer"
         >
-          {notice.type === 'success' ? (
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-          ) : (
-            <AlertCircle className="w-4 h-4 shrink-0" />
-          )}
-          <span>{notice.text}</span>
-        </div>
-      )}
-
-      {/* 4 Core Google Integration Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {/* 1. Google Account */}
-        <section className="bg-white p-6 rounded-2xl border border-slate-200 flex flex-col justify-between space-y-4">
-          <div className="space-y-3">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-center gap-2.5">
-                <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
-                  <ShieldCheck className="w-5 h-5" />
-                </div>
-                <div>
-                  <h2 className="text-sm font-bold text-slate-900">1. Google Account</h2>
-                  <p className="text-[11px] text-slate-500">
-                    OAuth 2.0 encrypted HttpOnly session · Strict per-user isolation
-                  </p>
-                </div>
-              </div>
-              <span
-                className={`text-xs font-bold whitespace-nowrap shrink-0 ${
-                  authUser ? 'text-emerald-700' : 'text-slate-500'
-                }`}
-              >
-                {authUser ? 'Signed In' : 'Not Signed In'}
-              </span>
-            </div>
-
-            {authUser ? (
-              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-1">
-                <p className="font-bold text-slate-900">{authUser.name || 'Google Account'}</p>
-                <p className="font-mono text-slate-600">{authUser.email}</p>
-                <p className="text-[11px] text-slate-500">
-                  All records are stored strictly in this user&apos;s personal Google Drive. Signing
-                  out immediately clears local browser state and session cookies.
-                </p>
-              </div>
-            ) : (
-              <p className="text-xs text-slate-600 leading-relaxed">
-                Sign in with your Google Account to persist customers, quotations, invoices, PDFs,
-                and settings directly in your own Google Drive across sessions and devices.
-              </p>
-            )}
-          </div>
-
-          <div className="flex flex-wrap gap-2 pt-3 border-t border-slate-100">
-            <button
-              type="button"
-              disabled={busyAction !== null}
-              onClick={() => void handleConnectFeature('signin', false)}
-              className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold cursor-pointer"
-            >
-              {busyAction === 'connect_signin'
-                ? 'Connecting...'
-                : authUser
-                  ? 'Switch Google Account'
-                  : 'Sign in with Google'}
-            </button>
-            {!authUser && (
-              <button
-                type="button"
-                disabled={busyAction !== null}
-                onClick={() => void handleConnectFeature('signin', true)}
-                className="px-3.5 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold cursor-pointer"
-              >
-                Redirect Sign-In
-              </button>
-            )}
-            {authUser && (
-              <button
-                type="button"
-                disabled={busyAction !== null}
-                onClick={() => void handleDisconnectFeature('all')}
-                className="px-4 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Sign Out</span>
-              </button>
-            )}
-          </div>
-        </section>
-
-        {/* 2. Google Drive Storage (Sole Persistent Storage) */}
-        <section className="bg-white p-6 rounded-2xl border border-slate-200 flex flex-col justify-between space-y-4">
-          <div className="space-y-3">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-center gap-2.5">
-                <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center shrink-0">
-                  <HardDrive className="w-5 h-5" />
-                </div>
-                <div>
-                  <h2 className="text-sm font-bold text-slate-900">2. Google Drive Storage</h2>
-                  <p className="text-[11px] text-slate-500">
-                    Scope: drive.file · Sole persistent storage for your workspace
-                  </p>
-                </div>
-              </div>
-              <span
-                className={`text-xs font-bold whitespace-nowrap shrink-0 ${
-                  authUser?.driveConnected ? 'text-emerald-700' : 'text-slate-500'
-                }`}
-              >
-                {authUser?.driveConnected ? 'Connected' : 'Not Connected'}
-              </span>
-            </div>
-
-            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-bold text-slate-800 inline-flex items-center gap-1.5 font-mono">
-                  <FolderTree className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span>Invoice Studio/</span>
-                </span>
-                <span className="text-[11px] text-slate-500 font-mono tabular-nums">
-                  {driveStatus?.lastSyncAt
-                    ? `Synced ${new Date(driveStatus.lastSyncAt).toLocaleString()}`
-                    : 'Ready to sync'}
-                </span>
-              </div>
-              <ul className="space-y-1 text-[11px] text-slate-600">
-                {DRIVE_SUBFOLDERS.map((folder) => (
-                  <li key={folder.name} className="flex items-baseline justify-between gap-2">
-                    <span className="font-mono font-semibold text-slate-800 shrink-0">
-                      └ {folder.name}/
-                    </span>
-                    <span className="text-slate-500 truncate text-right">{folder.detail}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap gap-2 pt-3 border-t border-slate-100">
-            {!authUser?.driveConnected ? (
-              <button
-                type="button"
-                disabled={busyAction !== null}
-                onClick={() => void handleConnectFeature('drive')}
-                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold cursor-pointer"
-              >
-                {busyAction === 'connect_drive' ? 'Authorizing...' : 'Connect Google Drive'}
-              </button>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  disabled={busyAction !== null}
-                  onClick={() => void handleSyncDrive()}
-                  className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
-                >
-                  <RefreshCw
-                    className={`w-3.5 h-3.5 ${busyAction === 'drive_sync' ? 'animate-spin' : ''}`}
-                  />
-                  <span>Sync Now</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={busyAction !== null}
-                  onClick={() => void handleBackupDrive()}
-                  className="px-3 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold cursor-pointer"
-                >
-                  Create Backup
-                </button>
-                <button
-                  type="button"
-                  disabled={busyAction !== null}
-                  onClick={() => void handleRestoreDrive()}
-                  className="px-3 py-2 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
-                >
-                  <DownloadCloud className="w-3.5 h-3.5" />
-                  <span>Restore</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={busyAction !== null}
-                  onClick={() => void handleDisconnectFeature('drive')}
-                  className="px-3 py-2 rounded-xl border border-rose-200 text-rose-700 hover:bg-rose-50 text-xs font-semibold cursor-pointer"
-                >
-                  Disconnect
-                </button>
-              </>
-            )}
-          </div>
-        </section>
-
-        {/* 3. Google Sheets Import */}
-        <section className="bg-white p-6 rounded-2xl border border-slate-200 flex flex-col justify-between space-y-4">
-          <div className="space-y-3">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-center gap-2.5">
-                <div className="w-10 h-10 rounded-xl bg-cyan-50 text-cyan-700 flex items-center justify-center shrink-0">
-                  <Table2 className="w-5 h-5" />
-                </div>
-                <div>
-                  <h2 className="text-sm font-bold text-slate-900">3. Google Sheets Import</h2>
-                  <p className="text-[11px] text-slate-500">
-                    Scope: spreadsheets.readonly · Read-only pasted URL import
-                  </p>
-                </div>
-              </div>
-              <span
-                className={`text-xs font-bold whitespace-nowrap shrink-0 ${
-                  authUser?.sheetsConnected ? 'text-emerald-700' : 'text-slate-500'
-                }`}
-              >
-                {authUser?.sheetsConnected ? 'Connected' : 'Not Connected'}
-              </span>
-            </div>
-            <p className="text-xs text-slate-600 leading-relaxed">
-              Grant read-only Sheets access to validate tabs, auto-detect header rows, and import
-              private spreadsheets directly from any pasted Google Sheets URL.
-            </p>
-          </div>
-
-          <div className="flex flex-wrap gap-2 pt-3 border-t border-slate-100">
-            {!authUser?.sheetsConnected ? (
-              <button
-                type="button"
-                disabled={busyAction !== null}
-                onClick={() => void handleConnectFeature('sheets')}
-                className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-700 disabled:opacity-50 text-white text-xs font-bold cursor-pointer"
-              >
-                {busyAction === 'connect_sheets' ? 'Authorizing...' : 'Connect Google Sheets'}
-              </button>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  onClick={() => onNavigateTab('datasource')}
-                  className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-700 text-white text-xs font-bold cursor-pointer"
-                >
-                  Open Sheets Importer
-                </button>
-                <button
-                  type="button"
-                  disabled={busyAction !== null}
-                  onClick={() => void handleDisconnectFeature('sheets')}
-                  className="px-3 py-2 rounded-xl border border-rose-200 text-rose-700 hover:bg-rose-50 text-xs font-semibold cursor-pointer"
-                >
-                  Disconnect
-                </button>
-              </>
-            )}
-          </div>
-        </section>
-
-        {/* 4. Email Method A — Gmail API */}
-        <section className="bg-white p-6 rounded-2xl border border-slate-200 flex flex-col justify-between space-y-4">
-          <div className="space-y-3">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-center gap-2.5">
-                <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-700 flex items-center justify-center shrink-0">
-                  <Mail className="w-5 h-5" />
-                </div>
-                <div>
-                  <h2 className="text-sm font-bold text-slate-900">4. Gmail Sending (Method A)</h2>
-                  <p className="text-[11px] text-slate-500">
-                    Scope: gmail.send · Sends invoices &amp; quotations from your Gmail
-                  </p>
-                </div>
-              </div>
-              <span
-                className={`text-xs font-bold whitespace-nowrap shrink-0 ${
-                  authUser?.gmailConnected ? 'text-emerald-700' : 'text-slate-500'
-                }`}
-              >
-                {authUser?.gmailConnected ? 'Connected' : 'Not Connected'}
-              </span>
-            </div>
-
-            <p className="text-xs text-slate-600 leading-relaxed">
-              {authUser?.gmailConnected
-                ? `Connected Gmail sender: ${authUser.email}. Emails include your generated PDF attachments and are logged in Invoice Studio/Email Records.`
-                : 'Enable Gmail sending permission to dispatch quotations and invoices directly from your connected Gmail account.'}
-            </p>
-
-            {authUser?.gmailConnected && (
-              <div className="flex flex-col sm:flex-row gap-2 pt-1">
-                <input
-                  type="email"
-                  aria-label="Gmail test recipient email"
-                  placeholder="Recipient for Gmail test email"
-                  value={gmailTestTo}
-                  onChange={(e) => setGmailTestTo(e.target.value)}
-                  className="flex-1 px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 text-xs font-mono"
-                />
-                <button
-                  type="button"
-                  disabled={busyAction !== null || !gmailTestTo.trim()}
-                  onClick={() => void handleSendTestEmail('gmail')}
-                  className="px-3.5 py-2 rounded-lg border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-50 text-indigo-800 text-xs font-bold inline-flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  <span>
-                    {busyAction === 'test_email_gmail' ? 'Sending...' : 'Send Test Email'}
-                  </span>
-                </button>
-              </div>
-            )}
-          </div>
-
-          <div className="flex flex-wrap gap-2 pt-3 border-t border-slate-100">
-            {!authUser?.gmailConnected ? (
-              <button
-                type="button"
-                disabled={busyAction !== null}
-                onClick={() => void handleConnectFeature('gmail')}
-                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white text-xs font-bold cursor-pointer"
-              >
-                {busyAction === 'connect_gmail' ? 'Authorizing...' : 'Connect Gmail Sending'}
-              </button>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  onClick={() => onNavigateTab('email')}
-                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer"
-                >
-                  Open Email Dispatcher
-                </button>
-                <button
-                  type="button"
-                  disabled={busyAction !== null}
-                  onClick={() => void handleDisconnectFeature('gmail')}
-                  className="px-3 py-2 rounded-xl border border-rose-200 text-rose-700 hover:bg-rose-50 text-xs font-semibold cursor-pointer"
-                >
-                  Disconnect Gmail
-                </button>
-              </>
-            )}
-          </div>
-        </section>
+          <Mail className="w-3.5 h-3.5" />
+          <span>Open Email Center</span>
+        </button>
       </div>
 
-      {/* 5. Email Method B — Encrypted User SMTP Account */}
-      <section className="bg-white p-6 rounded-2xl border border-slate-200 space-y-5">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
-          <div className="flex items-center gap-2.5">
-            <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
-              <Server className="w-5 h-5" />
+      {/* SECTION 1: GOOGLE DRIVE FOLDER CONNECTION */}
+      <section className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="p-6 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div
+              className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 ${
+                driveConnection?.isConnected
+                  ? 'bg-emerald-600 text-white'
+                  : 'bg-indigo-600 text-white'
+              }`}
+            >
+              <HardDrive className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-sm font-bold text-slate-900">
-                5. SMTP Email Configuration (Method B)
+              <h2 className="text-lg font-bold text-slate-900">
+                Google Drive Workspace Storage
               </h2>
-              <p className="text-[11px] text-slate-500">
-                Encrypted with AES-256-GCM on the server and saved in your private Google Drive (
-                <span className="font-mono">smtp-config.enc.json</span>). Passwords are never
-                returned to the browser.
+              <p className="text-xs text-slate-500 mt-0.5">
+                Paste a Google Drive folder URL shared with the Invoice Studio service account. Each
+                connected folder acts as an isolated business workspace.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {driveConnection?.isConnected ? (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                Connected: {driveConnection.folderName}
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs font-semibold">
+                <CloudOff className="w-3.5 h-3.5" />
+                Temporary Session (Not Backed Up)
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="p-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Left 2 Columns: Connection Form, Controls & Status */}
+          <div className="lg:col-span-2 space-y-5">
+            {/* Service Account Sharing Instructions */}
+            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-2.5">
+              <div className="flex items-center gap-2 text-xs font-bold text-slate-800">
+                <ShieldCheck className="w-4 h-4 text-indigo-600" />
+                <span>How Service Account Folder Sharing Works</span>
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                A Google Drive folder URL alone does not grant upload access. Share your business
+                folder in Google Drive with the service account email below as{' '}
+                <strong className="text-slate-900">Editor</strong>, then paste the folder URL and
+                click <strong className="text-slate-900">Connect Folder</strong>.
+              </p>
+              {serviceAccountEmail ? (
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <code className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 text-xs font-mono text-slate-900 break-all">
+                    {serviceAccountEmail}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={handleCopyServiceEmail}
+                    className="px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {copiedEmail ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedEmail ? 'Copied' : 'Copy Email'}</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2">
+                  <Info className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>
+                    Server environment variables{' '}
+                    <code className="font-mono">GOOGLE_SERVICE_ACCOUNT_EMAIL</code> and{' '}
+                    <code className="font-mono">GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY</code> are not
+                    configured yet on this deployment. Add them on your server to enable live Google
+                    Drive persistence.
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Folder URL Form */}
+            <form onSubmit={handleConnectDrive} className="space-y-3">
+              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wide">
+                Google Drive Folder URL
+              </label>
+              <div className="flex flex-col sm:flex-row gap-2.5">
+                <input
+                  type="text"
+                  value={folderUrlInput}
+                  onChange={(e) => setFolderUrlInput(e.target.value)}
+                  placeholder="https://drive.google.com/drive/folders/1AbC2dEf3GhI..."
+                  className="flex-1 px-4 py-2.5 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                />
+                <button
+                  type="submit"
+                  disabled={driveLoading}
+                  className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-xs font-bold inline-flex items-center justify-center gap-2 shrink-0 cursor-pointer"
+                >
+                  {driveLoading ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Cloud className="w-4 h-4" />
+                  )}
+                  <span>{driveConnection?.isConnected ? 'Reconnect / Switch Folder' : 'Connect Folder'}</span>
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={handleTestDrive}
+                  disabled={driveTesting}
+                  className="px-3.5 py-2 rounded-xl bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  {driveTesting ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Wifi className="w-3.5 h-3.5 text-indigo-600" />
+                  )}
+                  <span>Test Connection</span>
+                </button>
+
+                {driveConnection?.isConnected && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleManualDriveSync}
+                      disabled={driveSyncing}
+                      className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      {driveSyncing ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      )}
+                      <span>Sync Now</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleCreateBackup}
+                      disabled={driveBackupLoading}
+                      className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      {driveBackupLoading ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Archive className="w-3.5 h-3.5" />
+                      )}
+                      <span>Create Backup</span>
+                    </button>
+
+                    {!confirmDisconnect ? (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDisconnect(true)}
+                        className="px-3.5 py-2 rounded-xl bg-white border border-rose-200 hover:bg-rose-50 text-rose-700 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Unlink className="w-3.5 h-3.5" />
+                        <span>Disconnect Folder</span>
+                      </button>
+                    ) : (
+                      <div className="inline-flex items-center gap-2 bg-rose-50 border border-rose-200 rounded-xl px-3 py-1.5">
+                        <span className="text-xs font-semibold text-rose-800">
+                          Clear local session & disconnect?
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfirmDisconnect(false);
+                            onDisconnectDrive();
+                            setDriveSuccess('Disconnected from Google Drive and cleared local cache.');
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-rose-600 text-white text-xs font-bold hover:bg-rose-700 cursor-pointer"
+                        >
+                          Yes, Disconnect
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDisconnect(false)}
+                          className="px-2 py-1 rounded-lg bg-white border border-slate-200 text-slate-600 text-xs font-semibold cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            </form>
+
+            {/* Feedback Alerts */}
+            {(driveError || driveSyncError) && (
+              <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex items-start gap-2.5">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="font-bold">Google Drive Connection Error</p>
+                  <p>{driveError || driveSyncError}</p>
+                </div>
+              </div>
+            )}
+
+            {driveSuccess && (
+              <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-start gap-2.5">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                <p className="font-medium">{driveSuccess}</p>
+              </div>
+            )}
+
+            {/* Current Storage Summary */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-1">
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <p className="text-[11px] font-semibold text-slate-500">Storage Status</p>
+                <p className="text-xs font-bold text-slate-900 mt-1">
+                  {driveConnection?.isConnected
+                    ? driveSyncState === 'syncing'
+                      ? 'Syncing...'
+                      : driveSyncState === 'error'
+                        ? 'Sync Error'
+                        : 'Google Drive'
+                    : 'Temporary Only'}
+                </p>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <p className="text-[11px] font-semibold text-slate-500">Records in Session</p>
+                <p className="text-xs font-bold text-slate-900 mt-1">
+                  {localCounts.invoices} Inv · {localCounts.quotations} Qt · {localCounts.customers}{' '}
+                  Cust
+                </p>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <p className="text-[11px] font-semibold text-slate-500">Drive PDFs</p>
+                <p className="text-xs font-bold text-slate-900 mt-1">
+                  {pdfCounts.invoices} Inv · {pdfCounts.quotations} Qt
+                </p>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <p className="text-[11px] font-semibold text-slate-500">Last Sync</p>
+                <p className="text-xs font-bold text-slate-900 mt-1 truncate">
+                  {driveConnection?.lastSyncedAt
+                    ? new Date(driveConnection.lastSyncedAt).toLocaleString()
+                    : 'Never synced'}
+                </p>
+              </div>
+            </div>
+
+            {/* Backups List */}
+            {driveConnection?.isConnected && backups.length > 0 && (
+              <div className="border border-slate-200 rounded-2xl p-4 space-y-2.5">
+                <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wide">
+                  Available Drive Backups ({backups.length})
+                </h3>
+                <div className="divide-y divide-slate-100 max-h-48 overflow-y-auto">
+                  {backups.map((b) => (
+                    <div key={b.id} className="py-2 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-slate-800 truncate">{b.name}</p>
+                        <p className="text-[11px] text-slate-500">
+                          {b.modifiedTime ? new Date(b.modifiedTime).toLocaleString() : 'Snapshot'}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={driveRestoringId === b.id}
+                        onClick={() => handleRestoreBackup(b.id)}
+                        className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-indigo-600 hover:text-white text-slate-700 text-xs font-semibold inline-flex items-center gap-1 transition-colors cursor-pointer shrink-0"
+                      >
+                        {driveRestoringId === b.id ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <RotateCcw className="w-3 h-3" />
+                        )}
+                        <span>Restore</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Right Column: Auto-Created Folder Hierarchy */}
+          <div className="bg-slate-900 text-slate-100 rounded-2xl p-5 space-y-3">
+            <div className="flex items-center gap-2 text-xs font-bold text-indigo-300 uppercase tracking-wide">
+              <FolderTree className="w-4 h-4" />
+              <span>Managed Drive Structure</span>
+            </div>
+            <p className="text-xs text-slate-400">
+              Automatically created inside your connected Google Drive folder:
+            </p>
+            <pre className="text-[11px] font-mono text-emerald-300 leading-relaxed bg-slate-950/70 rounded-xl p-3.5 overflow-x-auto border border-slate-800">
+              {DRIVE_FOLDER_TREE.join('\n')}
+            </pre>
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              Structured JSON records and generated PDFs are stored directly in your folder. No
+              third-party database is used.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* SECTION 2: EMAIL INTEGRATION — GMAIL SMTP & CUSTOM SMTP */}
+      <section className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="p-6 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="w-11 h-11 rounded-2xl bg-slate-900 text-white flex items-center justify-center shrink-0">
+              <Mail className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-lg font-bold text-slate-900">
+                Email Settings — Gmail SMTP & Custom SMTP
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Send invoices and quotations with PDF attachments directly from your own email
+                account without signing in to Invoice Studio. Credentials are encrypted server-side.
               </p>
             </div>
           </div>
 
           <span
-            className={`text-xs font-bold whitespace-nowrap shrink-0 ${
-              smtpConfig.configured ? 'text-emerald-700' : 'text-slate-500'
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border ${
+              smtpConfig.configured
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                : 'bg-slate-100 border-slate-200 text-slate-600'
             }`}
           >
-            {smtpConfig.configured
-              ? smtpConfig.verifiedAt
-                ? 'Configured · Verified'
-                : 'Configured'
-              : 'Not Configured'}
+            {smtpConfig.configured ? (
+              <>
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                {smtpConfig.provider === 'gmail_smtp' ? 'Gmail SMTP Ready' : 'Custom SMTP Ready'}
+              </>
+            ) : (
+              <span>Not Configured</span>
+            )}
           </span>
         </div>
 
-        <form onSubmit={handleSaveSmtp} className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
-          <div>
-            <label htmlFor="smtp-host" className="block font-semibold text-slate-700 mb-1">
-              SMTP Host *
-            </label>
-            <input
-              id="smtp-host"
-              type="text"
-              placeholder="smtp.yourcompany.com"
-              value={smtpHost}
-              onChange={(e) => setSmtpHost(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="smtp-port" className="block font-semibold text-slate-700 mb-1">
-              SMTP Port *
-            </label>
-            <input
-              id="smtp-port"
-              type="number"
-              value={smtpPort}
-              onChange={(e) => setSmtpPort(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono tabular-nums"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="smtp-security" className="block font-semibold text-slate-700 mb-1">
-              Encryption / Security
-            </label>
-            <select
-              id="smtp-security"
-              value={smtpSecurity}
-              onChange={(e) =>
-                setSmtpSecurity(e.target.value as 'SSL' | 'STARTTLS' | 'NONE')
-              }
-              className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50"
+        <div className="p-6 space-y-6">
+          {/* Option A vs Option B Switcher */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => handleSelectSmtpProvider('gmail_smtp')}
+              className={`p-4 rounded-2xl border-2 text-left transition-all cursor-pointer ${
+                smtpProvider === 'gmail_smtp'
+                  ? 'border-indigo-600 bg-indigo-50/50'
+                  : 'border-slate-200 hover:border-slate-300 bg-white'
+              }`}
             >
-              <option value="STARTTLS">TLS / STARTTLS (Port 587)</option>
-              <option value="SSL">SSL / TLS (Port 465)</option>
-              <option value="NONE">None (Local Relay Only)</option>
-            </select>
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wide text-indigo-700">
+                  Option A — Recommended for Gmail
+                </span>
+                {smtpProvider === 'gmail_smtp' && (
+                  <CheckCircle2 className="w-4 h-4 text-indigo-600" />
+                )}
+              </div>
+              <p className="text-sm font-bold text-slate-900 mt-1">Gmail SMTP (App Password)</p>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Uses smtp.gmail.com (Port 465 SSL or 587 STARTTLS) with a Google App Password.
+              </p>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleSelectSmtpProvider('custom_smtp')}
+              className={`p-4 rounded-2xl border-2 text-left transition-all cursor-pointer ${
+                smtpProvider === 'custom_smtp'
+                  ? 'border-indigo-600 bg-indigo-50/50'
+                  : 'border-slate-200 hover:border-slate-300 bg-white'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wide text-slate-600">
+                  Option B — Any Business Provider
+                </span>
+                {smtpProvider === 'custom_smtp' && (
+                  <CheckCircle2 className="w-4 h-4 text-indigo-600" />
+                )}
+              </div>
+              <p className="text-sm font-bold text-slate-900 mt-1">Custom SMTP Server</p>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Works with Zoho Mail, Outlook/Office 365, Brevo, Amazon SES, Hostinger, or cPanel.
+              </p>
+            </button>
           </div>
 
-          <div>
-            <label htmlFor="smtp-user" className="block font-semibold text-slate-700 mb-1">
-              SMTP Username
-            </label>
-            <input
-              id="smtp-user"
-              type="text"
-              placeholder="billing@yourcompany.com"
-              value={smtpUsername}
-              onChange={(e) => setSmtpUsername(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="smtp-pass" className="block font-semibold text-slate-700 mb-1">
-              SMTP Password / App Password
-            </label>
-            <div className="relative">
-              <KeyRound className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
-              <input
-                id="smtp-pass"
-                type="password"
-                autoComplete="new-password"
-                placeholder={
-                  smtpConfig.hasPassword
-                    ? 'Saved encrypted — enter to replace'
-                    : 'Enter SMTP password'
-                }
-                value={smtpPassword}
-                onChange={(e) => setSmtpPassword(e.target.value)}
-                className="w-full pl-8 pr-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono"
-              />
+          {smtpProvider === 'gmail_smtp' && (
+            <div className="p-4 rounded-2xl bg-indigo-50/70 border border-indigo-200 text-xs text-indigo-950 flex items-start gap-2.5">
+              <KeyRound className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="font-bold">Important: Use a Gmail App Password</p>
+                <p className="text-indigo-900 leading-relaxed">
+                  Gmail SMTP requires a 16-character <strong>App Password</strong> generated from
+                  your Google Account Security settings (2-Step Verification must be enabled). Do
+                  not use your normal Gmail login password.
+                </p>
+              </div>
             </div>
-          </div>
+          )}
 
-          <div>
-            <label htmlFor="smtp-sender-name" className="block font-semibold text-slate-700 mb-1">
-              Sender Display Name
-            </label>
-            <input
-              id="smtp-sender-name"
-              type="text"
-              placeholder="Acme Billing Desk"
-              value={smtpSenderName}
-              onChange={(e) => setSmtpSenderName(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50"
-            />
-          </div>
+          {/* SMTP Config Form */}
+          <form onSubmit={handleSaveSmtp} className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  SMTP Host
+                </label>
+                <input
+                  type="text"
+                  value={smtpProvider === 'gmail_smtp' ? 'smtp.gmail.com' : smtpHost}
+                  disabled={smtpProvider === 'gmail_smtp'}
+                  onChange={(e) => setSmtpHost(e.target.value)}
+                  placeholder="smtp.zoho.in or smtp.office365.com"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm disabled:bg-slate-100 disabled:text-slate-600"
+                  required
+                />
+              </div>
 
-          <div className="sm:col-span-2">
-            <label htmlFor="smtp-sender-email" className="block font-semibold text-slate-700 mb-1">
-              Sender Email Address *
-            </label>
-            <input
-              id="smtp-sender-email"
-              type="email"
-              placeholder="invoices@yourcompany.com"
-              value={smtpSenderEmail}
-              onChange={(e) => setSmtpSenderEmail(e.target.value)}
-              className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono"
-            />
-          </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  SMTP Port
+                </label>
+                {smtpProvider === 'gmail_smtp' ? (
+                  <select
+                    value={smtpPort}
+                    onChange={(e) => {
+                      const p = Number(e.target.value);
+                      setSmtpPort(p);
+                      setSmtpEncryption(p === 465 ? 'SSL' : 'STARTTLS');
+                    }}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm bg-white"
+                  >
+                    <option value={465}>465 (SSL / TLS)</option>
+                    <option value={587}>587 (STARTTLS)</option>
+                  </select>
+                ) : (
+                  <input
+                    type="number"
+                    value={smtpPort}
+                    onChange={(e) => setSmtpPort(Number(e.target.value))}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm"
+                    required
+                  />
+                )}
+              </div>
 
-          <div className="flex items-end gap-2">
-            <button
-              type="submit"
-              disabled={busyAction !== null}
-              className="flex-1 py-2 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold cursor-pointer whitespace-nowrap"
-            >
-              {busyAction === 'save_smtp' ? 'Saving...' : 'Save SMTP'}
-            </button>
-            <button
-              type="button"
-              disabled={busyAction !== null}
-              onClick={() => void handleTestSmtpConnection()}
-              className="py-2 px-3.5 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 font-bold cursor-pointer whitespace-nowrap"
-            >
-              {busyAction === 'test_smtp' ? 'Testing...' : 'Test Connection'}
-            </button>
-          </div>
-        </form>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Encryption Mode
+                </label>
+                <select
+                  value={smtpEncryption}
+                  onChange={(e) =>
+                    setSmtpEncryption(e.target.value as 'SSL' | 'STARTTLS' | 'NONE')
+                  }
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm bg-white"
+                >
+                  <option value="SSL">SSL / TLS (Port 465)</option>
+                  <option value="STARTTLS">STARTTLS (Port 587)</option>
+                  {smtpProvider === 'custom_smtp' && <option value="NONE">None</option>}
+                </select>
+              </div>
+            </div>
 
-        {/* Send Test Email via SMTP & Delete SMTP Controls */}
-        <div className="pt-4 border-t border-slate-100 flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs">
-          <div className="flex flex-col sm:flex-row sm:items-center gap-2 flex-1 max-w-xl">
-            <label htmlFor="smtp-test-recipient" className="font-semibold text-slate-700 whitespace-nowrap">
-              Send SMTP Test Email:
-            </label>
-            <input
-              id="smtp-test-recipient"
-              type="email"
-              placeholder="recipient@example.com"
-              value={smtpTestTo}
-              onChange={(e) => setSmtpTestTo(e.target.value)}
-              className="flex-1 px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono"
-            />
-            <button
-              type="button"
-              disabled={busyAction !== null || !smtpConfig.configured || !smtpTestTo.trim()}
-              onClick={() => void handleSendTestEmail('smtp')}
-              className="px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold inline-flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
-            >
-              <Send className="w-3.5 h-3.5" />
-              <span>{busyAction === 'test_email_smtp' ? 'Sending...' : 'Send Test Email'}</span>
-            </button>
-          </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  {smtpProvider === 'gmail_smtp' ? 'Gmail Email Address (Username)' : 'SMTP Username'}
+                </label>
+                <input
+                  type="text"
+                  value={smtpUsername}
+                  onChange={(e) => {
+                    setSmtpUsername(e.target.value);
+                    if (!smtpSenderEmail) setSmtpSenderEmail(e.target.value);
+                  }}
+                  placeholder={
+                    smtpProvider === 'gmail_smtp' ? 'billing@gmail.com' : 'billing@yourdomain.com'
+                  }
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm"
+                  required
+                />
+              </div>
 
-          {smtpConfig.configured && (
-            <div className="flex items-center gap-2">
-              {!confirmDeleteSmtp ? (
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  {smtpProvider === 'gmail_smtp' ? 'Gmail App Password' : 'SMTP Password'}
+                  {smtpConfig.hasPassword && (
+                    <span className="ml-2 text-[11px] font-medium text-emerald-700">
+                      (Encrypted password saved — leave blank to keep existing)
+                    </span>
+                  )}
+                </label>
+                <input
+                  type="password"
+                  value={smtpPassword}
+                  onChange={(e) => setSmtpPassword(e.target.value)}
+                  placeholder={
+                    smtpConfig.hasPassword
+                      ? '••••••••••••••• (unchanged)'
+                      : smtpProvider === 'gmail_smtp'
+                        ? '16-character App Password'
+                        : 'Enter SMTP password'
+                  }
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm"
+                  required={!smtpConfig.hasPassword}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Sender Name
+                </label>
+                <input
+                  type="text"
+                  value={smtpSenderName}
+                  onChange={(e) => setSmtpSenderName(e.target.value)}
+                  placeholder="Your Business Name"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Sender Email
+                </label>
+                <input
+                  type="email"
+                  value={smtpSenderEmail}
+                  onChange={(e) => setSmtpSenderEmail(e.target.value)}
+                  placeholder="billing@yourdomain.com"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Reply-To Address (Optional)
+                </label>
+                <input
+                  type="email"
+                  value={smtpReplyTo}
+                  onChange={(e) => setSmtpReplyTo(e.target.value)}
+                  placeholder="accounts@yourdomain.com"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm"
+                />
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex flex-wrap items-center gap-2.5 pt-2">
+              <button
+                type="submit"
+                disabled={smtpSaving}
+                className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-xs font-bold inline-flex items-center gap-2 cursor-pointer"
+              >
+                {smtpSaving ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Save className="w-4 h-4" />
+                )}
+                <span>Save Email Settings</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleTestSmtp}
+                disabled={smtpTesting}
+                className="px-4 py-2.5 rounded-xl bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                {smtpTesting ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Wifi className="w-4 h-4 text-indigo-600" />
+                )}
+                <span>Test SMTP Connection</span>
+              </button>
+
+              {smtpConfig.configured && !confirmDeleteSmtp && (
                 <button
                   type="button"
-                  disabled={busyAction !== null}
                   onClick={() => setConfirmDeleteSmtp(true)}
-                  className="px-3.5 py-2 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                  className="px-3.5 py-2.5 rounded-xl bg-white border border-rose-200 hover:bg-rose-50 text-rose-700 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
-                  <span>Delete SMTP Config</span>
+                  <span>Remove Credentials</span>
                 </button>
-              ) : (
-                <div className="flex items-center gap-2">
-                  <span className="text-rose-700 font-semibold">Confirm delete?</span>
+              )}
+
+              {confirmDeleteSmtp && (
+                <div className="inline-flex items-center gap-2 bg-rose-50 border border-rose-200 rounded-xl px-3 py-1.5">
+                  <span className="text-xs font-semibold text-rose-800">Delete saved SMTP?</span>
                   <button
                     type="button"
-                    disabled={busyAction !== null}
-                    onClick={() => void handleDeleteSmtp()}
-                    className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold cursor-pointer"
+                    onClick={handleDeleteSmtp}
+                    className="px-2.5 py-1 rounded-lg bg-rose-600 text-white text-xs font-bold cursor-pointer"
                   >
-                    Yes, Delete
+                    Confirm
                   </button>
                   <button
                     type="button"
                     onClick={() => setConfirmDeleteSmtp(false)}
-                    className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-700 font-semibold cursor-pointer"
+                    className="px-2 py-1 rounded-lg bg-white border border-slate-200 text-slate-600 text-xs font-semibold cursor-pointer"
                   >
                     Cancel
                   </button>
                 </div>
               )}
+            </div>
+          </form>
+
+          {/* Send Test Email Box */}
+          <div className="pt-4 border-t border-slate-100 flex flex-col sm:flex-row sm:items-end gap-3">
+            <div className="flex-1 max-w-md">
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Send a Test Email
+              </label>
+              <input
+                type="email"
+                value={testEmailRecipient}
+                onChange={(e) => setTestEmailRecipient(e.target.value)}
+                placeholder="recipient@example.com"
+                className="w-full px-3.5 py-2 rounded-xl border border-slate-300 text-sm"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={handleSendTestEmail}
+              disabled={smtpSendingTest || !smtpConfig.configured}
+              className="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              {smtpSendingTest ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Send className="w-3.5 h-3.5" />
+              )}
+              <span>Send Test Email</span>
+            </button>
+          </div>
+
+          {smtpError && (
+            <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              <span>{smtpError}</span>
+            </div>
+          )}
+
+          {smtpSuccess && (
+            <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-start gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+              <span>{smtpSuccess}</span>
             </div>
           )}
         </div>

@@ -460,7 +460,7 @@ export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
                   name="legalName"
                   value={company.legalName}
                   onChange={handleChange}
-                  placeholder="e.g. TBT VENTURES PRIVATE LIMITED"
+                  placeholder="e.g. Acme Business Solutions Pvt Ltd"
                   className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-600 font-medium"
                   required
                 />
@@ -473,7 +473,7 @@ export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
                   name="displayName"
                   value={company.displayName}
                   onChange={handleChange}
-                  placeholder="e.g. ThinkBeyondThink"
+                  placeholder="e.g. Acme Solutions"
                   className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-600"
                 />
               </div>
@@ -575,7 +575,7 @@ export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
                   name="city"
                   value={company.city}
                   onChange={handleChange}
-                  placeholder="e.g. Gurugram"
+                  placeholder="e.g. Mumbai"
                   className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-600"
                   required
                 />
@@ -973,7 +973,7 @@ export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
                         name="authorizedPerson"
                         value={company.authorizedPerson}
                         onChange={handleChange}
-                        placeholder="e.g. Aarav Sharma"
+                        placeholder="e.g. Authorized Signatory Name"
                         className="w-full border border-slate-300 rounded-xl px-3.5 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-600"
                         required
                       />
@@ -1223,7 +1223,7 @@ export const CompanySettingsView: React.FC<CompanySettingsViewProps> = ({
                           type="text"
                           value={acc.branch}
                           onChange={(e) => handleUpdateBankAccount(acc.id, 'branch', e.target.value)}
-                          placeholder="e.g. Cyber City, Gurugram"
+                          placeholder="e.g. Main Business Branch"
                           className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs outline-none"
                         />
                       </div>

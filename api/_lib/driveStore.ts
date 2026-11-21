@@ -167,7 +167,7 @@ function resolveSlotFolderId(folders: DriveWorkspaceFolders, slot: WorkspaceFold
 
 export function createLiveDriveTransport(folderId: string, config: AppServerConfig): DriveTransport {
   let cachedDrive: drive_v3.Drive | null = null;
-  let cachedFolders: DriveWorkspaceFolders | null = null;
+  let cachedFoldersPromise: Promise<DriveWorkspaceFolders> | null = null;
 
   const getDrive = (): drive_v3.Drive => {
     if (!cachedDrive) {
@@ -177,10 +177,15 @@ export function createLiveDriveTransport(folderId: string, config: AppServerConf
   };
 
   const getFolders = async (): Promise<DriveWorkspaceFolders> => {
-    if (!cachedFolders) {
-      cachedFolders = await ensureWorkspaceFolderTree(getDrive(), folderId, config);
+    if (!cachedFoldersPromise) {
+      cachedFoldersPromise = ensureWorkspaceFolderTree(getDrive(), folderId, config).catch(
+        (err) => {
+          cachedFoldersPromise = null;
+          throw err;
+        }
+      );
     }
-    return cachedFolders;
+    return cachedFoldersPromise;
   };
 
   return {
@@ -499,9 +504,10 @@ export class GoogleDriveStore {
   }
 
   async exportAllWorkspaceData() {
-    const [folders, workspace, customers, invoices, quotations, sheetsState, emailLogs, backups] =
+    // Ensure/verify the Drive folder tree strictly once before reading workspace files
+    const folders = await this.ensureFolders();
+    const [workspace, customers, invoices, quotations, sheetsState, emailLogs, backups] =
       await Promise.all([
-        this.ensureFolders(),
         this.readWorkspaceState(),
         this.readCustomers(),
         this.readInvoices(),

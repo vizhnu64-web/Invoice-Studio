@@ -235,7 +235,7 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
   const syncQuotationToCloud = async (record: QuotationRecord) => {
     if (!driveConnection?.isConnected) return;
     try {
-      await workspaceApi.saveQuotation(record);
+      await workspaceApi.saveRemoteQuotation(record);
     } catch {
       // Local state remains saved; Drive auto-sync retries on next workspace sync
     }
@@ -618,18 +618,17 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
       const fileName = `Quotation-${q.quotationNumber.replace(/[^a-zA-Z0-9_-]/g, '_')}.pdf`;
       const uploaded = await workspaceApi.uploadPdfToDrive({
         documentType: 'quotation',
-        documentId: q.id,
         fileName,
         pdfBase64: dataUri,
       });
       setQuotations((prev) =>
         prev.map((item) =>
-          item.id === q.id ? { ...item, pdfDriveFileId: uploaded.driveFileId } : item
+          item.id === q.id ? { ...item, pdfDriveFileId: uploaded.file.id } : item
         )
       );
       setBanner({
         type: 'success',
-        text: `Saved ${uploaded.fileName} to Google Drive (Invoice Studio/Quotations/PDFs).`,
+        text: `Saved ${uploaded.file.name} to Google Drive (Invoice Studio/Quotations/PDFs).`,
       });
     } catch (err: any) {
       setBanner({
@@ -668,13 +667,7 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
       });
       setQuotations((prev) => prev.map((q) => (q.id === updated.id ? updated : q)));
       if (driveConnection?.isConnected) {
-        workspaceApi
-          .updateQuotationStatus(updated.id, {
-            status: approvalAction,
-            notes: approvalNotes || undefined,
-            rejectionReason: approvalAction === 'Not Approved' ? rejectionReason : undefined,
-          })
-          .catch(() => {});
+        workspaceApi.saveRemoteQuotation(updated).catch(() => {});
       }
       setBanner({
         type: 'success',
@@ -702,7 +695,7 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
 
       if (driveConnection?.isConnected) {
         workspaceApi
-          .convertQuotation(convertModalTarget.id, createdInvoice)
+          .convertRemoteQuotation(convertModalTarget.id, createdInvoice)
           .catch(() => {});
       }
 
@@ -723,7 +716,7 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
     const num = deleteModalTarget.quotationNumber;
     setQuotations((prev) => prev.filter((q) => q.id !== id));
     if (driveConnection?.isConnected) {
-      workspaceApi.deleteQuotation(id).catch(() => {});
+      workspaceApi.deleteRemoteQuotation(id).catch(() => {});
     }
     setDeleteModalTarget(null);
     setBanner({ type: 'info', text: `Deleted quotation ${num}.` });

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import 'dotenv/config';
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +11,7 @@ import { createServer as createViteServer } from 'vite';
 import {
   handleDriveBackup,
   handleDriveConnect,
+  handleDriveDiagnose,
   handleDriveRestore,
   handleDriveStatus,
   handleDriveSync,
@@ -59,6 +61,9 @@ async function startServer() {
   );
   app.all('/api/drive/test', (req, res) =>
     handleDriveTest(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
+  );
+  app.all('/api/drive/diagnose', (req, res) =>
+    handleDriveDiagnose(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
   );
   app.all('/api/drive/status', (req, res) =>
     handleDriveStatus(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)

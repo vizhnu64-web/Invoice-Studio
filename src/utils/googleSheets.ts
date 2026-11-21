@@ -105,11 +105,14 @@ export function extractGoogleSheetId(urlOrId: string): string | null {
 export function extractDriveFolderId(urlOrId: string): string | null {
   const clean = (urlOrId || '').trim();
   if (!clean) return null;
-  const matchFolder = clean.match(/\/folders\/([a-zA-Z0-9_-]{10,120})/);
+  if (/drive\.google\.com\/drive\/(u\/\d+\/)?my-drive\/?([?#].*)?$/i.test(clean)) return null;
+  if (/drive\.google\.com\/file\/d\//i.test(clean)) return null;
+  const matchFolder = clean.match(/\/folders\/([a-zA-Z0-9_-]{10,120})(?:[/?#]|$)/);
   if (matchFolder?.[1]) return matchFolder[1];
-  const matchParam = clean.match(/[?&]id=([a-zA-Z0-9_-]{10,120})/);
+  const matchParam = clean.match(/[?&]id=([a-zA-Z0-9_-]{10,120})(?:[&#]|$)/);
   if (matchParam?.[1]) return matchParam[1];
-  if (/^[a-zA-Z0-9_-]{15,120}$/.test(clean)) return clean;
+  if (/^https?:\/\//i.test(clean) || clean.includes('/') || clean.includes('.')) return null;
+  if (/^[a-zA-Z0-9_-]{15,120}$/.test(clean) && /[A-Z0-9_]/.test(clean)) return clean;
   return null;
 }
 

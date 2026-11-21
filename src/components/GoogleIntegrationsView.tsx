@@ -5,6 +5,7 @@
 
 import React, { useEffect, useState } from 'react';
 import {
+  Activity,
   AlertCircle,
   Archive,
   Check,
@@ -38,6 +39,7 @@ import { extractDriveFolderId } from '../utils/googleSheets';
 import {
   DriveBackupFile,
   DriveConnectResponse,
+  DriveDiagnosticReport,
   workspaceApi,
 } from '../utils/workspaceApi';
 
@@ -94,6 +96,13 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
   const [folderUrlInput, setFolderUrlInput] = useState(driveConnection?.folderUrl || '');
   const [driveLoading, setDriveLoading] = useState(false);
   const [driveTesting, setDriveTesting] = useState(false);
+  const [driveDiagnosing, setDriveDiagnosing] = useState(false);
+  const [diagnosticReport, setDiagnosticReport] = useState<DriveDiagnosticReport | null>(null);
+  const [driveErrorMeta, setDriveErrorMeta] = useState<{
+    code?: string;
+    apiStatus?: number | null;
+    apiReason?: string | null;
+  } | null>(null);
   const [driveSyncing, setDriveSyncing] = useState(false);
   const [driveBackupLoading, setDriveBackupLoading] = useState(false);
   const [driveRestoringId, setDriveRestoringId] = useState<string | null>(null);
@@ -191,6 +200,7 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
   const handleConnectDrive = async (e: React.FormEvent) => {
     e.preventDefault();
     setDriveError(null);
+    setDriveErrorMeta(null);
     setDriveSuccess(null);
     setPermissionEmailHint(null);
 
@@ -198,7 +208,7 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
     const extracted = extractDriveFolderId(trimmed);
     if (!extracted) {
       setDriveError(
-        'Invalid Google Drive folder URL. Paste a link like https://drive.google.com/drive/folders/<folder-id>.'
+        'Invalid Google Drive folder URL. Paste a specific folder link like https://drive.google.com/drive/folders/<folder-id> (not the root My Drive URL or a file link).'
       );
       return;
     }
@@ -215,6 +225,11 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
       );
     } catch (err: any) {
       setDriveError(err?.message || 'Failed to connect Google Drive folder.');
+      setDriveErrorMeta({
+        code: err?.code,
+        apiStatus: err?.details?.apiStatus ?? err?.status ?? null,
+        apiReason: err?.details?.apiReason ?? null,
+      });
       if (err?.details?.serviceAccountEmail) {
         setPermissionEmailHint(err.details.serviceAccountEmail);
       }
@@ -225,6 +240,7 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
 
   const handleTestDrive = async () => {
     setDriveError(null);
+    setDriveErrorMeta(null);
     setDriveSuccess(null);
     setPermissionEmailHint(null);
     const targetUrl = folderUrlInput.trim() || driveConnection?.folderUrl || '';
@@ -236,15 +252,43 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
     try {
       const res = await workspaceApi.testDriveConnection(targetUrl);
       setDriveSuccess(
-        `Connection verified! Folder "${res.folderName}" is reachable with Editor permissions.`
+        `Connection verified! Folder "${res.folderName}" is reachable with Editor capabilities (canEdit=${String(res.canEdit)}, canAddChildren=${String(res.canAddChildren ?? true)}, canListChildren=${String(res.canListChildren ?? true)}).`
       );
     } catch (err: any) {
       setDriveError(err?.message || 'Google Drive connection test failed.');
+      setDriveErrorMeta({
+        code: err?.code,
+        apiStatus: err?.details?.apiStatus ?? err?.status ?? null,
+        apiReason: err?.details?.apiReason ?? null,
+      });
       if (err?.details?.serviceAccountEmail) {
         setPermissionEmailHint(err.details.serviceAccountEmail);
       }
     } finally {
       setDriveTesting(false);
+    }
+  };
+
+  const handleDiagnoseDrive = async () => {
+    setDriveError(null);
+    setDriveErrorMeta(null);
+    setDriveSuccess(null);
+    const targetUrl = folderUrlInput.trim() || driveConnection?.folderUrl || '';
+    if (!targetUrl) {
+      setDriveError('Paste a Google Drive folder URL before running diagnostics.');
+      return;
+    }
+    setDriveDiagnosing(true);
+    try {
+      const report = await workspaceApi.diagnoseDriveFolder(targetUrl);
+      setDiagnosticReport(report);
+      if (report.serviceAccountEmail) {
+        setPermissionEmailHint(report.serviceAccountEmail);
+      }
+    } catch (err: any) {
+      setDriveError(err?.message || 'Failed to run Google Drive diagnostics.');
+    } finally {
+      setDriveDiagnosing(false);
     }
   };
 
@@ -507,10 +551,10 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
               ) : (
                 <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2">
                   <Info className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span>
+                  <span className="min-w-0 leading-relaxed">
                     Server environment variables{' '}
-                    <code className="font-mono">GOOGLE_SERVICE_ACCOUNT_EMAIL</code> and{' '}
-                    <code className="font-mono">GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY</code> are not
+                    <code className="font-mono break-all">GOOGLE_SERVICE_ACCOUNT_EMAIL</code> and{' '}
+                    <code className="font-mono break-all">GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY</code> are not
                     configured yet on this deployment. Add them on your server to enable live Google
                     Drive persistence.
                   </span>
@@ -558,6 +602,20 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
                     <Wifi className="w-3.5 h-3.5 text-indigo-600" />
                   )}
                   <span>Test Connection</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleDiagnoseDrive}
+                  disabled={driveDiagnosing}
+                  className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  {driveDiagnosing ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Activity className="w-3.5 h-3.5 text-cyan-400" />
+                  )}
+                  <span>Run Diagnostics</span>
                 </button>
 
                 {driveConnection?.isConnected && (
@@ -634,7 +692,20 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
               <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex items-start gap-2.5">
                 <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
                 <div className="space-y-1">
-                  <p className="font-bold">Google Drive Connection Error</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="font-bold">Google Drive Connection Error</p>
+                    {driveErrorMeta?.code && (
+                      <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-800 border border-rose-200">
+                        {driveErrorMeta.code}
+                      </span>
+                    )}
+                    {driveErrorMeta?.apiStatus && (
+                      <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-white text-rose-800 border border-rose-200">
+                        HTTP {driveErrorMeta.apiStatus}
+                        {driveErrorMeta.apiReason ? ` · ${driveErrorMeta.apiReason}` : ''}
+                      </span>
+                    )}
+                  </div>
                   <p>{driveError || driveSyncError}</p>
                 </div>
               </div>
@@ -644,6 +715,97 @@ export const GoogleIntegrationsView: React.FC<GoogleIntegrationsViewProps> = ({
               <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-start gap-2.5">
                 <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
                 <p className="font-medium">{driveSuccess}</p>
+              </div>
+            )}
+
+            {/* Non-Destructive Drive Folder Diagnostic Report */}
+            {diagnosticReport && (
+              <div
+                className={`p-4 rounded-2xl border text-xs space-y-3 ${
+                  diagnosticReport.ok
+                    ? 'bg-emerald-50/70 border-emerald-200 text-slate-800'
+                    : 'bg-slate-50 border-slate-300 text-slate-800'
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Activity
+                      className={`w-4 h-4 ${
+                        diagnosticReport.ok ? 'text-emerald-600' : 'text-amber-600'
+                      }`}
+                    />
+                    <span className="font-bold text-slate-900">
+                      Google Drive Diagnostic Report (Read-Only)
+                    </span>
+                  </div>
+                  <span
+                    className={`font-mono text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                      diagnosticReport.ok
+                        ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                        : 'bg-amber-100 text-amber-900 border-amber-300'
+                    }`}
+                  >
+                    {diagnosticReport.diagnosis.probableCause}
+                    {diagnosticReport.diagnosis.apiStatus
+                      ? ` · HTTP ${diagnosticReport.diagnosis.apiStatus}`
+                      : ''}
+                    {diagnosticReport.diagnosis.apiReason
+                      ? ` · ${diagnosticReport.diagnosis.apiReason}`
+                      : ''}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                  <div className="p-2.5 rounded-xl bg-white border border-slate-200">
+                    <p className="text-slate-500 font-semibold">Backend Service Account Email</p>
+                    <p className="font-mono text-slate-900 break-all mt-0.5">
+                      {diagnosticReport.serviceAccountEmail || 'Not configured'}
+                    </p>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-white border border-slate-200">
+                    <p className="text-slate-500 font-semibold">Extracted Folder ID</p>
+                    <p className="font-mono text-slate-900 break-all mt-0.5">
+                      {diagnosticReport.extractedFolderId || 'Invalid URL / none'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5 text-[11px]">
+                  <p>
+                    <span className="font-bold text-slate-900">1. Credentials:</span>{' '}
+                    {diagnosticReport.steps.credentials.message}
+                  </p>
+                  <p>
+                    <span className="font-bold text-slate-900">2. files.get:</span>{' '}
+                    {diagnosticReport.steps.folderMetadata.attempted
+                      ? diagnosticReport.steps.folderMetadata.folder
+                        ? `HTTP ${diagnosticReport.steps.folderMetadata.apiStatus} — "${diagnosticReport.steps.folderMetadata.folder.name}" (isFolder=${String(diagnosticReport.steps.folderMetadata.folder.isFolder)}, trashed=${String(diagnosticReport.steps.folderMetadata.folder.trashed)}, canEdit=${String(diagnosticReport.steps.folderMetadata.folder.capabilities.canEdit)}, canAddChildren=${String(diagnosticReport.steps.folderMetadata.folder.capabilities.canAddChildren)}, canListChildren=${String(diagnosticReport.steps.folderMetadata.folder.capabilities.canListChildren)})`
+                        : `Failed — HTTP ${diagnosticReport.steps.folderMetadata.apiStatus ?? 'N/A'} (${diagnosticReport.steps.folderMetadata.apiReason || 'error'}): ${diagnosticReport.steps.folderMetadata.apiMessage}`
+                      : 'Not attempted'}
+                  </p>
+                  <p>
+                    <span className="font-bold text-slate-900">3. permissions.list:</span>{' '}
+                    {diagnosticReport.steps.permissionsList.attempted
+                      ? diagnosticReport.steps.permissionsList.note
+                      : 'Not attempted'}
+                  </p>
+                  <p>
+                    <span className="font-bold text-slate-900">4. files.list (children):</span>{' '}
+                    {diagnosticReport.steps.listChildren.attempted
+                      ? diagnosticReport.steps.listChildren.ok
+                        ? `HTTP ${diagnosticReport.steps.listChildren.apiStatus} — ${diagnosticReport.steps.listChildren.childrenCount} child item(s) visible`
+                        : `Failed — HTTP ${diagnosticReport.steps.listChildren.apiStatus ?? 'N/A'} (${diagnosticReport.steps.listChildren.apiReason || 'error'}): ${diagnosticReport.steps.listChildren.apiMessage}`
+                      : 'Not attempted'}
+                  </p>
+                </div>
+
+                <div className="p-3 rounded-xl bg-white border border-slate-200 space-y-1">
+                  <p className="font-bold text-slate-900">Diagnosis</p>
+                  <p className="text-slate-700">{diagnosticReport.diagnosis.summary}</p>
+                  <p className="text-indigo-700 font-medium">
+                    Next step: {diagnosticReport.diagnosis.recommendedAction}
+                  </p>
+                </div>
               </div>
             )}
 

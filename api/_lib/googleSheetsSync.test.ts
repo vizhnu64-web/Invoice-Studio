@@ -3,17 +3,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { generateKeyPairSync } from 'node:crypto';
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { AppServerConfig, getIntegrationDiagnostics } from './config.js';
+import {
+  AppServerConfig,
+  getIntegrationDiagnostics,
+  normalizeServiceAccountPrivateKey,
+  validateServiceAccountPrivateKey,
+} from './config.js';
 import { decryptSecret, encryptSecret } from './crypto.js';
 import {
   DRIVE_ROOT_FOLDER_NAME,
+  diagnoseDriveFolderAccess,
   DriveFileMeta,
   DriveWorkspaceFolders,
   extractDriveFolderId,
+  mapDriveApiError,
 } from './driveService.js';
 import {
   DriveTransport,
@@ -25,7 +33,7 @@ import {
   getPublicSmtpConfig,
   saveSmtpConfig,
 } from './emailBackendService.js';
-import { handleHealth, handleWorkspace } from './handlers.js';
+import { handleDriveDiagnose, handleHealth, handleWorkspace } from './handlers.js';
 import { NormalizedRequest, NormalizedResponse } from './http.js';
 import {
   buildSheetRange,
@@ -406,4 +414,315 @@ describe('Invoice Studio — No-Sign-In Service Account & Workspace Isolation Su
     );
     assert.equal(diff.createdCount, 1);
   });
+
+  test('8. Drive Diagnostics: Exact files.get Fields, permissions.list Writer Check, listChildren & Zero Mutations', async () => {
+    const saEmail = 'instservice@invoice-studio-515206.iam.gserviceaccount.com';
+    const saConfig: AppServerConfig = {
+      ...TEST_CONFIG,
+      googleServiceAccountEmail: saEmail,
+      googleProjectId: 'invoice-studio-515206',
+    };
+
+    let capturedGetArgs: any = null;
+    let mutatingCalls = 0;
+
+    const mockDrive: any = {
+      files: {
+        async get(args: any) {
+          capturedGetArgs = args;
+          return {
+            status: 200,
+            data: {
+              id: args.fileId,
+              name: 'Client Billing Folder',
+              mimeType: 'application/vnd.google-apps.folder',
+              trashed: false,
+              capabilities: {
+                canEdit: true,
+                canAddChildren: true,
+                canListChildren: true,
+              },
+            },
+          };
+        },
+        async list() {
+          return {
+            status: 200,
+            data: {
+              files: [{ id: 'child_1', name: 'Invoice Studio', mimeType: 'application/vnd.google-apps.folder' }],
+            },
+          };
+        },
+        async create() {
+          mutatingCalls++;
+          throw new Error('Diagnostics must NEVER call files.create');
+        },
+        async update() {
+          mutatingCalls++;
+          throw new Error('Diagnostics must NEVER call files.update');
+        },
+        async delete() {
+          mutatingCalls++;
+          throw new Error('Diagnostics must NEVER call files.delete');
+        },
+      },
+      permissions: {
+        async list() {
+          return {
+            status: 200,
+            data: {
+              permissions: [
+                { id: 'p1', type: 'user', role: 'owner', emailAddress: 'owner@example.com' },
+                { id: 'p2', type: 'user', role: 'writer', emailAddress: saEmail },
+              ],
+            },
+          };
+        },
+      },
+    };
+
+    const report = await diagnoseDriveFolderAccess({
+      folderUrlOrId: 'https://drive.google.com/drive/u/0/folders/1MyDriveFolderId987654321?usp=sharing',
+      config: saConfig,
+      driveClientOverride: mockDrive,
+    });
+
+    assert.equal(mutatingCalls, 0, 'Diagnostics must be strictly read-only');
+    assert.equal(report.ok, true);
+    assert.equal(report.serviceAccountEmail, saEmail);
+    assert.equal(report.extractedFolderId, '1MyDriveFolderId987654321');
+    assert.equal(
+      capturedGetArgs?.fields,
+      'id,name,mimeType,trashed,capabilities(canEdit,canAddChildren,canListChildren)'
+    );
+    assert.equal(report.steps.folderMetadata.ok, true);
+    assert.equal(report.steps.folderMetadata.folder?.isFolder, true);
+    assert.equal(report.steps.folderMetadata.folder?.trashed, false);
+    assert.equal(report.steps.permissionsList.accessible, true);
+    assert.equal(report.steps.permissionsList.serviceAccountPermissionFound, true);
+    assert.equal(report.steps.permissionsList.serviceAccountRole, 'writer');
+    assert.equal(report.steps.permissionsList.hasWriterPermission, true);
+    assert.equal(report.steps.listChildren.ok, true);
+    assert.equal(report.steps.listChildren.childrenCount, 1);
+    assert.equal(report.steps.listChildren.hasInvoiceStudioFolder, true);
+    assert.equal(report.diagnosis.probableCause, 'HEALTHY');
+    assert.equal(JSON.stringify(report).includes('TEST_KEY_DATA'), false, 'Private key must never leak');
+
+    // My Drive Editor restriction: permissions.list returns 403 -> still healthy if files.get & files.list succeed
+    const mockDriveRestrictedPermList = {
+      ...mockDrive,
+      permissions: {
+        async list() {
+          const err: any = new Error('The user does not have sufficient permissions for this file.');
+          err.response = {
+            status: 403,
+            data: { error: { errors: [{ reason: 'insufficientFilePermissions', message: err.message }] } },
+          };
+          throw err;
+        },
+      },
+    };
+
+    const reportRestrictedPerm = await diagnoseDriveFolderAccess({
+      folderUrlOrId: 'https://drive.google.com/drive/folders/1MyDriveFolderId987654321',
+      config: saConfig,
+      driveClientOverride: mockDriveRestrictedPermList,
+    });
+    assert.equal(reportRestrictedPerm.ok, true);
+    assert.equal(reportRestrictedPerm.steps.permissionsList.accessible, false);
+    assert.equal(reportRestrictedPerm.steps.permissionsList.apiStatus, 403);
+    assert.equal(reportRestrictedPerm.diagnosis.probableCause, 'HEALTHY');
+  });
+
+  test('9. Drive Diagnostics & Error Mapper Distinguish Specific Causes (No Generic Access Denied)', async () => {
+    const saConfig: AppServerConfig = {
+      ...TEST_CONFIG,
+      googleServiceAccountEmail: 'instservice@invoice-studio-515206.iam.gserviceaccount.com',
+      googleProjectId: 'invoice-studio-515206',
+    };
+
+    const makeErrorDrive = (status: number, reason: string, message: string): any => ({
+      files: {
+        async get() {
+          const err: any = new Error(message);
+          err.response = {
+            status,
+            data: { error: { code: status, message, errors: [{ reason, message }] } },
+          };
+          throw err;
+        },
+        async list() {
+          return { status: 200, data: { files: [] } };
+        },
+      },
+      permissions: {
+        async list() {
+          return { status: 200, data: { permissions: [] } };
+        },
+      },
+    });
+
+    // 1. Google Drive API disabled (403 accessNotConfigured)
+    const disabledReport = await diagnoseDriveFolderAccess({
+      folderUrlOrId: 'https://drive.google.com/drive/folders/1FolderDisabledApiTest1234',
+      config: saConfig,
+      driveClientOverride: makeErrorDrive(
+        403,
+        'accessNotConfigured',
+        'Google Drive API has not been used in project invoice-studio-515206 before or it is disabled.'
+      ),
+    });
+    assert.equal(disabledReport.ok, false);
+    assert.equal(disabledReport.diagnosis.probableCause, 'DRIVE_API_DISABLED');
+    assert.equal(disabledReport.diagnosis.apiStatus, 403);
+    assert.equal(disabledReport.diagnosis.apiReason, 'accessNotConfigured');
+
+    // 2. Folder 404 notFound (wrong SA email or folder not shared)
+    const notFoundReport = await diagnoseDriveFolderAccess({
+      folderUrlOrId: 'https://drive.google.com/drive/folders/1FolderNotFoundTest123456',
+      config: saConfig,
+      driveClientOverride: makeErrorDrive(404, 'notFound', 'File not found: 1FolderNotFoundTest123456.'),
+    });
+    assert.equal(notFoundReport.ok, false);
+    assert.equal(notFoundReport.diagnosis.probableCause, 'FOLDER_NOT_FOUND_OR_NOT_SHARED');
+    assert.equal(notFoundReport.diagnosis.apiStatus, 404);
+    assert.equal(notFoundReport.diagnosis.apiReason, 'notFound');
+    assert.ok(notFoundReport.diagnosis.summary.includes('instservice@invoice-studio-515206.iam.gserviceaccount.com'));
+
+    // 3. Invalid JWT / invalid_grant (400)
+    const authErrReport = await diagnoseDriveFolderAccess({
+      folderUrlOrId: 'https://drive.google.com/drive/folders/1FolderAuthErrorTest12345',
+      config: saConfig,
+      driveClientOverride: makeErrorDrive(400, 'invalid_grant', 'Invalid JWT Signature.'),
+    });
+    assert.equal(authErrReport.diagnosis.probableCause, 'SERVICE_ACCOUNT_AUTH_FAILED');
+    assert.equal(authErrReport.diagnosis.apiReason, 'invalid_grant');
+
+    // 4. Limited-access / read-only capabilities
+    const limitedDrive: any = {
+      files: {
+        async get() {
+          return {
+            status: 200,
+            data: {
+              id: '1LimitedAccessFolder12345',
+              name: 'Restricted Folder',
+              mimeType: 'application/vnd.google-apps.folder',
+              trashed: false,
+              capabilities: { canEdit: false, canAddChildren: false, canListChildren: true },
+            },
+          };
+        },
+        async list() {
+          return { status: 200, data: { files: [] } };
+        },
+      },
+      permissions: {
+        async list() {
+          return { status: 200, data: { permissions: [] } };
+        },
+      },
+    };
+    const limitedReport = await diagnoseDriveFolderAccess({
+      folderUrlOrId: 'https://drive.google.com/drive/folders/1LimitedAccessFolder12345',
+      config: saConfig,
+      driveClientOverride: limitedDrive,
+    });
+    assert.equal(limitedReport.ok, false);
+    assert.equal(limitedReport.diagnosis.probableCause, 'LIMITED_ACCESS_OR_READ_ONLY');
+
+    // 5. mapDriveApiError distinguishes storageQuotaExceeded, accessNotConfigured, userRateLimitExceeded
+    const quotaErr = mapDriveApiError(
+      {
+        response: {
+          status: 403,
+          data: {
+            error: {
+              message: 'Service Accounts do not have storage quota.',
+              errors: [{ reason: 'storageQuotaExceeded', message: 'Service Accounts do not have storage quota.' }],
+            },
+          },
+        },
+      },
+      saConfig,
+      '1Folder12345678901234'
+    );
+    assert.equal(quotaErr.code, 'DRIVE_STORAGE_QUOTA_EXCEEDED');
+
+    const rateErr = mapDriveApiError(
+      {
+        response: {
+          status: 403,
+          data: { error: { errors: [{ reason: 'userRateLimitExceeded', message: 'User rate limit exceeded.' }] } },
+        },
+      },
+      saConfig,
+      '1Folder12345678901234'
+    );
+    assert.equal(rateErr.code, 'DRIVE_RATE_LIMITED');
+    assert.equal(rateErr.status, 429);
+  });
+
+  test('10. Service Account Private Key Normalization & Cryptographic PEM Validation', () => {
+    const { privateKey } = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+    });
+
+    // Escaped single-line \n wrapped in quotes (typical Vercel UI paste)
+    const vercelEscaped = `"${privateKey.replace(/\n/g, '\\n')}"`;
+    const normalized1 = normalizeServiceAccountPrivateKey(vercelEscaped);
+    assert.equal(validateServiceAccountPrivateKey(normalized1).valid, true);
+
+    // Double-escaped \\n
+    const doubleEscaped = privateKey.replace(/\n/g, '\\\\n');
+    const normalized2 = normalizeServiceAccountPrivateKey(doubleEscaped);
+    assert.equal(validateServiceAccountPrivateKey(normalized2).valid, true);
+
+    // Full JSON service-account paste into private key env var
+    const jsonPaste = JSON.stringify({ client_email: 'sa@proj.iam.gserviceaccount.com', private_key: privateKey });
+    const normalized3 = normalizeServiceAccountPrivateKey(jsonPaste);
+    assert.equal(validateServiceAccountPrivateKey(normalized3).valid, true);
+
+    // Corrupted key fails validation with clear safe reason
+    const badCheck = validateServiceAccountPrivateKey('-----BEGIN PRIVATE KEY-----\nCORRUPT\n-----END PRIVATE KEY-----');
+    assert.equal(badCheck.valid, false);
+    assert.ok(badCheck.reason && badCheck.reason.includes('PEM'));
+  });
+
+  test('11. Drive Folder URL Extraction Edge Cases (My Drive Root, Mobile, File Links, Bad Strings)', () => {
+    assert.equal(
+      extractDriveFolderId('https://drive.google.com/drive/mobile/folders/1MobFolderId987654321?usp=drive_link'),
+      '1MobFolderId987654321'
+    );
+    assert.equal(
+      extractDriveFolderId('https://drive.google.com/open?id=1OpenLinkFolder987654321'),
+      '1OpenLinkFolder987654321'
+    );
+    assert.equal(
+      extractDriveFolderId('https://drive.google.com/folderview?id=1LegacyFolder987654321&usp=sharing'),
+      '1LegacyFolder987654321'
+    );
+    assert.throws(() => extractDriveFolderId('https://drive.google.com/drive/my-drive'));
+    assert.throws(() => extractDriveFolderId('https://drive.google.com/drive/u/0/my-drive'));
+    assert.throws(() => extractDriveFolderId('https://drive.google.com/file/d/1FileIdNotAFolder12345/view'));
+    assert.throws(() => extractDriveFolderId('not-a-valid-drive-url'));
+  });
+
+  test('12. /api/drive/diagnose Endpoint Returns Safe Non-Destructive JSON Report', async () => {
+    const req = createReq({
+      method: 'POST',
+      url: '/api/drive/diagnose',
+      body: { folderUrl: 'https://drive.google.com/drive/folders/1DiagEndpointFolder123456' },
+    });
+    const res = createMockRes();
+    await handleDriveDiagnose(req, res.res);
+    assert.equal(res.statusCode, 200);
+    const json = res.json();
+    assert.equal(json.extractedFolderId, '1DiagEndpointFolder123456');
+    assert.equal('privateKey' in json, false);
+    assert.ok(json.diagnosis?.probableCause);
+  });
 });
+

@@ -325,7 +325,7 @@ export const DataSourceView: React.FC<DataSourceViewProps> = ({
               ) : (
                 <tr>
                   <td
-                    colSpan={(activeWorksheet?.headers?.length || 0) + 1}
+                    colSpan={Math.max(2, (activeWorksheet?.headers?.length || 0) + 1)}
                     className="py-12 text-center text-slate-400 text-xs"
                   >
                     No data rows loaded. Upload an Excel file or connect & sync a Google Sheet above.

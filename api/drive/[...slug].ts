@@ -6,6 +6,7 @@
 import {
   handleDriveBackup,
   handleDriveConnect,
+  handleDriveDiagnose,
   handleDriveRestore,
   handleDriveStatus,
   handleDriveSync,
@@ -26,6 +27,7 @@ export default async function handler(req: NormalizedRequest, res: NormalizedRes
   const route = extractDrivePath(req);
   if (route === 'connect') return handleDriveConnect(req, res);
   if (route === 'test') return handleDriveTest(req, res);
+  if (route === 'diagnose') return handleDriveDiagnose(req, res);
   if (route === 'status') return handleDriveStatus(req, res);
   if (route === 'sync') return handleDriveSync(req, res);
   if (route === 'upload-pdf') return handleDriveUploadPdf(req, res);

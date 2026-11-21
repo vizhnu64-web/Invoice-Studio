@@ -6,6 +6,7 @@
 import { getIntegrationDiagnostics, getServerConfig } from './config.js';
 import {
   createDriveServiceAccountClient,
+  diagnoseDriveFolderAccess,
   extractDriveFolderId,
   verifyFolderAccess,
 } from './driveService.js';
@@ -186,12 +187,45 @@ export async function handleDriveTest(req: NormalizedRequest, res: NormalizedRes
       folderId: verified.id,
       folderName: verified.name,
       canEdit: verified.canEdit,
+      canAddChildren: verified.canAddChildren,
+      canListChildren: verified.canListChildren,
+      capabilities: verified.capabilities,
       webViewLink: verified.webViewLink,
       serviceAccountEmail: config.googleServiceAccountEmail || null,
       testedAt: new Date().toISOString(),
     });
   } catch (err: any) {
     return handleRouteError(res, err, 'Google Drive folder test failed.');
+  }
+}
+
+export async function handleDriveDiagnose(req: NormalizedRequest, res: NormalizedResponse) {
+  if (req.method !== 'POST' && req.method !== 'GET') {
+    return sendJson(res, 405, { error: 'Method not allowed. Use POST or GET.' });
+  }
+  if (!checkRateLimit(req, 'drive-diagnose', 30, 60_000)) {
+    return sendJson(res, 429, { error: 'Too many diagnostic requests. Please wait a moment.' });
+  }
+  try {
+    const config = getServerConfig(getRequestOrigin(req));
+    const body = req.method === 'POST' ? await readJsonBody(req) : {};
+    const rawUrl = String(
+      body?.folderUrl ||
+        body?.folderId ||
+        getQueryParam(req, 'folderUrl') ||
+        getQueryParam(req, 'folderId') ||
+        getHeaderValue(req, 'x-workspace-folder-id') ||
+        ''
+    ).trim();
+
+    const report = await diagnoseDriveFolderAccess({
+      folderUrlOrId: rawUrl,
+      config,
+    });
+
+    return sendJson(res, 200, report);
+  } catch (err: any) {
+    return handleRouteError(res, err, 'Google Drive folder diagnostics failed.');
   }
 }
 

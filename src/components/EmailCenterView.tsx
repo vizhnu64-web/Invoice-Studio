@@ -225,21 +225,14 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
         customer_name: inv.customerName,
       };
       const items = Array.isArray(snap.items) ? snap.items : [];
-      const summary = snap.summary || {
-        subtotal: inv.totalAmount - inv.gstAmount,
-        totalTaxable: inv.totalAmount - inv.gstAmount,
-        totalTax: inv.gstAmount,
-        totalInvoiceAmount: inv.totalAmount,
-        totalIgst: inv.gstAmount,
-        totalCgst: 0,
-        totalSgst: 0,
-        totalDiscount: 0,
-        roundOff: 0,
-        balanceDue: inv.totalAmount - (inv.paymentAmount || 0),
-        amountInWords: '',
-      };
-      const pdfDoc = await generateInvoicePDF(company, template, rowFields, items, summary, {
-        returnDoc: true,
+      const pdfDoc = generateInvoicePDF({
+        company,
+        template,
+        fields: rowFields,
+        items,
+        paymentMade: snap.paymentMade ?? inv.paymentAmount ?? 0,
+        discount: snap.discount ?? 0,
+        additionalCharges: snap.additionalCharges ?? 0,
       });
       const dataUri = pdfDoc.output('datauristring');
       return {
@@ -250,14 +243,15 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
 
     const qt = doc.raw as QuotationRecord;
     const snap = buildQuotationSnapshot(qt.data, company, template);
-    const pdfDoc = await generateInvoicePDF(
-      snap.companyWithCurrency,
-      snap.quotationTemplate || template,
-      snap.rowFields,
-      snap.items,
-      snap.summary,
-      { returnDoc: true }
-    );
+    const pdfDoc = generateInvoicePDF({
+      company: snap.companyWithCurrency,
+      template: snap.quotationTemplate || template,
+      fields: snap.rowFields,
+      items: snap.items,
+      paymentMade: 0,
+      discount: snap.additionalDiscountAmt,
+      additionalCharges: snap.additionalCharges,
+    });
     const dataUri = pdfDoc.output('datauristring');
     return {
       base64: dataUri.split('base64,')[1] || '',
@@ -319,12 +313,7 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
         for (const r of res.results) {
           const matchedDoc = targets.find((t) => t.number === r.documentNumber);
           if (matchedDoc) {
-            next[matchedDoc.id] = {
-              status: r.status === 'Sent' ? 'sent' : 'failed',
-              lastSentAt: r.sentAt,
-              recipientEmail: r.recipientEmail,
-              errorMessage: r.error,
-            } as EmailSendStatus;
+            next[matchedDoc.id] = r.status === 'Sent' ? 'sent' : 'failed';
           }
         }
         return next;
@@ -489,13 +478,10 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
                         {statusInfo && (
                           <p
                             className={`text-[11px] mt-1 font-medium ${
-                              statusInfo.status === 'sent' ? 'text-emerald-700' : 'text-rose-700'
+                              statusInfo === 'sent' ? 'text-emerald-700' : 'text-rose-700'
                             }`}
                           >
-                            {statusInfo.status === 'sent' ? 'Sent' : 'Failed'}{' '}
-                            {statusInfo.lastSentAt
-                              ? `· ${new Date(statusInfo.lastSentAt).toLocaleString()}`
-                              : ''}
+                            {statusInfo === 'sent' ? 'Sent' : statusInfo === 'failed' ? 'Failed' : statusInfo}
                           </p>
                         )}
                       </div>

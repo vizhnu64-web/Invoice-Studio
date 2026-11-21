@@ -266,11 +266,11 @@ export const Step1DataSource: React.FC<Step1DataSourceProps> = ({
         <GoogleSheetsConnectorCard
           spreadsheetData={spreadsheetData}
           setSpreadsheetData={setSpreadsheetData}
-          onSheetImported={(sheetName) => {
-            if (sheetName) setSelectedWorksheetName(sheetName);
+          onImportedRows={({ worksheetName }) => {
+            if (worksheetName) setSelectedWorksheetName(worksheetName);
             setStartRowIndex(0);
             setEndRowIndex(undefined);
-            setUploadStatus(`Synchronized Google Sheet worksheet "${sheetName}".`);
+            setUploadStatus(`Synchronized Google Sheet worksheet "${worksheetName}".`);
             setTimeout(() => setUploadStatus(null), 4000);
           }}
           compact

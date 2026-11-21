@@ -129,6 +129,77 @@ export interface DriveStatusResponse {
   checkedAt?: string;
 }
 
+export interface DriveDiagnosticReport {
+  ok: boolean;
+  checkedAt: string;
+  serviceAccountEmail: string | null;
+  projectId: string | null;
+  inputProvided: string;
+  extractedFolderId: string | null;
+  steps: {
+    credentials: {
+      ok: boolean;
+      serviceAccountEmail: string | null;
+      privateKeyFormatValid: boolean;
+      clientInitialized: boolean;
+      message: string;
+    };
+    folderIdExtraction: {
+      ok: boolean;
+      folderId: string | null;
+      sourceType: 'folder_url' | 'query_id_url' | 'raw_id' | 'invalid';
+      message: string;
+    };
+    folderMetadata: {
+      attempted: boolean;
+      ok: boolean;
+      apiStatus: number | null;
+      apiReason: string | null;
+      apiMessage: string | null;
+      folder?: {
+        id: string;
+        name: string;
+        mimeType: string;
+        isFolder: boolean;
+        trashed: boolean;
+        capabilities: {
+          canEdit: boolean | null;
+          canAddChildren: boolean | null;
+          canListChildren: boolean | null;
+        };
+      };
+    };
+    permissionsList: {
+      attempted: boolean;
+      accessible: boolean;
+      apiStatus: number | null;
+      apiReason: string | null;
+      apiMessage: string | null;
+      totalPermissionsReturned: number | null;
+      serviceAccountPermissionFound: boolean;
+      serviceAccountRole: string | null;
+      hasWriterPermission: boolean | null;
+      note: string;
+    };
+    listChildren: {
+      attempted: boolean;
+      ok: boolean;
+      apiStatus: number | null;
+      apiReason: string | null;
+      apiMessage: string | null;
+      childrenCount: number | null;
+      hasInvoiceStudioFolder: boolean;
+    };
+  };
+  diagnosis: {
+    probableCause: string;
+    apiStatus: number | null;
+    apiReason: string | null;
+    summary: string;
+    recommendedAction: string;
+  };
+}
+
 export const workspaceApi = {
   // ============================================================
   // GOOGLE DRIVE WORKSPACE STORAGE (SERVICE ACCOUNT)
@@ -146,11 +217,20 @@ export const workspaceApi = {
     folderId: string;
     folderName: string;
     canEdit: boolean;
+    canAddChildren?: boolean;
+    canListChildren?: boolean;
     webViewLink?: string;
     serviceAccountEmail: string | null;
     testedAt: string;
   }> {
     return apiRequest('/api/drive/test', {
+      method: 'POST',
+      body: JSON.stringify(folderUrlOrId ? { folderUrl: folderUrlOrId } : {}),
+    });
+  },
+
+  async diagnoseDriveFolder(folderUrlOrId?: string): Promise<DriveDiagnosticReport> {
+    return apiRequest<DriveDiagnosticReport>('/api/drive/diagnose', {
       method: 'POST',
       body: JSON.stringify(folderUrlOrId ? { folderUrl: folderUrlOrId } : {}),
     });

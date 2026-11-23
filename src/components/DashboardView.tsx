@@ -6,6 +6,7 @@
 import React, { useMemo } from 'react';
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowRight,
   Building2,
   CheckCircle2,
@@ -17,8 +18,12 @@ import {
   FileSpreadsheet,
   FileText,
   IndianRupee,
+  Loader2,
   Mail,
+  RefreshCw,
   Settings,
+  ShieldAlert,
+  ShieldCheck,
   Users,
   Wallet,
 } from 'lucide-react';
@@ -27,15 +32,17 @@ import {
   CustomerRecord,
   DriveWorkspaceConnection,
   GenerationRecord,
+  GoogleConnectionStatus,
+  GoogleVerifiedSession,
   GuidedWorkflowStep,
   QuotationRecord,
   QuotationStatus,
   SpreadsheetData,
 } from '../types';
-import type { DriveSyncState } from '../App';
 import { formatCurrency } from '../utils/calculator';
 import { computeQuotationStats } from '../utils/quotation';
 import { storage } from '../utils/storage';
+import { GOOGLE_STATUS_LABELS } from './Navbar';
 
 interface DashboardViewProps {
   setActiveTab: (tab: string) => void;
@@ -45,8 +52,14 @@ interface DashboardViewProps {
   quotations: QuotationRecord[];
   customers: CustomerRecord[];
   company: CompanySettings;
+  googleSession: GoogleVerifiedSession | null;
   driveConnection: DriveWorkspaceConnection | null;
-  driveSyncState: DriveSyncState;
+  connectionStatus: GoogleConnectionStatus;
+  hasUnsavedChanges?: boolean;
+  onConnectGoogle?: () => Promise<void>;
+  onSyncNow?: () => Promise<void>;
+  onReconnectDrive?: () => Promise<void>;
+  onEnableGmailPermission?: () => Promise<void>;
   onStartGuidedWorkflow: (step?: GuidedWorkflowStep) => void;
   onNavigateQuotationsFiltered?: (status: QuotationStatus | 'ALL') => void;
   onNavigateInvoicesFiltered?: (paymentFilter: string) => void;
@@ -59,8 +72,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   quotations,
   customers,
   company,
+  googleSession,
   driveConnection,
-  driveSyncState,
+  connectionStatus,
+  hasUnsavedChanges = false,
+  onConnectGoogle,
+  onSyncNow,
+  onReconnectDrive,
+  onEnableGmailPermission,
   onStartGuidedWorkflow,
   onNavigateQuotationsFiltered,
   onNavigateInvoicesFiltered,
@@ -149,72 +168,200 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   }, [generationHistory, quotations]);
 
   const isCompanyConfigured = Boolean(company.legalName?.trim() || company.displayName?.trim());
+  const isConnecting =
+    connectionStatus === 'connecting' || connectionStatus === 'loading_workspace';
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-6">
-      {/* Workspace Storage Status Banner */}
-      {driveConnection?.isConnected ? (
-        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      {/* Non-Blocking Google Workspace Connection Banner */}
+      {connectionStatus === 'access_expired' ? (
+        <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-start sm:items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
-              <Cloud className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <p className="text-sm font-bold text-emerald-950">
-                  Google Drive Connected: {driveConnection.folderName}
-                </p>
-                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 border border-emerald-200">
-                  {driveSyncState === 'syncing'
-                    ? 'Syncing...'
-                    : driveSyncState === 'error'
-                      ? 'Sync Attention Needed'
-                      : 'Persistent Storage Active'}
-                </span>
-              </div>
-              <p className="text-xs text-emerald-800 mt-0.5">
-                All company settings, customers, invoices, quotations, PDFs, and email history are
-                isolated to this Drive folder.
-                {driveConnection.lastSyncedAt && (
-                  <span className="ml-1.5 font-medium">
-                    Last sync: {new Date(driveConnection.lastSyncedAt).toLocaleString()}
-                  </span>
-                )}
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => setActiveTab('integrations')}
-            className="px-3.5 py-2 rounded-xl bg-white border border-emerald-300 text-emerald-900 text-xs font-semibold hover:bg-emerald-100 transition-colors shrink-0 cursor-pointer"
-          >
-            Manage Drive & Email
-          </button>
-        </div>
-      ) : (
-        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-start sm:items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-500 text-white flex items-center justify-center shrink-0">
-              <CloudOff className="w-5 h-5" />
+            <div className="w-10 h-10 rounded-xl bg-amber-600 text-white flex items-center justify-center shrink-0">
+              <AlertTriangle className="w-5 h-5" />
             </div>
             <div>
               <p className="text-sm font-bold text-amber-950">
-                Temporary Workspace — Not Backed Up to Google Drive
+                Access Expired — Reconnect Your Google Account
               </p>
               <p className="text-xs text-amber-800 mt-0.5">
-                You can create invoices, quotations, and download PDFs immediately without signing
-                in. Connect your business Google Drive folder URL to save records permanently.
+                Your unsaved changes are safely preserved in memory. Reconnect{' '}
+                <strong>{driveConnection?.accountEmail || googleSession?.email || 'your Google account'}</strong>{' '}
+                to resume syncing with <strong>{driveConnection?.folderName || 'Google Drive'}</strong>.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => (onReconnectDrive ? void onReconnectDrive() : setActiveTab('integrations'))}
+            className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold inline-flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Reconnect Google Account</span>
+          </button>
+        </div>
+      ) : connectionStatus === 'permission_missing' ? (
+        <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start sm:items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-600 text-white flex items-center justify-center shrink-0">
+              <ShieldAlert className="w-5 h-5" />
+            </div>
+            <div>
+              <p className="text-sm font-bold text-amber-950">
+                Permission Missing — Additional Google Access Required
+              </p>
+              <p className="text-xs text-amber-800 mt-0.5">
+                Connected as <strong>{googleSession?.email}</strong>, but required Google Drive
+                permission was not approved. Open Google Account &amp; Email settings to grant missing
+                permissions.
               </p>
             </div>
           </div>
           <button
             type="button"
             onClick={() => setActiveTab('integrations')}
-            className="px-4 py-2 rounded-xl bg-amber-600 text-white text-xs font-semibold hover:bg-amber-700 transition-colors shrink-0 cursor-pointer flex items-center justify-center gap-1.5"
+            className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold inline-flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
           >
-            <Cloud className="w-3.5 h-3.5" />
-            <span>Connect Google Drive Folder</span>
+            <ShieldCheck className="w-3.5 h-3.5" />
+            <span>Review Permissions</span>
           </button>
+        </div>
+      ) : driveConnection?.isConnected ? (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="flex items-start sm:items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+              <Cloud className="w-5 h-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-sm font-bold text-emerald-950 truncate">
+                  {driveConnection.folderName}
+                </p>
+                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 border border-emerald-200">
+                  {GOOGLE_STATUS_LABELS[connectionStatus]}
+                </span>
+                {hasUnsavedChanges && (
+                  <span className="text-[11px] font-semibold px-2 py-0.5 rounded-md bg-amber-100 text-amber-800 border border-amber-200">
+                    Unsaved changes
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-emerald-800 mt-0.5 truncate">
+                Google account: <strong>{driveConnection.accountEmail}</strong>
+                {driveConnection.lastSyncedAt && (
+                  <span className="ml-2">
+                    · Last sync: {new Date(driveConnection.lastSyncedAt).toLocaleString()}
+                  </span>
+                )}
+              </p>
+              {/* Compact Permission Status Indicators */}
+              <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-white/90 text-emerald-800 border border-emerald-200">
+                  Drive: Granted
+                </span>
+                <span
+                  className={`text-[10px] font-semibold px-2 py-0.5 rounded border ${
+                    googleSession?.permissions.sheetsGranted
+                      ? 'bg-white/90 text-emerald-800 border-emerald-200'
+                      : 'bg-amber-50 text-amber-800 border-amber-200'
+                  }`}
+                >
+                  Sheets: {googleSession?.permissions.sheetsGranted ? 'Granted' : 'Not granted'}
+                </span>
+                <span
+                  className={`text-[10px] font-semibold px-2 py-0.5 rounded border ${
+                    googleSession?.permissions.gmailGranted
+                      ? 'bg-white/90 text-emerald-800 border-emerald-200'
+                      : 'bg-slate-100 text-slate-700 border-slate-200'
+                  }`}
+                >
+                  Gmail Send: {googleSession?.permissions.gmailGranted ? 'Enabled' : 'Optional'}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {!googleSession?.permissions.gmailGranted && onEnableGmailPermission && (
+              <button
+                type="button"
+                onClick={() => void onEnableGmailPermission()}
+                className="px-3 py-2 rounded-xl bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-50 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <Mail className="w-3.5 h-3.5" />
+                <span>Enable Gmail Permission</span>
+              </button>
+            )}
+            {onSyncNow && (
+              <button
+                type="button"
+                onClick={() => void onSyncNow()}
+                disabled={connectionStatus === 'syncing'}
+                className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                {connectionStatus === 'syncing' ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-3.5 h-3.5" />
+                )}
+                <span>Sync Now</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setActiveTab('integrations')}
+              className="px-3.5 py-2 rounded-xl bg-white border border-emerald-300 text-emerald-900 text-xs font-semibold hover:bg-emerald-100 transition-colors cursor-pointer"
+            >
+              Manage Google &amp; Email
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="bg-white border border-indigo-200 rounded-2xl p-5 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="flex items-start gap-3.5 min-w-0">
+            <div className="w-11 h-11 rounded-2xl bg-indigo-50 text-indigo-600 border border-indigo-100 flex items-center justify-center shrink-0">
+              <CloudOff className="w-5 h-5" />
+            </div>
+            <div className="space-y-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-sm font-bold text-slate-900">
+                  Connect Your Google Account for Private Business Storage
+                </p>
+                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-slate-200">
+                  {GOOGLE_STATUS_LABELS[connectionStatus]}
+                </span>
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed max-w-2xl">
+                No Invoice Studio login or database required. Connect your own Google account once to
+                store invoices, quotations, customers, PDFs, and backups in your own{' '}
+                <strong>Google Drive</strong>, import rows from <strong>Google Sheets</strong>, and
+                optionally send PDFs via <strong>Gmail API</strong>.
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              disabled={isConnecting}
+              onClick={() =>
+                onConnectGoogle ? void onConnectGoogle() : setActiveTab('integrations')
+              }
+              className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-xs font-bold inline-flex items-center justify-center gap-2 cursor-pointer"
+            >
+              {isConnecting ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Cloud className="w-4 h-4" />
+              )}
+              <span>{isConnecting ? 'Connecting...' : 'Connect Google Account'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('integrations')}
+              className="px-3.5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold cursor-pointer"
+            >
+              Setup &amp; Permissions
+            </button>
+          </div>
         </div>
       )}
 
@@ -224,14 +371,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <p className="text-xs font-semibold uppercase tracking-wider text-indigo-300">
             {isCompanyConfigured
               ? company.displayName || company.legalName
-              : 'Fresh Business Workspace'}
+              : 'Public Workspace — Zero Demo Data'}
           </p>
           <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">
-            Invoice & Quotation Management Dashboard
+            Invoice &amp; Quotation Management Dashboard
           </h1>
           <p className="text-sm text-slate-300 leading-relaxed">
-            Create GST-compliant invoices and quotations from Excel, CSV, Google Sheets URLs, or
-            manual entry. Download branded PDFs and deliver directly via Gmail SMTP or Custom SMTP.
+            Create GST-compliant invoices and quotations from Excel, CSV, Google Sheets, or manual
+            entry. Store records privately in your own Google Drive and deliver PDFs directly via
+            Gmail API or optional Custom SMTP.
           </p>
         </div>
 
@@ -263,7 +411,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
       </div>
 
-      {/* KPI Cards Grid (All Real Numbers — Zero on Fresh Visit, Clickable to Filtered Views) */}
+      {/* KPI Cards Grid (All Real Numbers — Zero on Fresh Visit) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         <button
           type="button"
@@ -414,7 +562,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             {formatCurrency(invoiceStats.outstandingBalance, company.currency)}
           </p>
           <p className="text-xs text-slate-500 mt-2">
-            Click to view unpaid & partially paid invoices
+            Click to view unpaid &amp; partially paid invoices
           </p>
         </button>
       </div>
@@ -426,7 +574,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <div className="flex items-center justify-between mb-4">
             <div>
               <h2 className="text-base font-bold text-slate-900">Recent Activity</h2>
-              <p className="text-xs text-slate-500">Latest invoices and quotations in this workspace</p>
+              <p className="text-xs text-slate-500">
+                Latest invoices and quotations in this workspace
+              </p>
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -455,8 +605,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <div>
                 <p className="text-sm font-semibold text-slate-800">No documents created yet</p>
                 <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
-                  Start with a clean slate — create a manual invoice, prepare a quotation for
-                  approval, or import rows from Excel / Google Sheets.
+                  Start with a clean slate — connect your Google account to load an existing Drive
+                  workspace, or create your first invoice or quotation.
                 </p>
               </div>
               <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
@@ -538,7 +688,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <div className="flex items-center gap-3 min-w-0">
                 <Building2 className="w-4 h-4 text-indigo-600 shrink-0" />
                 <div className="min-w-0">
-                  <p className="text-xs font-bold text-slate-900">Company Profile & GSTIN</p>
+                  <p className="text-xs font-bold text-slate-900">Company Profile &amp; GSTIN</p>
                   <p className="text-[11px] text-slate-500 truncate">
                     {isCompanyConfigured ? company.legalName || company.displayName : 'Not configured yet'}
                   </p>
@@ -559,11 +709,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <div className="flex items-center gap-3 min-w-0">
                 <Cloud className="w-4 h-4 text-indigo-600 shrink-0" />
                 <div className="min-w-0">
-                  <p className="text-xs font-bold text-slate-900">Google Drive Folder</p>
+                  <p className="text-xs font-bold text-slate-900">Google Account &amp; Drive</p>
                   <p className="text-[11px] text-slate-500 truncate">
                     {driveConnection?.isConnected
-                      ? driveConnection.folderName
-                      : 'Optional — connect for cloud backup'}
+                      ? `${driveConnection.folderName} (${driveConnection.accountEmail})`
+                      : 'Connect Google Drive workspace'}
                   </p>
                 </div>
               </div>
@@ -582,13 +732,19 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <div className="flex items-center gap-3 min-w-0">
                 <Mail className="w-4 h-4 text-indigo-600 shrink-0" />
                 <div className="min-w-0">
-                  <p className="text-xs font-bold text-slate-900">Email Delivery (SMTP)</p>
+                  <p className="text-xs font-bold text-slate-900">Gmail API &amp; Custom SMTP</p>
                   <p className="text-[11px] text-slate-500 truncate">
-                    Gmail SMTP or Custom SMTP server
+                    {googleSession?.permissions.gmailGranted
+                      ? `Gmail API enabled (${googleSession.email})`
+                      : 'Enable Gmail API (default) or Custom SMTP'}
                   </p>
                 </div>
               </div>
-              <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
+              {googleSession?.permissions.gmailGranted ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              ) : (
+                <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
+              )}
             </button>
 
             <button
@@ -605,7 +761,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   <p className="text-[11px] text-slate-500 truncate">
                     {importedRowsCount > 0
                       ? `${importedRowsCount} rows loaded from ${spreadsheetData.fileName}`
-                      : 'Upload Excel/CSV or paste a Google Sheets URL'}
+                      : 'Upload Excel/CSV or import from Google Sheets'}
                   </p>
                 </div>
               </div>

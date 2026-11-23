@@ -131,7 +131,7 @@ export const DataSourceView: React.FC<DataSourceViewProps> = ({
             Data Source Connector (Excel / CSV & Google Sheets)
           </h1>
           <p className="text-sm text-slate-500">
-            Upload Excel or CSV files, or paste a Google Sheets URL directly — no sign-in required.
+            Upload Excel or CSV files, or import spreadsheets from your Google account using Google Picker.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">

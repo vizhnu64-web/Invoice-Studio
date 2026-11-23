@@ -5,13 +5,6 @@
 
 import { getIntegrationDiagnostics, getServerConfig } from './config.js';
 import {
-  createDriveServiceAccountClient,
-  diagnoseDriveFolderAccess,
-  extractDriveFolderId,
-  verifyFolderAccess,
-} from './driveService.js';
-import { GoogleDriveStore } from './driveStore.js';
-import {
   deleteSmtpConfig,
   dispatchSmtpEmails,
   getPublicSmtpConfig,
@@ -21,11 +14,42 @@ import {
 } from './emailBackendService.js';
 import { HttpApiError } from './errors.js';
 import {
-  fetchSheetValues,
-  fetchSpreadsheetMetadata,
-  getPersistedSheetsOverview,
-  performSpreadsheetSync,
-} from './googleService.js';
+  extractBearerToken,
+  getPublicGoogleConfig,
+  requireGooglePermission,
+  revokeGoogleAccessToken,
+  VerifiedGoogleIdentity,
+  verifyGoogleAccessToken,
+} from './googleAuth.js';
+import {
+  AssetCategory,
+  createRequestDriveClient,
+  createWorkspaceBackup,
+  downloadDriveFileBase64,
+  DriveFileSlot,
+  ensureWorkspaceStructure,
+  extractDriveFolderIdFromInput,
+  findOrCreateRootFolder,
+  listFolderFiles,
+  loadOrInitializeWorkspace,
+  restoreWorkspaceBackup,
+  saveWorkspace,
+  trashWorkspaceFile,
+  uploadAssetToDrive,
+  uploadPdfToDrive,
+  verifyFolderAccess,
+} from './googleDrive.js';
+import {
+  createRequestGmailClient,
+  dispatchGmailEmails,
+  sendGmailTestEmail,
+} from './googleGmail.js';
+import {
+  createRequestSheetsClient,
+  getSpreadsheetMetadata,
+  getWorksheetValues,
+  syncSpreadsheet,
+} from './googleSheets.js';
 import {
   checkRateLimit,
   getHeaderValue,
@@ -36,6 +60,7 @@ import {
   readJsonBody,
   sendJson,
 } from './http.js';
+import { OAuthDriveEmailStore, validateDriveFolderId } from './oauthDriveClient.js';
 
 function handleRouteError(res: NormalizedResponse, err: any, fallbackMessage: string) {
   if (err instanceof HttpApiError) {
@@ -52,57 +77,58 @@ function handleRouteError(res: NormalizedResponse, err: any, fallbackMessage: st
   });
 }
 
-function getOptionalFolderId(req: NormalizedRequest, body?: any): string | null {
-  const raw =
-    body?.folderUrl ||
-    body?.folderId ||
-    getHeaderValue(req, 'x-workspace-folder-id') ||
-    getQueryParam(req, 'folderId') ||
-    getQueryParam(req, 'folderUrl') ||
-    '';
-  const trimmed = String(raw || '').trim();
-  if (!trimmed) return null;
-  return extractDriveFolderId(trimmed);
-}
-
-function requireFolderId(req: NormalizedRequest, body?: any): string {
-  const folderId = getOptionalFolderId(req, body);
-  if (!folderId) {
-    throw new HttpApiError(
-      400,
-      'DRIVE_NOT_CONNECTED',
-      'No Google Drive folder is connected for this workspace. Connect a Google Drive folder URL first.'
-    );
+async function authenticateGoogleRequest(
+  req: NormalizedRequest,
+  requiredPermission?: 'drive' | 'sheets' | 'gmail'
+): Promise<{
+  accessToken: string;
+  identity: VerifiedGoogleIdentity;
+  config: ReturnType<typeof getServerConfig>;
+}> {
+  const config = getServerConfig(getRequestOrigin(req));
+  const accessToken = extractBearerToken(getHeaderValue(req, 'authorization'));
+  const identity = await verifyGoogleAccessToken(accessToken, { config });
+  if (requiredPermission) {
+    requireGooglePermission(identity, requiredPermission);
   }
-  return folderId;
+  return { accessToken, identity, config };
 }
 
-function getSessionId(req: NormalizedRequest): string | undefined {
-  const sid = getHeaderValue(req, 'x-workspace-session-id');
-  return sid && /^[a-zA-Z0-9_-]{8,128}$/.test(sid) ? sid : undefined;
-}
-
-function createOptionalDriveStore(
+/**
+ * Extracts and validates the caller's Google OAuth Bearer token, verified `sub` identity,
+ * and Drive folder access before allowing any per-business email settings read/write or dispatch.
+ */
+async function createVerifiedOAuthEmailStore(
   req: NormalizedRequest,
   config: ReturnType<typeof getServerConfig>,
-  body?: any
-): GoogleDriveStore | null {
-  const folderId = getOptionalFolderId(req, body);
-  if (!folderId) return null;
-  return new GoogleDriveStore({ folderId, config });
-}
+  body?: any,
+  preverified?: { accessToken: string; identity: VerifiedGoogleIdentity }
+): Promise<OAuthDriveEmailStore> {
+  const accessToken =
+    preverified?.accessToken || extractBearerToken(getHeaderValue(req, 'authorization'));
+  const identity =
+    preverified?.identity || (await verifyGoogleAccessToken(accessToken, { config }));
+  requireGooglePermission(identity, 'drive');
 
-function createRequiredDriveStore(
-  req: NormalizedRequest,
-  config: ReturnType<typeof getServerConfig>,
-  body?: any
-): GoogleDriveStore {
-  const folderId = requireFolderId(req, body);
-  return new GoogleDriveStore({ folderId, config });
+  const rawFolderId =
+    getHeaderValue(req, 'x-workspace-folder-id') ||
+    body?.folderId ||
+    getQueryParam(req, 'folderId') ||
+    '';
+  const folderId = validateDriveFolderId(rawFolderId);
+
+  const store = new OAuthDriveEmailStore({
+    folderId,
+    accessToken,
+    config,
+  });
+
+  await store.verifyAccess();
+  return store;
 }
 
 // ============================================================
-// HEALTH & DIAGNOSTICS (PUBLIC — NEVER EXPOSES PRIVATE KEYS)
+// HEALTH & PUBLIC SERVER CONFIG (NO SECRETS)
 // ============================================================
 
 export async function handleHealth(req: NormalizedRequest, res: NormalizedResponse) {
@@ -116,7 +142,98 @@ export async function handleHealth(req: NormalizedRequest, res: NormalizedRespon
 }
 
 // ============================================================
-// GOOGLE DRIVE FOLDER CONNECTION & WORKSPACE STORAGE
+// GOOGLE AUTH & SESSION VERIFICATION (/api/google/*)
+// ============================================================
+
+export async function handleGoogleConfig(req: NormalizedRequest, res: NormalizedResponse) {
+  if (req.method !== 'GET') {
+    return sendJson(res, 405, { error: 'Method not allowed.' });
+  }
+  const publicConfig = getPublicGoogleConfig(getRequestOrigin(req));
+  return sendJson(res, 200, publicConfig);
+}
+
+export async function handleGoogleVerifySession(req: NormalizedRequest, res: NormalizedResponse) {
+  if (req.method !== 'POST' && req.method !== 'GET') {
+    return sendJson(res, 405, { error: 'Method not allowed.' });
+  }
+  try {
+    const { identity } = await authenticateGoogleRequest(req);
+    return sendJson(res, 200, {
+      ok: true,
+      session: {
+        sub: identity.sub,
+        email: identity.email,
+        name: identity.name,
+        picture: identity.picture,
+        emailVerified: identity.emailVerified,
+        grantedScopes: identity.grantedScopes,
+        expiresIn: identity.expiresIn,
+        expiresAt: identity.expiresAt,
+        permissions: identity.permissions,
+      },
+    });
+  } catch (err: any) {
+    return handleRouteError(res, err, 'Unable to verify Google OAuth session.');
+  }
+}
+
+export async function handleGoogleTest(req: NormalizedRequest, res: NormalizedResponse) {
+  if (req.method !== 'POST') {
+    return sendJson(res, 405, { error: 'Method not allowed.' });
+  }
+  try {
+    const body = await readJsonBody(req);
+    const { accessToken, identity } = await authenticateGoogleRequest(req);
+    let folderCheck: { ok: boolean; folderId?: string; folderName?: string; error?: string } = {
+      ok: false,
+    };
+
+    const rawFolder =
+      getHeaderValue(req, 'x-workspace-folder-id') || body?.folderId || body?.folderUrl || '';
+    if (rawFolder && identity.permissions.driveGranted) {
+      try {
+        const folderId = extractDriveFolderIdFromInput(rawFolder);
+        const drive = createRequestDriveClient(accessToken);
+        const verified = await verifyFolderAccess(drive, folderId);
+        folderCheck = { ok: true, folderId: verified.id, folderName: verified.name };
+      } catch (err: any) {
+        folderCheck = { ok: false, error: err?.message || 'Folder verification failed.' };
+      }
+    }
+
+    return sendJson(res, 200, {
+      ok: true,
+      sub: identity.sub,
+      email: identity.email,
+      permissions: identity.permissions,
+      folderCheck,
+      checkedAt: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    return handleRouteError(res, err, 'Google connection test failed.');
+  }
+}
+
+export async function handleGoogleRevoke(req: NormalizedRequest, res: NormalizedResponse) {
+  if (req.method !== 'POST') {
+    return sendJson(res, 405, { error: 'Method not allowed.' });
+  }
+  try {
+    const header = getHeaderValue(req, 'authorization');
+    const match = header.match(/^Bearer\s+([^\s]+)$/i);
+    if (!match?.[1]) {
+      return sendJson(res, 200, { ok: true, revoked: false });
+    }
+    const result = await revokeGoogleAccessToken(match[1]);
+    return sendJson(res, 200, { ok: true, revoked: result.revoked });
+  } catch {
+    return sendJson(res, 200, { ok: true, revoked: false });
+  }
+}
+
+// ============================================================
+// GOOGLE DRIVE WORKSPACE (/api/drive/*)
 // ============================================================
 
 export async function handleDriveConnect(req: NormalizedRequest, res: NormalizedResponse) {
@@ -124,344 +241,252 @@ export async function handleDriveConnect(req: NormalizedRequest, res: Normalized
     return sendJson(res, 405, { error: 'Method not allowed.' });
   }
   if (!checkRateLimit(req, 'drive-connect', 30, 60_000)) {
-    return sendJson(res, 429, { error: 'Too many connection attempts. Please wait a moment.' });
+    return sendJson(res, 429, { error: 'Too many Drive connection attempts. Wait a minute.' });
   }
 
   try {
-    const config = getServerConfig(getRequestOrigin(req));
     const body = await readJsonBody(req);
-    const rawUrl = String(body?.folderUrl || body?.folderId || '').trim();
-    const folderId = extractDriveFolderId(rawUrl);
+    const { accessToken, identity } = await authenticateGoogleRequest(req, 'drive');
+    const drive = createRequestDriveClient(accessToken);
 
-    const store = new GoogleDriveStore({ folderId, config });
-    const exported = await store.exportAllWorkspaceData();
-    const smtpConfig = await getPublicSmtpConfig({ driveStore: store });
+    let rootFolderId = '';
+    let createdNewFolder = false;
 
-    const hasExistingData = Boolean(
-      exported.workspace?.company?.name ||
-        exported.customers.length > 0 ||
-        exported.invoices.length > 0 ||
-        exported.quotations.length > 0 ||
-        Object.keys(exported.sheetsState?.datasets || {}).length > 0 ||
-        exported.emailLogs.length > 0
-    );
+    if (body?.folderUrl || body?.folderId) {
+      const candidateId = extractDriveFolderIdFromInput(body.folderUrl || body.folderId);
+      const verified = await verifyFolderAccess(drive, candidateId);
+      rootFolderId = verified.id;
+    } else {
+      const foundOrCreated = await findOrCreateRootFolder(drive);
+      rootFolderId = foundOrCreated.id;
+      createdNewFolder = foundOrCreated.createdNew;
+    }
+
+    const loaded = await loadOrInitializeWorkspace(drive, rootFolderId, body?.emptyDefaults);
 
     return sendJson(res, 200, {
       ok: true,
-      connected: true,
-      folderId: exported.folders.connectedFolderId,
-      folderName: exported.folders.connectedFolderName,
-      rootFolderId: exported.folders.rootFolderId,
-      folderUrl: `https://drive.google.com/drive/folders/${exported.folders.connectedFolderId}`,
-      serviceAccountEmail: config.googleServiceAccountEmail || null,
-      folders: exported.folders,
-      restoredExistingWorkspace: hasExistingData,
-      workspace: exported.workspace,
-      customers: exported.customers,
-      invoices: exported.invoices,
-      quotations: exported.quotations,
-      sheetsState: exported.sheetsState,
-      emailLogs: exported.emailLogs,
-      backups: exported.backups,
-      smtpConfig,
-      lastSyncedAt: exported.lastSyncedAt,
+      account: {
+        sub: identity.sub,
+        email: identity.email,
+        name: identity.name,
+      },
+      createdNewFolder,
+      folderUrl: `https://drive.google.com/drive/folders/${loaded.subfolders.rootFolderId}`,
+      ...loaded,
     });
   } catch (err: any) {
-    return handleRouteError(res, err, 'Failed to connect Google Drive folder.');
+    return handleRouteError(res, err, 'Failed to connect Google Drive workspace folder.');
   }
 }
 
-export async function handleDriveTest(req: NormalizedRequest, res: NormalizedResponse) {
-  if (req.method !== 'POST') {
-    return sendJson(res, 405, { error: 'Method not allowed.' });
-  }
+export async function handleDriveWorkspace(req: NormalizedRequest, res: NormalizedResponse) {
   try {
-    const config = getServerConfig(getRequestOrigin(req));
-    const body = await readJsonBody(req);
-    const folderId = requireFolderId(req, body);
-    const drive = createDriveServiceAccountClient(config);
-    const verified = await verifyFolderAccess(drive, folderId, config);
-
-    return sendJson(res, 200, {
-      ok: true,
-      folderId: verified.id,
-      folderName: verified.name,
-      canEdit: verified.canEdit,
-      canAddChildren: verified.canAddChildren,
-      canListChildren: verified.canListChildren,
-      capabilities: verified.capabilities,
-      webViewLink: verified.webViewLink,
-      serviceAccountEmail: config.googleServiceAccountEmail || null,
-      testedAt: new Date().toISOString(),
-    });
-  } catch (err: any) {
-    return handleRouteError(res, err, 'Google Drive folder test failed.');
-  }
-}
-
-export async function handleDriveDiagnose(req: NormalizedRequest, res: NormalizedResponse) {
-  if (req.method !== 'POST' && req.method !== 'GET') {
-    return sendJson(res, 405, { error: 'Method not allowed. Use POST or GET.' });
-  }
-  if (!checkRateLimit(req, 'drive-diagnose', 30, 60_000)) {
-    return sendJson(res, 429, { error: 'Too many diagnostic requests. Please wait a moment.' });
-  }
-  try {
-    const config = getServerConfig(getRequestOrigin(req));
-    const body = req.method === 'POST' ? await readJsonBody(req) : {};
-    const rawUrl = String(
-      body?.folderUrl ||
-        body?.folderId ||
-        getQueryParam(req, 'folderUrl') ||
-        getQueryParam(req, 'folderId') ||
-        getHeaderValue(req, 'x-workspace-folder-id') ||
-        ''
-    ).trim();
-
-    const report = await diagnoseDriveFolderAccess({
-      folderUrlOrId: rawUrl,
-      config,
-    });
-
-    return sendJson(res, 200, report);
-  } catch (err: any) {
-    return handleRouteError(res, err, 'Google Drive folder diagnostics failed.');
-  }
-}
-
-export async function handleDriveStatus(req: NormalizedRequest, res: NormalizedResponse) {
-  if (req.method !== 'GET') {
-    return sendJson(res, 405, { error: 'Method not allowed.' });
-  }
-  try {
-    const config = getServerConfig(getRequestOrigin(req));
-    const folderId = getOptionalFolderId(req);
-    if (!folderId) {
-      return sendJson(res, 200, {
-        connected: false,
-        storageMode: 'temporary',
-        serviceAccountEmail: config.googleServiceAccountEmail || null,
-      });
-    }
-
-    const store = new GoogleDriveStore({ folderId, config });
-    const [folders, backups, invoicePdfs, quotationPdfs] = await Promise.all([
-      store.ensureFolders(),
-      store.listBackups(),
-      store.listInvoicePdfs(),
-      store.listQuotationPdfs(),
-    ]);
-
-    return sendJson(res, 200, {
-      connected: true,
-      storageMode: 'google-drive',
-      folderId: folders.connectedFolderId,
-      folderName: folders.connectedFolderName,
-      rootFolderId: folders.rootFolderId,
-      folders,
-      serviceAccountEmail: config.googleServiceAccountEmail || null,
-      backupCount: backups.length,
-      invoicePdfCount: invoicePdfs.length,
-      quotationPdfCount: quotationPdfs.length,
-      backups,
-      checkedAt: new Date().toISOString(),
-    });
-  } catch (err: any) {
-    return handleRouteError(res, err, 'Failed to read Google Drive workspace status.');
-  }
-}
-
-export async function handleDriveSync(req: NormalizedRequest, res: NormalizedResponse) {
-  if (req.method !== 'POST') {
-    return sendJson(res, 405, { error: 'Method not allowed.' });
-  }
-  try {
-    const config = getServerConfig(getRequestOrigin(req));
-    const body = await readJsonBody(req);
-    const store = createRequiredDriveStore(req, config, body);
-
-    const writes: Promise<any>[] = [];
-    if (body.workspace) {
-      writes.push(store.writeWorkspaceState(body.workspace));
-    }
-    if (Array.isArray(body.customers)) {
-      writes.push(store.writeCustomers(body.customers));
-    }
-    if (Array.isArray(body.invoices)) {
-      writes.push(store.writeInvoices(body.invoices));
-    }
-    if (Array.isArray(body.quotations)) {
-      writes.push(store.writeQuotations(body.quotations));
-    }
-    if (Array.isArray(body.emailLogs)) {
-      writes.push(store.writeEmailLogs(body.emailLogs));
-    }
-    if (body.sheetsState && typeof body.sheetsState === 'object') {
-      writes.push(store.writeSheetsState(body.sheetsState));
-    }
-
-    await Promise.all(writes);
-    const syncedAt = new Date().toISOString();
-
-    return sendJson(res, 200, {
-      ok: true,
-      folderId: store.folderId,
-      syncedAt,
-    });
-  } catch (err: any) {
-    return handleRouteError(res, err, 'Failed to sync workspace records to Google Drive.');
-  }
-}
-
-export async function handleDriveUploadPdf(req: NormalizedRequest, res: NormalizedResponse) {
-  if (req.method !== 'POST') {
-    return sendJson(res, 405, { error: 'Method not allowed.' });
-  }
-  try {
-    const config = getServerConfig(getRequestOrigin(req));
-    const body = await readJsonBody(req);
-    const store = createRequiredDriveStore(req, config, body);
-
-    const docType = body?.documentType === 'quotation' ? 'quotation' : 'invoice';
-    const fileName = String(body?.fileName || `${docType}_${Date.now()}.pdf`).trim();
-    const rawBase64 = String(body?.pdfBase64 || '').trim();
-    if (!rawBase64) {
-      return sendJson(res, 400, { error: 'pdfBase64 is required.' });
-    }
-
-    const cleanBase64 = rawBase64.includes('base64,') ? rawBase64.split('base64,')[1] : rawBase64;
-    const pdfBuffer = Buffer.from(cleanBase64, 'base64');
-    if (pdfBuffer.length === 0) {
-      return sendJson(res, 400, { error: 'Decoded PDF payload is empty.' });
-    }
-
-    const uploaded =
-      docType === 'quotation'
-        ? await store.uploadQuotationPdf(fileName, pdfBuffer)
-        : await store.uploadInvoicePdf(fileName, pdfBuffer);
-
-    return sendJson(res, 200, {
-      ok: true,
-      file: uploaded,
-      uploadedAt: new Date().toISOString(),
-    });
-  } catch (err: any) {
-    return handleRouteError(res, err, 'Failed to upload PDF to Google Drive.');
-  }
-}
-
-export async function handleDriveBackup(req: NormalizedRequest, res: NormalizedResponse) {
-  if (req.method !== 'POST') {
-    return sendJson(res, 405, { error: 'Method not allowed.' });
-  }
-  try {
-    const config = getServerConfig(getRequestOrigin(req));
-    const body = await readJsonBody(req);
-    const store = createRequiredDriveStore(req, config, body);
-    const { file } = await store.createBackupSnapshot();
-    const backups = await store.listBackups();
-
-    return sendJson(res, 200, {
-      ok: true,
-      backup: file,
-      backups,
-    });
-  } catch (err: any) {
-    return handleRouteError(res, err, 'Failed to create Google Drive backup.');
-  }
-}
-
-export async function handleDriveRestore(req: NormalizedRequest, res: NormalizedResponse) {
-  if (req.method !== 'POST') {
-    return sendJson(res, 405, { error: 'Method not allowed.' });
-  }
-  try {
-    const config = getServerConfig(getRequestOrigin(req));
-    const body = await readJsonBody(req);
-    const store = createRequiredDriveStore(req, config, body);
-    const backupFileId = String(body?.backupFileId || '').trim();
-    if (!backupFileId) {
-      return sendJson(res, 400, { error: 'backupFileId is required.' });
-    }
-
-    const snapshot = await store.restoreBackupSnapshot(backupFileId);
-    return sendJson(res, 200, {
-      ok: true,
-      restoredAt: new Date().toISOString(),
-      snapshot,
-    });
-  } catch (err: any) {
-    return handleRouteError(res, err, 'Failed to restore workspace backup from Google Drive.');
-  }
-}
-
-// ============================================================
-// WORKSPACE STATE (CONNECTED DRIVE FOLDER)
-// ============================================================
-
-export async function handleWorkspace(req: NormalizedRequest, res: NormalizedResponse) {
-  try {
-    const config = getServerConfig(getRequestOrigin(req));
+    const { accessToken } = await authenticateGoogleRequest(req, 'drive');
+    const drive = createRequestDriveClient(accessToken);
 
     if (req.method === 'GET') {
-      const store = createRequiredDriveStore(req, config);
-      const data = await store.exportAllWorkspaceData();
-      const smtpConfig = await getPublicSmtpConfig({ driveStore: store });
-      return sendJson(res, 200, {
-        ...data,
-        smtpConfig,
-      });
+      const rawFolderId =
+        getHeaderValue(req, 'x-workspace-folder-id') || getQueryParam(req, 'folderId');
+      const folderId = extractDriveFolderIdFromInput(rawFolderId);
+      const loaded = await loadOrInitializeWorkspace(drive, folderId);
+      return sendJson(res, 200, { ok: true, ...loaded });
     }
 
-    if (req.method === 'PUT' || req.method === 'POST') {
+    if (req.method === 'POST' || req.method === 'PUT') {
       const body = await readJsonBody(req);
-      const store = createRequiredDriveStore(req, config, body);
+      const rawFolderId =
+        getHeaderValue(req, 'x-workspace-folder-id') || body?.folderId || getQueryParam(req, 'folderId');
+      const folderId = extractDriveFolderIdFromInput(rawFolderId);
+      if (!body?.bundle || typeof body.bundle !== 'object') {
+        throw new HttpApiError(400, 'MISSING_WORKSPACE_BUNDLE', 'Workspace bundle payload is required.');
+      }
+      const saved = await saveWorkspace(drive, folderId, body.bundle, {
+        expectedRevisions: body.expectedRevisions,
+        forceOverwrite: Boolean(body.forceOverwrite),
+        allowEmptyOverwrite: Boolean(body.allowEmptyOverwrite),
+      });
+      return sendJson(res, 200, { ok: true, ...saved });
+    }
 
-      if (body.workspace) {
-        await store.writeWorkspaceState(body.workspace);
+    return sendJson(res, 405, { error: 'Method not allowed.' });
+  } catch (err: any) {
+    return handleRouteError(res, err, 'Failed to sync Google Drive workspace.');
+  }
+}
+
+export async function handleDriveFiles(req: NormalizedRequest, res: NormalizedResponse) {
+  try {
+    const { accessToken } = await authenticateGoogleRequest(req, 'drive');
+    const drive = createRequestDriveClient(accessToken);
+
+    if (req.method === 'GET') {
+      const downloadFileId = getQueryParam(req, 'downloadFileId');
+      if (downloadFileId) {
+        const downloaded = await downloadDriveFileBase64(drive, downloadFileId);
+        return sendJson(res, 200, { ok: true, file: downloaded });
       }
-      if (Array.isArray(body.customers)) {
-        await store.writeCustomers(body.customers);
+
+      const rawFolderId =
+        getHeaderValue(req, 'x-workspace-folder-id') || getQueryParam(req, 'folderId');
+      const folderId = extractDriveFolderIdFromInput(rawFolderId);
+      const subfolders = await ensureWorkspaceStructure(drive, folderId);
+
+      const slot = getQueryParam(req, 'slot') as DriveFileSlot | '';
+      if (slot) {
+        const validSlots: DriveFileSlot[] = [
+          'invoices',
+          'quotations',
+          'backups',
+          'assets',
+          'logos',
+          'signatures',
+          'stamps',
+          'workspace',
+        ];
+        if (!validSlots.includes(slot)) {
+          throw new HttpApiError(400, 'INVALID_FOLDER_SLOT', `Invalid folder slot "${slot}".`);
+        }
+        const files = await listFolderFiles(drive, subfolders, slot);
+        return sendJson(res, 200, { ok: true, slot, files });
       }
-      if (Array.isArray(body.invoices)) {
-        await store.writeInvoices(body.invoices);
-      }
-      if (Array.isArray(body.quotations)) {
-        await store.writeQuotations(body.quotations);
-      }
-      if (Array.isArray(body.emailLogs)) {
-        await store.writeEmailLogs(body.emailLogs);
-      }
+
+      const [backups, invoices, quotations, logos, signatures, stamps, assets] = await Promise.all([
+        listFolderFiles(drive, subfolders, 'backups'),
+        listFolderFiles(drive, subfolders, 'invoices'),
+        listFolderFiles(drive, subfolders, 'quotations'),
+        listFolderFiles(drive, subfolders, 'logos'),
+        listFolderFiles(drive, subfolders, 'signatures'),
+        listFolderFiles(drive, subfolders, 'stamps'),
+        listFolderFiles(drive, subfolders, 'assets'),
+      ]);
 
       return sendJson(res, 200, {
         ok: true,
-        folderId: store.folderId,
-        updatedAt: new Date().toISOString(),
+        subfolders,
+        backupCount: backups.length,
+        invoicePdfCount: invoices.length,
+        quotationPdfCount: quotations.length,
+        assetCount:
+          logos.length +
+          signatures.length +
+          stamps.length +
+          assets.filter((f) => f.mimeType !== 'application/vnd.google-apps.folder').length,
+        backups,
+        invoices,
+        quotations,
+        assets: { logos, signatures, stamps },
       });
+    }
+
+    if (req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const rawFolderId =
+        getHeaderValue(req, 'x-workspace-folder-id') || body?.folderId || getQueryParam(req, 'folderId');
+      const folderId = extractDriveFolderIdFromInput(rawFolderId);
+
+      if (body?.kind === 'asset') {
+        const file = await uploadAssetToDrive(drive, folderId, {
+          category: body.category as AssetCategory | undefined,
+          assetName: String(body.assetName || 'asset'),
+          dataUrl: String(body.dataUrl || ''),
+        });
+        return sendJson(res, 200, { ok: true, file, uploadedAt: new Date().toISOString() });
+      }
+
+      const file = await uploadPdfToDrive(drive, folderId, {
+        documentType: body?.documentType === 'quotation' ? 'quotation' : 'invoice',
+        fileName: String(body?.fileName || 'document.pdf'),
+        pdfBase64: String(body?.pdfBase64 || ''),
+      });
+      return sendJson(res, 200, { ok: true, file, uploadedAt: new Date().toISOString() });
+    }
+
+    if (req.method === 'DELETE') {
+      const body = await readJsonBody(req).catch(() => ({}));
+      const rawFolderId =
+        getHeaderValue(req, 'x-workspace-folder-id') || body?.folderId || getQueryParam(req, 'folderId');
+      const folderId = extractDriveFolderIdFromInput(rawFolderId);
+      const fileId = String(body?.fileId || getQueryParam(req, 'fileId') || '').trim();
+      const confirmed = body?.confirmed === true || getQueryParam(req, 'confirmed') === 'true';
+      if (!confirmed) {
+        throw new HttpApiError(
+          400,
+          'DELETE_CONFIRMATION_REQUIRED',
+          'Explicit user confirmation is required before deleting a file from Google Drive.'
+        );
+      }
+      const result = await trashWorkspaceFile(drive, folderId, fileId);
+      return sendJson(res, 200, { ok: true, ...result });
     }
 
     return sendJson(res, 405, { error: 'Method not allowed.' });
   } catch (err: any) {
-    return handleRouteError(res, err, 'Failed to sync workspace state with Google Drive.');
+    return handleRouteError(res, err, 'Google Drive file operation failed.');
+  }
+}
+
+export async function handleDriveBackups(req: NormalizedRequest, res: NormalizedResponse) {
+  try {
+    const { accessToken } = await authenticateGoogleRequest(req, 'drive');
+    const drive = createRequestDriveClient(accessToken);
+
+    if (req.method === 'GET') {
+      const rawFolderId =
+        getHeaderValue(req, 'x-workspace-folder-id') || getQueryParam(req, 'folderId');
+      const folderId = extractDriveFolderIdFromInput(rawFolderId);
+      const subfolders = await ensureWorkspaceStructure(drive, folderId);
+      const backups = await listFolderFiles(drive, subfolders, 'backups');
+      return sendJson(res, 200, { ok: true, backups });
+    }
+
+    if (req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const rawFolderId =
+        getHeaderValue(req, 'x-workspace-folder-id') || body?.folderId || getQueryParam(req, 'folderId');
+      const folderId = extractDriveFolderIdFromInput(rawFolderId);
+      if (!body?.bundle || typeof body.bundle !== 'object') {
+        throw new HttpApiError(400, 'MISSING_BACKUP_BUNDLE', 'Workspace snapshot bundle is required.');
+      }
+      const result = await createWorkspaceBackup(drive, folderId, body.bundle);
+      return sendJson(res, 200, { ok: true, ...result });
+    }
+
+    if (req.method === 'PUT') {
+      const body = await readJsonBody(req);
+      const rawFolderId =
+        getHeaderValue(req, 'x-workspace-folder-id') || body?.folderId || getQueryParam(req, 'folderId');
+      const folderId = extractDriveFolderIdFromInput(rawFolderId);
+      const backupFileId = String(body?.backupFileId || '').trim();
+      const result = await restoreWorkspaceBackup(drive, folderId, backupFileId);
+      return sendJson(res, 200, { ok: true, ...result });
+    }
+
+    return sendJson(res, 405, { error: 'Method not allowed.' });
+  } catch (err: any) {
+    return handleRouteError(res, err, 'Google Drive backup operation failed.');
   }
 }
 
 // ============================================================
-// GOOGLE SHEETS URL CONNECTOR (NO SIGN-IN)
+// GOOGLE SHEETS (/api/sheets/*)
 // ============================================================
 
 export async function handleSheetsMetadata(req: NormalizedRequest, res: NormalizedResponse) {
-  if (req.method !== 'POST') {
+  if (req.method !== 'POST' && req.method !== 'GET') {
     return sendJson(res, 405, { error: 'Method not allowed.' });
   }
   try {
-    const config = getServerConfig(getRequestOrigin(req));
-    const body = await readJsonBody(req);
-    const urlOrId = String(body?.url || body?.spreadsheetId || '').trim();
-    const metadata = await fetchSpreadsheetMetadata({ urlOrId, config });
+    const { accessToken } = await authenticateGoogleRequest(req, 'sheets');
+    const body = req.method === 'POST' ? await readJsonBody(req) : {};
+    const urlOrId = String(
+      body?.urlOrId || body?.spreadsheetUrl || body?.spreadsheetId || getQueryParam(req, 'urlOrId') || ''
+    );
+    const sheets = createRequestSheetsClient(accessToken);
+    const metadata = await getSpreadsheetMetadata(sheets, urlOrId);
     return sendJson(res, 200, metadata);
   } catch (err: any) {
-    return handleRouteError(res, err, 'Failed to inspect Google Spreadsheet metadata.');
+    return handleRouteError(res, err, 'Failed to read Google Spreadsheet metadata.');
   }
 }
 
@@ -470,18 +495,19 @@ export async function handleSheetsValues(req: NormalizedRequest, res: Normalized
     return sendJson(res, 405, { error: 'Method not allowed.' });
   }
   try {
-    const config = getServerConfig(getRequestOrigin(req));
+    const { accessToken } = await authenticateGoogleRequest(req, 'sheets');
     const body = await readJsonBody(req);
-    const result = await fetchSheetValues({
-      urlOrId: String(body?.url || body?.spreadsheetId || '').trim(),
-      sheetTitle: body?.sheetTitle ? String(body.sheetTitle) : undefined,
-      customRange: body?.range ? String(body.range) : undefined,
-      headerRowIndex: body?.headerRowIndex,
-      config,
+    const sheets = createRequestSheetsClient(accessToken);
+    const values = await getWorksheetValues(sheets, {
+      urlOrId: String(body?.urlOrId || body?.spreadsheetId || ''),
+      sheetTitle: String(body?.sheetTitle || ''),
+      range: body?.range ? String(body.range) : undefined,
+      headerRowIndex: body?.headerRowIndex ?? 'auto',
+      spreadsheetTitle: body?.spreadsheetTitle ? String(body.spreadsheetTitle) : undefined,
     });
-    return sendJson(res, 200, result);
+    return sendJson(res, 200, values);
   } catch (err: any) {
-    return handleRouteError(res, err, 'Failed to fetch worksheet data from Google Sheets.');
+    return handleRouteError(res, err, 'Failed to retrieve worksheet values from Google Sheets.');
   }
 }
 
@@ -490,64 +516,152 @@ export async function handleSheetsSync(req: NormalizedRequest, res: NormalizedRe
     return sendJson(res, 405, { error: 'Method not allowed.' });
   }
   try {
-    const config = getServerConfig(getRequestOrigin(req));
+    const { accessToken } = await authenticateGoogleRequest(req, 'sheets');
     const body = await readJsonBody(req);
-    const driveStore = createOptionalDriveStore(req, config, body);
-
-    const result = await performSpreadsheetSync({
-      urlOrId: String(body?.url || body?.spreadsheetId || '').trim(),
-      selectedSheets: Array.isArray(body?.selectedSheets) ? body.selectedSheets.map(String) : undefined,
+    const sheets = createRequestSheetsClient(accessToken);
+    const result = await syncSpreadsheet(sheets, {
+      urlOrId: String(body?.urlOrId || body?.spreadsheetUrl || body?.spreadsheetId || ''),
+      selectedSheets: Array.isArray(body?.selectedSheets) ? body.selectedSheets : undefined,
       syncAllSheets: Boolean(body?.syncAllSheets),
-      customRange: body?.range ? String(body.range) : undefined,
-      headerRowIndex: body?.headerRowIndex,
-      config,
-      driveStore,
+      range: body?.range ? String(body.range) : undefined,
+      headerRowIndex: body?.headerRowIndex ?? 'auto',
     });
     return sendJson(res, 200, result);
   } catch (err: any) {
-    return handleRouteError(res, err, 'Google Sheets synchronization failed.');
+    return handleRouteError(res, err, 'Failed to sync Google Spreadsheet.');
   }
 }
 
-export async function handleSheetsData(req: NormalizedRequest, res: NormalizedResponse) {
+// ============================================================
+// GMAIL API (/api/gmail/*) — DEFAULT EMAIL PROVIDER
+// ============================================================
+
+export async function handleGmailSend(req: NormalizedRequest, res: NormalizedResponse) {
+  if (req.method !== 'POST') {
+    return sendJson(res, 405, { error: 'Method not allowed.' });
+  }
+  if (!checkRateLimit(req, 'gmail-send', 20, 60_000)) {
+    return sendJson(res, 429, { error: 'Gmail sending rate limit reached. Wait a minute.' });
+  }
+  try {
+    const body = await readJsonBody(req);
+    const { accessToken, identity, config } = await authenticateGoogleRequest(req, 'gmail');
+    const gmail = createRequestGmailClient(accessToken);
+
+    let driveStore: OAuthDriveEmailStore | null = null;
+    const rawFolderId =
+      getHeaderValue(req, 'x-workspace-folder-id') || body?.folderId || getQueryParam(req, 'folderId');
+    if (rawFolderId && identity.permissions.driveGranted) {
+      try {
+        driveStore = await createVerifiedOAuthEmailStore(req, config, body, {
+          accessToken,
+          identity,
+        });
+      } catch {
+        driveStore = null;
+      }
+    }
+
+    const result = await dispatchGmailEmails({
+      gmail,
+      identity,
+      driveStore,
+      senderName: body?.senderName ? String(body.senderName) : undefined,
+      replyTo: body?.replyTo ? String(body.replyTo) : undefined,
+      items: Array.isArray(body?.items) ? body.items : [],
+    });
+
+    const sentCount = result.results.filter((r) => r.status === 'Sent').length;
+    const failedCount = result.results.length - sentCount;
+
+    return sendJson(res, 200, {
+      ok: failedCount === 0,
+      sentCount,
+      failedCount,
+      senderEmail: result.senderEmail,
+      persistedInDrive: result.persistedInDrive,
+      results: result.results,
+      logs: result.logs,
+    });
+  } catch (err: any) {
+    return handleRouteError(res, err, 'Failed to send email via Gmail API.');
+  }
+}
+
+export async function handleGmailTestSend(req: NormalizedRequest, res: NormalizedResponse) {
+  if (req.method !== 'POST') {
+    return sendJson(res, 405, { error: 'Method not allowed.' });
+  }
+  if (!checkRateLimit(req, 'gmail-test-send', 10, 60_000)) {
+    return sendJson(res, 429, { error: 'Too many Gmail test attempts. Wait a minute.' });
+  }
+  try {
+    const body = await readJsonBody(req);
+    const { accessToken, identity, config } = await authenticateGoogleRequest(req, 'gmail');
+    const gmail = createRequestGmailClient(accessToken);
+
+    let driveStore: OAuthDriveEmailStore | null = null;
+    const rawFolderId =
+      getHeaderValue(req, 'x-workspace-folder-id') || body?.folderId || getQueryParam(req, 'folderId');
+    if (rawFolderId && identity.permissions.driveGranted) {
+      try {
+        driveStore = await createVerifiedOAuthEmailStore(req, config, body, {
+          accessToken,
+          identity,
+        });
+      } catch {
+        driveStore = null;
+      }
+    }
+
+    const result = await sendGmailTestEmail({
+      gmail,
+      identity,
+      driveStore,
+      recipientEmail: String(body?.recipientEmail || identity.email),
+      senderName: body?.senderName ? String(body.senderName) : undefined,
+      replyTo: body?.replyTo ? String(body.replyTo) : undefined,
+    });
+
+    return sendJson(res, 200, result);
+  } catch (err: any) {
+    return handleRouteError(res, err, 'Failed to send Gmail API test email.');
+  }
+}
+
+export async function handleGmailHistory(req: NormalizedRequest, res: NormalizedResponse) {
   if (req.method !== 'GET') {
     return sendJson(res, 405, { error: 'Method not allowed.' });
   }
   try {
     const config = getServerConfig(getRequestOrigin(req));
-    const driveStore = createOptionalDriveStore(req, config);
-    if (!driveStore) {
-      return sendJson(res, 200, { activeSpreadsheet: null, syncHistory: [] });
-    }
-    const overview = await getPersistedSheetsOverview(driveStore);
-    return sendJson(res, 200, overview);
+    const driveStore = await createVerifiedOAuthEmailStore(req, config);
+    const logs = await driveStore.readEmailLogs();
+    return sendJson(res, 200, { logs });
   } catch (err: any) {
-    return handleRouteError(res, err, 'Failed to fetch saved Google Sheets data from Drive.');
+    return handleRouteError(res, err, 'Failed to load Gmail delivery history from Google Drive.');
   }
 }
 
 // ============================================================
-// EMAIL INTEGRATION — GMAIL SMTP & CUSTOM SMTP (NO SIGN-IN)
+// CUSTOM SMTP (OPTIONAL ALTERNATIVE — ENCRYPTED IN USER'S DRIVE)
 // ============================================================
 
 export async function handleSmtpConfig(req: NormalizedRequest, res: NormalizedResponse) {
   try {
     const config = getServerConfig(getRequestOrigin(req));
-    const sessionId = getSessionId(req);
 
     if (req.method === 'GET') {
-      const driveStore = createOptionalDriveStore(req, config);
-      const smtp = await getPublicSmtpConfig({ driveStore, sessionId });
+      const driveStore = await createVerifiedOAuthEmailStore(req, config);
+      const smtp = await getPublicSmtpConfig({ driveStore });
       return sendJson(res, 200, { smtp });
     }
 
     if (req.method === 'POST' || req.method === 'PUT') {
       const body = await readJsonBody(req);
-      const driveStore = createOptionalDriveStore(req, config, body);
+      const driveStore = await createVerifiedOAuthEmailStore(req, config, body);
       const smtp = await saveSmtpConfig({
         driveStore,
-        sessionId,
-        config,
         input: {
           provider: body?.provider === 'custom_smtp' ? 'custom_smtp' : 'gmail_smtp',
           host: String(body?.host || ''),
@@ -567,8 +681,8 @@ export async function handleSmtpConfig(req: NormalizedRequest, res: NormalizedRe
     }
 
     if (req.method === 'DELETE') {
-      const driveStore = createOptionalDriveStore(req, config);
-      await deleteSmtpConfig({ driveStore, sessionId });
+      const driveStore = await createVerifiedOAuthEmailStore(req, config);
+      await deleteSmtpConfig({ driveStore });
       return sendJson(res, 200, { ok: true });
     }
 
@@ -588,14 +702,12 @@ export async function handleSmtpTest(req: NormalizedRequest, res: NormalizedResp
 
   try {
     const config = getServerConfig(getRequestOrigin(req));
-    const sessionId = getSessionId(req);
     const body = await readJsonBody(req);
-    const driveStore = createOptionalDriveStore(req, config, body);
+    const driveStore = await createVerifiedOAuthEmailStore(req, config, body);
 
     const hasInlineOverride = Boolean(body?.host || body?.username || body?.password);
     const result = await testSmtpConnection({
       driveStore,
-      sessionId,
       config,
       override: hasInlineOverride
         ? {
@@ -622,19 +734,18 @@ export async function handleEmailTestSend(req: NormalizedRequest, res: Normalize
     return sendJson(res, 405, { error: 'Method not allowed.' });
   }
   if (!checkRateLimit(req, 'email-test-send', 10, 60_000)) {
-    return sendJson(res, 429, { error: 'Rate limit reached for test emails. Please wait a minute.' });
+    return sendJson(res, 429, {
+      error: 'Rate limit reached for test emails. Please wait a minute.',
+    });
   }
 
   try {
     const config = getServerConfig(getRequestOrigin(req));
-    const sessionId = getSessionId(req);
     const body = await readJsonBody(req);
-    const driveStore = createOptionalDriveStore(req, config, body);
+    const driveStore = await createVerifiedOAuthEmailStore(req, config, body);
 
     const result = await sendTestEmail({
       driveStore,
-      sessionId,
-      config,
       recipientEmail: String(body?.recipientEmail || ''),
     });
     return sendJson(res, 200, result);
@@ -653,14 +764,11 @@ export async function handleEmailSend(req: NormalizedRequest, res: NormalizedRes
 
   try {
     const config = getServerConfig(getRequestOrigin(req));
-    const sessionId = getSessionId(req);
     const body = await readJsonBody(req);
-    const driveStore = createOptionalDriveStore(req, config, body);
+    const driveStore = await createVerifiedOAuthEmailStore(req, config, body);
 
     const result = await dispatchSmtpEmails({
       driveStore,
-      sessionId,
-      config,
       items: Array.isArray(body?.items) ? body.items : [],
     });
 
@@ -686,225 +794,10 @@ export async function handleEmailHistory(req: NormalizedRequest, res: Normalized
   }
   try {
     const config = getServerConfig(getRequestOrigin(req));
-    const driveStore = createOptionalDriveStore(req, config);
-    if (!driveStore) {
-      return sendJson(res, 200, { logs: [] });
-    }
+    const driveStore = await createVerifiedOAuthEmailStore(req, config);
     const logs = await driveStore.readEmailLogs();
     return sendJson(res, 200, { logs });
   } catch (err: any) {
     return handleRouteError(res, err, 'Failed to load email history from Google Drive.');
-  }
-}
-
-// ============================================================
-// QUOTATIONS & INVOICES CRUD (CONNECTED DRIVE FOLDER)
-// ============================================================
-
-export async function handleQuotations(
-  req: NormalizedRequest,
-  res: NormalizedResponse,
-  segments: string[] = []
-) {
-  try {
-    const config = getServerConfig(getRequestOrigin(req));
-    const body = req.method !== 'GET' && req.method !== 'DELETE' ? await readJsonBody(req) : undefined;
-    const store = createRequiredDriveStore(req, config, body);
-    const [id, action] = segments;
-
-    if (req.method === 'GET' && !id) {
-      const quotations = await store.readQuotations();
-      return sendJson(res, 200, { quotations });
-    }
-
-    if (req.method === 'GET' && id) {
-      const quotations = await store.readQuotations();
-      const found = quotations.find((q: any) => q.id === id);
-      if (!found) return sendJson(res, 404, { error: 'Quotation not found.' });
-      return sendJson(res, 200, { quotation: found });
-    }
-
-    if (req.method === 'POST' && !id) {
-      const quotation = body?.quotation || body;
-      if (!quotation?.id) {
-        return sendJson(res, 400, { error: 'Quotation object with id is required.' });
-      }
-      const existing = await store.readQuotations();
-      const next = [quotation, ...existing.filter((q: any) => q.id !== quotation.id)];
-      await store.writeQuotations(next);
-      return sendJson(res, 201, { ok: true, quotation, quotations: next });
-    }
-
-    if ((req.method === 'PUT' || req.method === 'PATCH') && id && !action) {
-      const updated = body?.quotation || body;
-      const existing = await store.readQuotations();
-      const next = existing.map((q: any) => (q.id === id ? { ...q, ...updated, id } : q));
-      await store.writeQuotations(next);
-      return sendJson(res, 200, { ok: true, quotations: next });
-    }
-
-    if (req.method === 'POST' && id && (action === 'approve' || action === 'reject')) {
-      const existing = await store.readQuotations();
-      const target = existing.find((q: any) => q.id === id);
-      if (!target) return sendJson(res, 404, { error: 'Quotation not found.' });
-      if (target.status === 'Converted to Invoice') {
-        return sendJson(res, 400, { error: 'Converted quotations cannot change approval status.' });
-      }
-
-      const now = new Date().toISOString();
-      const newStatus = action === 'approve' ? 'Approved' : 'Not Approved';
-      const entry = {
-        status: newStatus,
-        timestamp: now,
-        actor: String(body?.actor || 'Workspace User').trim(),
-        notes: String(body?.notes || body?.reason || '').trim(),
-      };
-
-      const next = existing.map((q: any) =>
-        q.id === id
-          ? {
-              ...q,
-              status: newStatus,
-              approvedAt: action === 'approve' ? now : q.approvedAt,
-              approvedBy: action === 'approve' ? entry.actor : q.approvedBy,
-              approvalNotes: action === 'approve' ? entry.notes : q.approvalNotes,
-              rejectionReason: action === 'reject' ? entry.notes : undefined,
-              updatedAt: now,
-              approvalHistory: [...(q.approvalHistory || []), entry],
-            }
-          : q
-      );
-
-      await store.writeQuotations(next);
-      return sendJson(res, 200, { ok: true, quotation: next.find((q: any) => q.id === id), quotations: next });
-    }
-
-    if (req.method === 'POST' && id && action === 'convert-to-invoice') {
-      const existingQuotations = await store.readQuotations();
-      const quotation = existingQuotations.find((q: any) => q.id === id);
-      if (!quotation) return sendJson(res, 404, { error: 'Quotation not found.' });
-      if (quotation.status === 'Converted to Invoice' || quotation.convertedInvoiceId) {
-        return sendJson(res, 409, {
-          error: `Quotation ${quotation.quotationNumber} was already converted to invoice ${quotation.convertedInvoiceNumber || quotation.convertedInvoiceId}.`,
-        });
-      }
-      if (quotation.status !== 'Approved') {
-        return sendJson(res, 400, {
-          error: 'Only Approved quotations can be converted into an invoice.',
-        });
-      }
-
-      const invoiceRecord = body?.invoice;
-      if (!invoiceRecord?.id || !invoiceRecord?.invoiceNumber) {
-        return sendJson(res, 400, { error: 'Converted invoice payload is required.' });
-      }
-
-      const existingInvoices = await store.readInvoices();
-      const duplicateInvoice = existingInvoices.find(
-        (inv: any) =>
-          inv.invoiceNumber?.toLowerCase() === invoiceRecord.invoiceNumber.toLowerCase()
-      );
-      if (duplicateInvoice) {
-        return sendJson(res, 409, {
-          error: `Invoice number "${invoiceRecord.invoiceNumber}" already exists.`,
-        });
-      }
-
-      const now = new Date().toISOString();
-      const nextInvoices = [invoiceRecord, ...existingInvoices];
-      const nextQuotations = existingQuotations.map((q: any) =>
-        q.id === id
-          ? {
-              ...q,
-              status: 'Converted to Invoice',
-              convertedInvoiceId: invoiceRecord.id,
-              convertedInvoiceNumber: invoiceRecord.invoiceNumber,
-              convertedAt: now,
-              updatedAt: now,
-              approvalHistory: [
-                ...(q.approvalHistory || []),
-                {
-                  status: 'Converted to Invoice',
-                  timestamp: now,
-                  actor: 'Workspace User',
-                  notes: `Converted to Invoice ${invoiceRecord.invoiceNumber}`,
-                },
-              ],
-            }
-          : q
-      );
-
-      await Promise.all([store.writeInvoices(nextInvoices), store.writeQuotations(nextQuotations)]);
-      return sendJson(res, 200, {
-        ok: true,
-        invoice: invoiceRecord,
-        quotation: nextQuotations.find((q: any) => q.id === id),
-        invoices: nextInvoices,
-        quotations: nextQuotations,
-      });
-    }
-
-    if (req.method === 'DELETE' && id) {
-      const existing = await store.readQuotations();
-      const next = existing.filter((q: any) => q.id !== id);
-      await store.writeQuotations(next);
-      return sendJson(res, 200, { ok: true, quotations: next });
-    }
-
-    return sendJson(res, 405, { error: 'Unsupported quotation route or method.' });
-  } catch (err: any) {
-    return handleRouteError(res, err, 'Quotation operation failed.');
-  }
-}
-
-export async function handleInvoices(
-  req: NormalizedRequest,
-  res: NormalizedResponse,
-  segments: string[] = []
-) {
-  try {
-    const config = getServerConfig(getRequestOrigin(req));
-    const body = req.method !== 'GET' && req.method !== 'DELETE' ? await readJsonBody(req) : undefined;
-    const store = createRequiredDriveStore(req, config, body);
-    const [id] = segments;
-
-    if (req.method === 'GET' && !id) {
-      const invoices = await store.readInvoices();
-      return sendJson(res, 200, { invoices });
-    }
-
-    if (req.method === 'POST' && !id) {
-      const incoming = Array.isArray(body?.invoices)
-        ? body.invoices
-        : body?.invoice
-          ? [body.invoice]
-          : [];
-      if (incoming.length === 0) {
-        return sendJson(res, 400, { error: 'invoice or invoices array is required.' });
-      }
-      const existing = await store.readInvoices();
-      const incomingIds = new Set(incoming.map((inv: any) => inv.id));
-      const next = [...incoming, ...existing.filter((inv: any) => !incomingIds.has(inv.id))];
-      await store.writeInvoices(next);
-      return sendJson(res, 201, { ok: true, invoices: next });
-    }
-
-    if ((req.method === 'PUT' || req.method === 'PATCH') && id) {
-      const existing = await store.readInvoices();
-      const next = existing.map((inv: any) => (inv.id === id ? { ...inv, ...body, id } : inv));
-      await store.writeInvoices(next);
-      return sendJson(res, 200, { ok: true, invoices: next });
-    }
-
-    if (req.method === 'DELETE' && id) {
-      const existing = await store.readInvoices();
-      const next = existing.filter((inv: any) => inv.id !== id);
-      await store.writeInvoices(next);
-      return sendJson(res, 200, { ok: true, invoices: next });
-    }
-
-    return sendJson(res, 405, { error: 'Unsupported invoice route or method.' });
-  } catch (err: any) {
-    return handleRouteError(res, err, 'Invoice operation failed.');
   }
 }

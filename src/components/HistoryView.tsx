@@ -21,8 +21,10 @@ import {
 import { CompanySettings, GenerationRecord, InvoiceTemplate } from '../types';
 import { formatCurrency } from '../utils/calculator';
 import { generateInvoicePDF } from '../utils/pdfGenerator';
+import { googleTokenManager } from '../utils/googleAuth';
 import { EmailSendStatus } from '../utils/emailService';
 import { storage } from '../utils/storage';
+import { workspaceApi } from '../utils/workspaceApi';
 
 interface HistoryViewProps {
   generationHistory: GenerationRecord[];
@@ -158,7 +160,27 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
       additionalCharges,
       paymentMade,
     });
-    pdf.save(`${record.invoiceNumber.replace(/[/\\?%*:|"<>]/g, '_')}.pdf`);
+    const safeFileName = `${record.invoiceNumber.replace(/[/\\?%*:|"<>]/g, '_')}.pdf`;
+    pdf.save(safeFileName);
+
+    // Best-effort upload to user's connected Google Drive Invoices/ folder
+    if (storage.getActiveWorkspaceId() && googleTokenManager.isTokenValid()) {
+      try {
+        const dataUri = pdf.output('datauristring');
+        const pdfBase64 = dataUri.split('base64,')[1] || '';
+        if (pdfBase64) {
+          void workspaceApi
+            .uploadPdfToDrive({
+              documentType: 'invoice',
+              fileName: safeFileName,
+              pdfBase64,
+            })
+            .catch(() => {});
+        }
+      } catch {
+        // Non-blocking
+      }
+    }
   };
 
   const handleDuplicateRecord = (record: GenerationRecord) => {

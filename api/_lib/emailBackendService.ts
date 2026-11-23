@@ -5,14 +5,13 @@
 
 import nodemailer from 'nodemailer';
 import { AppServerConfig } from './config.js';
-import { decryptSecret, encryptSecret, generateRandomId } from './crypto.js';
+import { generateRandomId } from './crypto.js';
+import { HttpApiError } from './errors.js';
 import {
-  GoogleDriveStore,
+  OAuthDriveEmailStore,
   SmtpProviderType,
   StoredEmailLogEntry,
-  StoredSmtpConfig,
-} from './driveStore.js';
-import { HttpApiError } from './errors.js';
+} from './oauthDriveClient.js';
 
 export interface PublicSmtpConfig {
   configured: boolean;
@@ -53,11 +52,19 @@ export interface EmailSendItemResult {
   sentAt: string;
 }
 
-/**
- * Ephemeral server-side memory store for workspaces without a connected Google Drive folder.
- * Passwords remain AES-256-GCM encrypted in memory and are scoped strictly by workspaceSessionId.
- */
-const ephemeralSmtpStore = new Map<string, StoredSmtpConfig>();
+export interface SmtpTransportLike {
+  verify: () => Promise<any>;
+  sendMail: (mailOptions: any) => Promise<{ messageId?: string }>;
+  close: () => void;
+}
+
+export type SmtpTransportFactory = (creds: {
+  host: string;
+  port: number;
+  encryption: 'SSL' | 'STARTTLS' | 'NONE';
+  username: string;
+  password: string;
+}) => SmtpTransportLike;
 
 function isValidEmailAddress(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((email || '').trim());
@@ -91,277 +98,13 @@ function formatPlainTextAsHtml(body: string): string {
   return `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #1e293b; max-width: 640px;">${safe}</div>`;
 }
 
-function getEffectiveEncryptionKey(config: AppServerConfig, sessionId?: string): string {
-  if (config.smtpEncryptionKey && config.smtpEncryptionKey.length >= 16) {
-    return config.smtpEncryptionKey;
-  }
-  // Ephemeral sessions without Drive still encrypt in memory using a process-scoped fallback;
-  // Drive persistence strictly requires SMTP_ENCRYPTION_KEY on the server.
-  if (sessionId) {
-    return `ephemeral-only-${process.pid}-${sessionId}-invoice-studio`;
-  }
-  throw new HttpApiError(
-    503,
-    'SMTP_ENCRYPTION_KEY_MISSING',
-    'Server SMTP_ENCRYPTION_KEY is not configured (minimum 16 characters required) to securely store SMTP credentials.'
-  );
-}
-
-async function readStoredSmtp(options: {
-  driveStore?: GoogleDriveStore | null;
-  sessionId?: string;
-}): Promise<{ stored: StoredSmtpConfig | null; persistedInDrive: boolean }> {
-  if (options.driveStore) {
-    const stored = await options.driveStore.readSmtpConfig();
-    return { stored, persistedInDrive: true };
-  }
-  if (options.sessionId) {
-    return { stored: ephemeralSmtpStore.get(options.sessionId) || null, persistedInDrive: false };
-  }
-  return { stored: null, persistedInDrive: false };
-}
-
-export async function getPublicSmtpConfig(options: {
-  driveStore?: GoogleDriveStore | null;
-  sessionId?: string;
-}): Promise<PublicSmtpConfig> {
-  const { stored, persistedInDrive } = await readStoredSmtp(options);
-  if (!stored) {
-    return {
-      configured: false,
-      persistedInDrive,
-      provider: 'gmail_smtp',
-      host: 'smtp.gmail.com',
-      port: 465,
-      encryption: 'SSL',
-      username: '',
-      senderName: '',
-      senderEmail: '',
-      replyTo: '',
-      hasPassword: false,
-    };
-  }
-
-  return {
-    configured: Boolean(stored.host && stored.username && stored.encryptedPassword),
-    persistedInDrive,
-    provider: stored.provider || (stored.host === 'smtp.gmail.com' ? 'gmail_smtp' : 'custom_smtp'),
-    host: stored.host,
-    port: stored.port,
-    encryption: stored.encryption,
-    username: stored.username,
-    senderName: stored.senderName,
-    senderEmail: stored.senderEmail,
-    replyTo: stored.replyTo || '',
-    hasPassword: Boolean(stored.encryptedPassword),
-    updatedAt: stored.updatedAt,
-    lastVerifiedAt: stored.lastVerifiedAt,
-  };
-}
-
-export async function saveSmtpConfig(options: {
-  driveStore?: GoogleDriveStore | null;
-  sessionId?: string;
-  config: AppServerConfig;
-  input: {
-    provider?: SmtpProviderType;
-    host: string;
-    port: number;
-    encryption: 'SSL' | 'STARTTLS' | 'NONE';
-    username: string;
-    password?: string;
-    senderName: string;
-    senderEmail: string;
-    replyTo?: string;
-  };
-}): Promise<PublicSmtpConfig> {
-  const provider: SmtpProviderType =
-    options.input.provider === 'custom_smtp' ? 'custom_smtp' : 'gmail_smtp';
-  const host = provider === 'gmail_smtp' ? 'smtp.gmail.com' : (options.input.host || '').trim();
-  const port = Number(options.input.port || (provider === 'gmail_smtp' ? 465 : 587));
-  const encryption =
-    options.input.encryption || (port === 465 ? 'SSL' : 'STARTTLS');
-  const username = (options.input.username || '').trim();
-  const senderName = (options.input.senderName || '').trim();
-  const senderEmail = (options.input.senderEmail || username).trim();
-  const replyTo = (options.input.replyTo || '').trim();
-
-  if (!host) {
-    throw new HttpApiError(400, 'INVALID_SMTP_HOST', 'SMTP host is required (e.g. smtp.gmail.com).');
-  }
-  if (!Number.isFinite(port) || port < 1 || port > 65535) {
-    throw new HttpApiError(400, 'INVALID_SMTP_PORT', 'SMTP port must be between 1 and 65535.');
-  }
-  if (!username) {
-    throw new HttpApiError(
-      400,
-      'INVALID_SMTP_USER',
-      provider === 'gmail_smtp'
-        ? 'Your Gmail address is required as the SMTP username.'
-        : 'SMTP username is required.'
-    );
-  }
-  if (!isValidEmailAddress(senderEmail)) {
-    throw new HttpApiError(400, 'INVALID_SENDER_EMAIL', 'Please enter a valid Sender Email address.');
-  }
-  if (replyTo && !isValidEmailAddress(replyTo)) {
-    throw new HttpApiError(400, 'INVALID_REPLY_TO', 'Reply-To must be a valid email address.');
-  }
-
-  if (options.driveStore) {
-    await options.driveStore.writeSmtpConfig({
-      provider,
-      host,
-      port,
-      encryption,
-      username,
-      password: options.input.password,
-      senderName: senderName || 'Invoice Studio',
-      senderEmail,
-      replyTo: replyTo || undefined,
-    });
-    return getPublicSmtpConfig({ driveStore: options.driveStore });
-  }
-
-  if (!options.sessionId) {
-    throw new HttpApiError(
-      400,
-      'WORKSPACE_SESSION_REQUIRED',
-      'Missing workspace session identifier. Refresh the page and try again.'
-    );
-  }
-
-  const existing = ephemeralSmtpStore.get(options.sessionId);
-  const encKey = getEffectiveEncryptionKey(options.config, options.sessionId);
-  let encryptedPassword = existing?.encryptedPassword || '';
-
-  if (options.input.password && options.input.password.trim()) {
-    encryptedPassword = encryptSecret(options.input.password.trim(), encKey);
-  }
-  if (!encryptedPassword) {
-    throw new HttpApiError(
-      400,
-      'SMTP_PASSWORD_REQUIRED',
-      provider === 'gmail_smtp'
-        ? 'A 16-character Gmail App Password is required.'
-        : 'An SMTP password is required.'
-    );
-  }
-
-  const record: StoredSmtpConfig = {
-    provider,
-    host,
-    port,
-    encryption,
-    username,
-    encryptedPassword,
-    senderName: senderName || 'Invoice Studio',
-    senderEmail,
-    replyTo: replyTo || undefined,
-    updatedAt: new Date().toISOString(),
-    lastVerifiedAt: existing?.lastVerifiedAt,
-  };
-
-  ephemeralSmtpStore.set(options.sessionId, record);
-  return getPublicSmtpConfig({ sessionId: options.sessionId });
-}
-
-export async function deleteSmtpConfig(options: {
-  driveStore?: GoogleDriveStore | null;
-  sessionId?: string;
-}): Promise<void> {
-  if (options.driveStore) {
-    await options.driveStore.deleteSmtpConfig();
-  }
-  if (options.sessionId) {
-    ephemeralSmtpStore.delete(options.sessionId);
-  }
-}
-
-async function resolveActiveSmtpCredentials(options: {
-  driveStore?: GoogleDriveStore | null;
-  sessionId?: string;
-  config: AppServerConfig;
-  override?: {
-    provider?: SmtpProviderType;
-    host?: string;
-    port?: number;
-    encryption?: 'SSL' | 'STARTTLS' | 'NONE';
-    username?: string;
-    password?: string;
-    senderName?: string;
-    senderEmail?: string;
-    replyTo?: string;
-  };
-}): Promise<{
-  provider: SmtpProviderType;
+export function buildNodemailerTransport(creds: {
   host: string;
   port: number;
   encryption: 'SSL' | 'STARTTLS' | 'NONE';
   username: string;
   password: string;
-  senderName: string;
-  senderEmail: string;
-  replyTo?: string;
-  persistedInDrive: boolean;
-}> {
-  const { stored, persistedInDrive } = await readStoredSmtp(options);
-  const override = options.override;
-
-  const provider: SmtpProviderType =
-    override?.provider || stored?.provider || 'gmail_smtp';
-  const host =
-    provider === 'gmail_smtp'
-      ? 'smtp.gmail.com'
-      : (override?.host || stored?.host || '').trim();
-  const port = Number(override?.port || stored?.port || 465);
-  const encryption = override?.encryption || stored?.encryption || (port === 465 ? 'SSL' : 'STARTTLS');
-  const username = (override?.username || stored?.username || '').trim();
-  const senderName = (override?.senderName || stored?.senderName || 'Invoice Studio').trim();
-  const senderEmail = (override?.senderEmail || stored?.senderEmail || username).trim();
-  const replyTo = (override?.replyTo ?? stored?.replyTo ?? '').trim() || undefined;
-
-  let password = (override?.password || '').trim();
-  if (!password && stored?.encryptedPassword) {
-    if (options.driveStore) {
-      password = options.driveStore.decryptSmtpPassword(stored);
-    } else if (options.sessionId) {
-      password = decryptSecret(
-        stored.encryptedPassword,
-        getEffectiveEncryptionKey(options.config, options.sessionId)
-      );
-    }
-  }
-
-  if (!host || !username || !password) {
-    throw new HttpApiError(
-      400,
-      'SMTP_NOT_CONFIGURED',
-      'Email settings are not configured yet. Open Google Drive & Email Settings to configure Gmail SMTP or Custom SMTP.'
-    );
-  }
-
-  return {
-    provider,
-    host,
-    port,
-    encryption,
-    username,
-    password,
-    senderName,
-    senderEmail,
-    replyTo,
-    persistedInDrive,
-  };
-}
-
-function buildNodemailerTransport(creds: {
-  host: string;
-  port: number;
-  encryption: 'SSL' | 'STARTTLS' | 'NONE';
-  username: string;
-  password: string;
-}) {
+}): SmtpTransportLike {
   return nodemailer.createTransport({
     host: creds.host,
     port: creds.port,
@@ -388,48 +131,219 @@ function formatSmtpErrorMessage(err: any, provider: SmtpProviderType): string {
   return msg;
 }
 
+export async function getPublicSmtpConfig(options: {
+  driveStore: OAuthDriveEmailStore;
+}): Promise<PublicSmtpConfig> {
+  const stored = await options.driveStore.readSmtpConfig();
+  if (!stored) {
+    return {
+      configured: false,
+      persistedInDrive: true,
+      provider: 'gmail_smtp',
+      host: 'smtp.gmail.com',
+      port: 465,
+      encryption: 'SSL',
+      username: '',
+      senderName: '',
+      senderEmail: '',
+      replyTo: '',
+      hasPassword: false,
+    };
+  }
+
+  return {
+    configured: Boolean(stored.host && stored.username && stored.encryptedPassword),
+    persistedInDrive: true,
+    provider:
+      stored.provider || (stored.host === 'smtp.gmail.com' ? 'gmail_smtp' : 'custom_smtp'),
+    host: stored.host,
+    port: stored.port,
+    encryption: stored.encryption,
+    username: stored.username,
+    senderName: stored.senderName,
+    senderEmail: stored.senderEmail,
+    replyTo: stored.replyTo || '',
+    hasPassword: Boolean(stored.encryptedPassword),
+    updatedAt: stored.updatedAt,
+    lastVerifiedAt: stored.lastVerifiedAt,
+  };
+}
+
+export async function saveSmtpConfig(options: {
+  driveStore: OAuthDriveEmailStore;
+  input: {
+    provider?: SmtpProviderType;
+    host: string;
+    port: number;
+    encryption: 'SSL' | 'STARTTLS' | 'NONE';
+    username: string;
+    password?: string;
+    senderName: string;
+    senderEmail: string;
+    replyTo?: string;
+  };
+}): Promise<PublicSmtpConfig> {
+  const provider: SmtpProviderType =
+    options.input.provider === 'custom_smtp' ? 'custom_smtp' : 'gmail_smtp';
+  const host = provider === 'gmail_smtp' ? 'smtp.gmail.com' : (options.input.host || '').trim();
+  const port = Number(options.input.port || (provider === 'gmail_smtp' ? 465 : 587));
+  const encryption = options.input.encryption || (port === 465 ? 'SSL' : 'STARTTLS');
+  const username = (options.input.username || '').trim();
+  const senderName = (options.input.senderName || '').trim();
+  const senderEmail = (options.input.senderEmail || username).trim();
+  const replyTo = (options.input.replyTo || '').trim();
+
+  if (!host) {
+    throw new HttpApiError(400, 'INVALID_SMTP_HOST', 'SMTP host is required (e.g. smtp.gmail.com).');
+  }
+  if (!Number.isFinite(port) || port < 1 || port > 65535) {
+    throw new HttpApiError(400, 'INVALID_SMTP_PORT', 'SMTP port must be between 1 and 65535.');
+  }
+  if (!username) {
+    throw new HttpApiError(
+      400,
+      'INVALID_SMTP_USER',
+      provider === 'gmail_smtp'
+        ? 'Your Gmail address is required as the SMTP username.'
+        : 'SMTP username is required.'
+    );
+  }
+  if (!isValidEmailAddress(senderEmail)) {
+    throw new HttpApiError(
+      400,
+      'INVALID_SENDER_EMAIL',
+      'Please enter a valid Sender Email address.'
+    );
+  }
+  if (replyTo && !isValidEmailAddress(replyTo)) {
+    throw new HttpApiError(400, 'INVALID_REPLY_TO', 'Reply-To must be a valid email address.');
+  }
+
+  await options.driveStore.writeSmtpConfig({
+    provider,
+    host,
+    port,
+    encryption,
+    username,
+    password: options.input.password,
+    senderName: senderName || 'Invoice Studio',
+    senderEmail,
+    replyTo: replyTo || undefined,
+  });
+
+  return getPublicSmtpConfig({ driveStore: options.driveStore });
+}
+
+export async function deleteSmtpConfig(options: {
+  driveStore: OAuthDriveEmailStore;
+}): Promise<void> {
+  await options.driveStore.deleteSmtpConfig();
+}
+
+async function resolveActiveSmtpCredentials(options: {
+  driveStore: OAuthDriveEmailStore;
+  override?: {
+    provider?: SmtpProviderType;
+    host?: string;
+    port?: number;
+    encryption?: 'SSL' | 'STARTTLS' | 'NONE';
+    username?: string;
+    password?: string;
+    senderName?: string;
+    senderEmail?: string;
+    replyTo?: string;
+  };
+}): Promise<{
+  provider: SmtpProviderType;
+  host: string;
+  port: number;
+  encryption: 'SSL' | 'STARTTLS' | 'NONE';
+  username: string;
+  password: string;
+  senderName: string;
+  senderEmail: string;
+  replyTo?: string;
+}> {
+  const stored = await options.driveStore.readSmtpConfig();
+  const override = options.override;
+
+  const provider: SmtpProviderType = override?.provider || stored?.provider || 'gmail_smtp';
+  const host =
+    provider === 'gmail_smtp'
+      ? 'smtp.gmail.com'
+      : (override?.host || stored?.host || '').trim();
+  const port = Number(override?.port || stored?.port || 465);
+  const encryption =
+    override?.encryption || stored?.encryption || (port === 465 ? 'SSL' : 'STARTTLS');
+  const username = (override?.username || stored?.username || '').trim();
+  const senderName = (override?.senderName || stored?.senderName || 'Invoice Studio').trim();
+  const senderEmail = (override?.senderEmail || stored?.senderEmail || username).trim();
+  const replyTo = (override?.replyTo ?? stored?.replyTo ?? '').trim() || undefined;
+
+  let password = (override?.password || '').trim();
+  if (!password && stored?.encryptedPassword) {
+    password = options.driveStore.decryptSmtpPassword(stored);
+  }
+
+  if (!host || !username || !password) {
+    throw new HttpApiError(
+      400,
+      'SMTP_NOT_CONFIGURED',
+      'Email settings are not configured yet. Open Google Drive & Email Settings to configure Gmail SMTP or Custom SMTP.'
+    );
+  }
+
+  return {
+    provider,
+    host,
+    port,
+    encryption,
+    username,
+    password,
+    senderName,
+    senderEmail,
+    replyTo,
+  };
+}
+
 export async function testSmtpConnection(options: {
-  driveStore?: GoogleDriveStore | null;
-  sessionId?: string;
-  config: AppServerConfig;
+  driveStore: OAuthDriveEmailStore;
+  config?: AppServerConfig;
   override?: Parameters<typeof resolveActiveSmtpCredentials>[0]['override'];
-}): Promise<{ ok: boolean; host: string; port: number; provider: SmtpProviderType; verifiedAt: string }> {
+  transportFactory?: SmtpTransportFactory;
+}): Promise<{
+  ok: boolean;
+  host: string;
+  port: number;
+  provider: SmtpProviderType;
+  verifiedAt: string;
+}> {
   const creds = await resolveActiveSmtpCredentials(options);
-  const transport = buildNodemailerTransport(creds);
+  const createTransport = options.transportFactory || buildNodemailerTransport;
+  const transport = createTransport(creds);
 
   try {
     await transport.verify();
   } catch (err: any) {
-    throw new HttpApiError(
-      400,
-      'SMTP_VERIFY_FAILED',
-      formatSmtpErrorMessage(err, creds.provider)
-    );
+    throw new HttpApiError(400, 'SMTP_VERIFY_FAILED', formatSmtpErrorMessage(err, creds.provider));
   } finally {
     transport.close();
   }
 
   const verifiedAt = new Date().toISOString();
-  if (options.driveStore) {
-    const existing = await options.driveStore.readSmtpConfig();
-    if (existing) {
-      await options.driveStore.writeSmtpConfig({
-        provider: existing.provider,
-        host: existing.host,
-        port: existing.port,
-        encryption: existing.encryption,
-        username: existing.username,
-        senderName: existing.senderName,
-        senderEmail: existing.senderEmail,
-        replyTo: existing.replyTo,
-        lastVerifiedAt: verifiedAt,
-      });
-    }
-  } else if (options.sessionId) {
-    const existing = ephemeralSmtpStore.get(options.sessionId);
-    if (existing) {
-      ephemeralSmtpStore.set(options.sessionId, { ...existing, lastVerifiedAt: verifiedAt });
-    }
+  const existing = await options.driveStore.readSmtpConfig();
+  if (existing) {
+    await options.driveStore.writeSmtpConfig({
+      provider: existing.provider,
+      host: existing.host,
+      port: existing.port,
+      encryption: existing.encryption,
+      username: existing.username,
+      senderName: existing.senderName,
+      senderEmail: existing.senderEmail,
+      replyTo: existing.replyTo,
+      lastVerifiedAt: verifiedAt,
+    });
   }
 
   return {
@@ -442,18 +356,22 @@ export async function testSmtpConnection(options: {
 }
 
 export async function sendTestEmail(options: {
-  driveStore?: GoogleDriveStore | null;
-  sessionId?: string;
-  config: AppServerConfig;
+  driveStore: OAuthDriveEmailStore;
   recipientEmail: string;
+  transportFactory?: SmtpTransportFactory;
 }): Promise<{ ok: boolean; messageId?: string; provider: SmtpProviderType; sentAt: string }> {
   const recipient = (options.recipientEmail || '').trim();
   if (!isValidEmailAddress(recipient)) {
-    throw new HttpApiError(400, 'INVALID_RECIPIENT', 'Please enter a valid recipient email address.');
+    throw new HttpApiError(
+      400,
+      'INVALID_RECIPIENT',
+      'Please enter a valid recipient email address.'
+    );
   }
 
   const creds = await resolveActiveSmtpCredentials(options);
-  const transport = buildNodemailerTransport(creds);
+  const createTransport = options.transportFactory || buildNodemailerTransport;
+  const transport = createTransport(creds);
 
   try {
     const info = await transport.sendMail({
@@ -461,29 +379,31 @@ export async function sendTestEmail(options: {
       to: recipient,
       replyTo: creds.replyTo || undefined,
       subject: 'Invoice Studio — SMTP Test Email',
-      text: `This is a test email from Invoice Studio confirming your ${creds.provider === 'gmail_smtp' ? 'Gmail SMTP' : 'Custom SMTP'} configuration (${creds.host}:${creds.port}) is working properly.`,
+      text: `This is a test email from Invoice Studio confirming your ${
+        creds.provider === 'gmail_smtp' ? 'Gmail SMTP' : 'Custom SMTP'
+      } configuration (${creds.host}:${creds.port}) is working properly.`,
       html: formatPlainTextAsHtml(
-        `This is a test email from Invoice Studio confirming your ${creds.provider === 'gmail_smtp' ? 'Gmail SMTP' : 'Custom SMTP'} configuration (${creds.host}:${creds.port}) is working properly.`
+        `This is a test email from Invoice Studio confirming your ${
+          creds.provider === 'gmail_smtp' ? 'Gmail SMTP' : 'Custom SMTP'
+        } configuration (${creds.host}:${creds.port}) is working properly.`
       ),
     });
 
     const sentAt = new Date().toISOString();
-    if (options.driveStore) {
-      await options.driveStore.appendEmailLogs([
-        {
-          id: `mail_${generateRandomId(8)}`,
-          documentType: 'test',
-          documentNumber: 'SMTP-TEST',
-          customerName: 'Test Recipient',
-          recipientEmail: recipient,
-          subject: 'Invoice Studio — SMTP Test Email',
-          deliveryMethod: creds.provider,
-          status: 'Sent',
-          messageId: info.messageId,
-          sentAt,
-        },
-      ]);
-    }
+    await options.driveStore.appendEmailLogs([
+      {
+        id: `mail_${generateRandomId(8)}`,
+        documentType: 'test',
+        documentNumber: 'SMTP-TEST',
+        customerName: 'Test Recipient',
+        recipientEmail: recipient,
+        subject: 'Invoice Studio — SMTP Test Email',
+        deliveryMethod: creds.provider,
+        status: 'Sent',
+        messageId: info.messageId,
+        sentAt,
+      },
+    ]);
 
     return {
       ok: true,
@@ -503,10 +423,9 @@ export async function sendTestEmail(options: {
 }
 
 export async function dispatchSmtpEmails(options: {
-  driveStore?: GoogleDriveStore | null;
-  sessionId?: string;
-  config: AppServerConfig;
+  driveStore: OAuthDriveEmailStore;
   items: EmailSendItemInput[];
+  transportFactory?: SmtpTransportFactory;
 }): Promise<{
   results: EmailSendItemResult[];
   logs: StoredEmailLogEntry[];
@@ -520,7 +439,8 @@ export async function dispatchSmtpEmails(options: {
   }
 
   const creds = await resolveActiveSmtpCredentials(options);
-  const transport = buildNodemailerTransport(creds);
+  const createTransport = options.transportFactory || buildNodemailerTransport;
+  const transport = createTransport(creds);
   const results: EmailSendItemResult[] = [];
   const logs: StoredEmailLogEntry[] = [];
 
@@ -637,7 +557,7 @@ export async function dispatchSmtpEmails(options: {
   }
 
   let persistedInDrive = false;
-  if (options.driveStore && logs.length > 0) {
+  if (logs.length > 0) {
     try {
       await options.driveStore.appendEmailLogs(logs);
       persistedInDrive = true;

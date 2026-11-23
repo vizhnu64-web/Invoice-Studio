@@ -4,7 +4,11 @@
  */
 
 import { IntegrationDiagnostics, SpreadsheetData } from '../types';
-import { getActiveWorkspaceId, getTempSessionId } from './storage';
+import {
+  getAccessToken,
+  getGoogleSession,
+  markGoogleSessionExpired,
+} from './googleAuthClient';
 
 export interface GoogleSheetMetadataTab {
   sheetId: number;
@@ -18,7 +22,7 @@ export interface GoogleSpreadsheetMetadata {
   spreadsheetId: string;
   spreadsheetTitle: string;
   spreadsheetUrl: string;
-  accessMode: 'service-account' | 'public-readonly';
+  accessMode: 'google-oauth';
   sheets: GoogleSheetMetadataTab[];
 }
 
@@ -27,7 +31,7 @@ export interface GoogleSheetValuesResponse {
   spreadsheetTitle: string;
   sheetTitle: string;
   rangeUsed: string;
-  accessMode: 'service-account' | 'public-readonly';
+  accessMode: 'google-oauth';
   headers: string[];
   rows: Record<string, any>[];
   headerRowIndex: number;
@@ -38,19 +42,14 @@ export interface GoogleSheetValuesResponse {
 export interface GoogleSheetSyncStats {
   rowsRetrieved: number;
   validRowsCount: number;
-  createdCount: number;
-  updatedCount: number;
-  unchangedCount: number;
   skippedCount: number;
-  deletedCount: number;
 }
 
 export interface GoogleSheetSyncResponse {
   spreadsheetId: string;
   spreadsheetTitle: string;
   spreadsheetUrl: string;
-  accessMode: 'service-account' | 'public-readonly';
-  persistedInDrive: boolean;
+  accessMode: 'google-oauth';
   lastSyncedAt: string;
   availableSheets: GoogleSheetMetadataTab[];
   worksheets: Array<{
@@ -61,22 +60,6 @@ export interface GoogleSheetSyncResponse {
     rangeUsed: string;
   }>;
   stats: GoogleSheetSyncStats;
-}
-
-export interface GoogleSheetSyncHistoryItem {
-  id: string;
-  spreadsheetId: string;
-  spreadsheetTitle: string;
-  worksheetName: string;
-  status: 'success' | 'failed';
-  rowsRetrieved: number;
-  validRowsCount: number;
-  createdCount: number;
-  updatedCount: number;
-  unchangedCount: number;
-  skippedCount: number;
-  errorMessage?: string;
-  syncedAt: string;
 }
 
 export class SheetsApiError extends Error {
@@ -102,58 +85,160 @@ export function extractGoogleSheetId(urlOrId: string): string | null {
   return null;
 }
 
-export function extractDriveFolderId(urlOrId: string): string | null {
-  const clean = (urlOrId || '').trim();
-  if (!clean) return null;
-  if (/drive\.google\.com\/drive\/(u\/\d+\/)?my-drive\/?([?#].*)?$/i.test(clean)) return null;
-  if (/drive\.google\.com\/file\/d\//i.test(clean)) return null;
-  const matchFolder = clean.match(/\/folders\/([a-zA-Z0-9_-]{10,120})(?:[/?#]|$)/);
-  if (matchFolder?.[1]) return matchFolder[1];
-  const matchParam = clean.match(/[?&]id=([a-zA-Z0-9_-]{10,120})(?:[&#]|$)/);
-  if (matchParam?.[1]) return matchParam[1];
-  if (/^https?:\/\//i.test(clean) || clean.includes('/') || clean.includes('.')) return null;
-  if (/^[a-zA-Z0-9_-]{15,120}$/.test(clean) && /[A-Z0-9_]/.test(clean)) return clean;
-  return null;
-}
-
-function buildWorkspaceHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'x-workspace-session-id': getTempSessionId(),
-  };
-  const folderId = getActiveWorkspaceId();
-  if (folderId) {
-    headers['x-workspace-folder-id'] = folderId;
+export function extractSpreadsheetId(urlOrId: string): string {
+  const id = extractGoogleSheetId(urlOrId);
+  if (!id) {
+    throw new Error('Invalid Google Sheets URL or ID. Please paste a valid Google Sheets link.');
   }
-  return headers;
+  return id;
 }
 
-async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
+function escapeSheetTitleForRange(sheetTitle: string): string {
+  const safe = sheetTitle.replace(/'/g, "''");
+  return `'${safe}'`;
+}
+
+export function buildSheetA1Range(sheetTitle: string, customRange?: string, maxRows = 5000): string {
+  const cleanCustom = (customRange || '').trim();
+  if (cleanCustom) {
+    if (!/^[A-Za-z0-9_!:'\s$-]+$/.test(cleanCustom)) {
+      throw new SheetsApiError(400, 'INVALID_RANGE', 'Custom A1 range contains invalid characters.');
+    }
+    return cleanCustom.includes('!')
+      ? cleanCustom
+      : `${escapeSheetTitleForRange(sheetTitle)}!${cleanCustom}`;
+  }
+  const boundedRows = Math.min(Math.max(maxRows, 100), 20000);
+  return `${escapeSheetTitleForRange(sheetTitle)}!A1:ZZ${boundedRows}`;
+}
+
+export function normalizeSheetValuesArray(
+  rawValues: any[][],
+  headerRowIndexMode: number | 'auto' = 'auto'
+): {
+  headers: string[];
+  rows: Record<string, any>[];
+  headerRowIndex: number;
+  rawRowCount: number;
+  skippedEmptyRows: number;
+} {
+  if (!Array.isArray(rawValues) || rawValues.length === 0) {
+    return { headers: [], rows: [], headerRowIndex: 0, rawRowCount: 0, skippedEmptyRows: 0 };
+  }
+
+  let headerRowIndex = 0;
+  if (headerRowIndexMode === 'auto') {
+    const firstNonEmpty = rawValues.findIndex(
+      (row) => Array.isArray(row) && row.some((cell) => String(cell ?? '').trim() !== '')
+    );
+    headerRowIndex = firstNonEmpty >= 0 ? firstNonEmpty : 0;
+  } else {
+    headerRowIndex = Math.max(0, Math.min(Number(headerRowIndexMode) || 0, rawValues.length - 1));
+  }
+
+  const rawHeaders = Array.isArray(rawValues[headerRowIndex]) ? rawValues[headerRowIndex] : [];
+  const maxWidth = rawValues.reduce(
+    (max, row) => (Array.isArray(row) ? Math.max(max, row.length) : max),
+    rawHeaders.length
+  );
+
+  const seen = new Map<string, number>();
+  const headers: string[] = [];
+  for (let i = 0; i < maxWidth; i++) {
+    const base = String(rawHeaders[i] ?? '').trim() || `Column_${i + 1}`;
+    const count = seen.get(base) || 0;
+    seen.set(base, count + 1);
+    headers.push(count === 0 ? base : `${base} (${count + 1})`);
+  }
+
+  const rows: Record<string, any>[] = [];
+  let skippedEmptyRows = 0;
+  let rawRowCount = 0;
+
+  for (let i = headerRowIndex + 1; i < rawValues.length; i++) {
+    rawRowCount += 1;
+    const cells = rawValues[i];
+    if (!Array.isArray(cells) || !cells.some((c) => String(c ?? '').trim() !== '')) {
+      skippedEmptyRows += 1;
+      continue;
+    }
+
+    const rowObj: Record<string, any> = {};
+    for (let col = 0; col < headers.length; col++) {
+      const val = cells[col];
+      rowObj[headers[col]] = val === undefined || val === null ? '' : String(val);
+    }
+    rows.push(rowObj);
+  }
+
+  return {
+    headers,
+    rows,
+    headerRowIndex,
+    rawRowCount,
+    skippedEmptyRows,
+  };
+}
+
+function getSheetsAccessToken(overrideToken?: string): string {
+  const token = overrideToken || getAccessToken();
+  if (!token) {
+    throw new SheetsApiError(
+      401,
+      'SHEETS_AUTH_REQUIRED',
+      'Connect your Google account and grant Google Sheets permission before importing a spreadsheet.'
+    );
+  }
+  const session = getGoogleSession();
+  if (!overrideToken && session && !session.permissions.sheetsGranted) {
+    throw new SheetsApiError(
+      403,
+      'SHEETS_PERMISSION_MISSING',
+      'Google Sheets permission has not been granted yet. Click "Grant Sheets Permission" to continue.'
+    );
+  }
+  return token;
+}
+
+async function backendSheetsRequest<T>(
+  endpoint: string,
+  body: Record<string, any>,
+  accessToken: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<T> {
+  const res = await fetchImpl(endpoint, {
+    method: 'POST',
     headers: {
-      ...buildWorkspaceHeaders(),
-      ...(init?.headers || {}),
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
     },
+    body: JSON.stringify(body),
   });
 
-  const text = await response.text();
+  const text = await res.text().catch(() => '');
   let parsed: any = {};
   try {
     parsed = text ? JSON.parse(text) : {};
   } catch {
+    parsed = {};
+  }
+
+  if (res.status === 401) {
+    markGoogleSessionExpired();
     throw new SheetsApiError(
-      response.status,
-      'INVALID_SERVER_RESPONSE',
-      `Unexpected response from server (${response.status}).`
+      401,
+      parsed.code || 'GOOGLE_TOKEN_EXPIRED',
+      parsed.error ||
+        'Your Google authorization expired or was revoked. Reconnect your Google account and try again.'
     );
   }
 
-  if (!response.ok) {
+  if (!res.ok) {
     throw new SheetsApiError(
-      response.status,
-      parsed.code || 'API_ERROR',
-      parsed.error || `Request failed with status ${response.status}`,
+      res.status,
+      parsed.code || 'SHEETS_API_ERROR',
+      parsed.error || `Google Sheets request failed (HTTP ${res.status}).`,
       parsed.details
     );
   }
@@ -162,17 +247,34 @@ async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export async function fetchServerDiagnostics(): Promise<IntegrationDiagnostics> {
-  const res = await apiJson<{ status: string; diagnostics: IntegrationDiagnostics }>('/api/health');
-  return res.diagnostics;
+  const res = await fetch('/api/health');
+  if (!res.ok) {
+    throw new Error(`Health check failed (${res.status})`);
+  }
+  const data = (await res.json()) as { diagnostics: IntegrationDiagnostics };
+  return data.diagnostics;
 }
 
 export async function validateGoogleSpreadsheet(
-  urlOrId: string
+  urlOrId: string,
+  options?: { accessToken?: string; fetchImpl?: typeof fetch }
 ): Promise<GoogleSpreadsheetMetadata> {
-  return apiJson<GoogleSpreadsheetMetadata>('/api/sheets/metadata', {
-    method: 'POST',
-    body: JSON.stringify({ url: urlOrId }),
-  });
+  const spreadsheetId = extractGoogleSheetId(urlOrId);
+  if (!spreadsheetId) {
+    throw new SheetsApiError(
+      400,
+      'INVALID_SPREADSHEET_URL',
+      'Invalid Google Sheets URL or ID. Paste a link like https://docs.google.com/spreadsheets/d/<id>/edit or select a file with Google Picker.'
+    );
+  }
+
+  const token = getSheetsAccessToken(options?.accessToken);
+  return backendSheetsRequest<GoogleSpreadsheetMetadata>(
+    '/api/sheets/metadata',
+    { urlOrId: spreadsheetId },
+    token,
+    options?.fetchImpl
+  );
 }
 
 export async function fetchGoogleSheetWorksheetValues(params: {
@@ -180,16 +282,28 @@ export async function fetchGoogleSheetWorksheetValues(params: {
   sheetTitle: string;
   range?: string;
   headerRowIndex?: number | 'auto';
+  spreadsheetTitle?: string;
+  accessToken?: string;
+  fetchImpl?: typeof fetch;
 }): Promise<GoogleSheetValuesResponse> {
-  return apiJson<GoogleSheetValuesResponse>('/api/sheets/values', {
-    method: 'POST',
-    body: JSON.stringify({
-      url: params.urlOrId,
+  const spreadsheetId = extractGoogleSheetId(params.urlOrId);
+  if (!spreadsheetId) {
+    throw new SheetsApiError(400, 'INVALID_SPREADSHEET_URL', 'Invalid Google Sheets URL or ID.');
+  }
+
+  const token = getSheetsAccessToken(params.accessToken);
+  return backendSheetsRequest<GoogleSheetValuesResponse>(
+    '/api/sheets/values',
+    {
+      urlOrId: spreadsheetId,
       sheetTitle: params.sheetTitle,
-      range: params.range || undefined,
+      range: params.range,
       headerRowIndex: params.headerRowIndex ?? 'auto',
-    }),
-  });
+      spreadsheetTitle: params.spreadsheetTitle,
+    },
+    token,
+    params.fetchImpl
+  );
 }
 
 export async function syncGoogleSpreadsheet(params: {
@@ -198,44 +312,27 @@ export async function syncGoogleSpreadsheet(params: {
   syncAllSheets?: boolean;
   range?: string;
   headerRowIndex?: number | 'auto';
+  accessToken?: string;
+  fetchImpl?: typeof fetch;
 }): Promise<GoogleSheetSyncResponse> {
-  return apiJson<GoogleSheetSyncResponse>('/api/sheets/sync', {
-    method: 'POST',
-    body: JSON.stringify({
-      url: params.urlOrId,
+  const spreadsheetId = extractGoogleSheetId(params.urlOrId);
+  if (!spreadsheetId) {
+    throw new SheetsApiError(400, 'INVALID_SPREADSHEET_URL', 'Invalid Google Sheets URL or ID.');
+  }
+
+  const token = getSheetsAccessToken(params.accessToken);
+  return backendSheetsRequest<GoogleSheetSyncResponse>(
+    '/api/sheets/sync',
+    {
+      urlOrId: spreadsheetId,
       selectedSheets: params.selectedSheets,
       syncAllSheets: Boolean(params.syncAllSheets),
-      range: params.range || undefined,
+      range: params.range,
       headerRowIndex: params.headerRowIndex ?? 'auto',
-    }),
-  });
-}
-
-export async function fetchPersistedGoogleSheets(): Promise<{
-  activeSpreadsheet: {
-    spreadsheetId: string;
-    spreadsheetTitle: string;
-    spreadsheetUrl: string;
-    lastSyncedAt: string;
-    worksheets: Array<{
-      name: string;
-      headers: string[];
-      rows: Record<string, any>[];
-      headerRowIndex: number;
-      rangeUsed: string;
-    }>;
-  } | null;
-  syncHistory: GoogleSheetSyncHistoryItem[];
-}> {
-  return apiJson('/api/sheets/data');
-}
-
-export function extractSpreadsheetId(urlOrId: string): string {
-  const id = extractGoogleSheetId(urlOrId);
-  if (!id) {
-    throw new Error('Invalid Google Sheets URL or ID. Please paste a valid Google Sheets link.');
-  }
-  return id;
+    },
+    token,
+    params.fetchImpl
+  );
 }
 
 export function parseValuesToSpreadsheetData(
@@ -245,46 +342,11 @@ export function parseValuesToSpreadsheetData(
 ): SpreadsheetData {
   const worksheets = sheets.map((sheet) => {
     const rawRows = sheetValuesMap[sheet.title] || [];
-    if (rawRows.length === 0) {
-      return { name: sheet.title, headers: [], rows: [] };
-    }
-
-    const headerRowIndex = rawRows.findIndex((row) =>
-      Array.isArray(row) && row.some((cell) => String(cell ?? '').trim() !== '')
-    );
-
-    if (headerRowIndex === -1) {
-      return { name: sheet.title, headers: [], rows: [] };
-    }
-
-    const rawHeaders = rawRows[headerRowIndex] || [];
-    const seen = new Map<string, number>();
-    const headers = rawHeaders.map((h, idx) => {
-      const base = String(h ?? '').trim() || `Col_${idx + 1}`;
-      const count = seen.get(base) || 0;
-      seen.set(base, count + 1);
-      return count === 0 ? base : `${base} (${count + 1})`;
-    });
-
-    const rows: Record<string, any>[] = [];
-    for (let i = headerRowIndex + 1; i < rawRows.length; i++) {
-      const cells = rawRows[i];
-      if (!Array.isArray(cells)) continue;
-      const hasValue = cells.some((c) => String(c ?? '').trim() !== '');
-      if (!hasValue) continue;
-
-      const rowObj: Record<string, any> = {};
-      headers.forEach((header, idx) => {
-        const val = cells[idx];
-        rowObj[header] = val === undefined || val === null ? '' : String(val);
-      });
-      rows.push(rowObj);
-    }
-
+    const normalized = normalizeSheetValuesArray(rawRows, 'auto');
     return {
       name: sheet.title,
-      headers,
-      rows,
+      headers: normalized.headers,
+      rows: normalized.rows,
     };
   });
 
@@ -309,4 +371,3 @@ export function buildSpreadsheetDataFromSync(syncResult: GoogleSheetSyncResponse
     })),
   };
 }
-

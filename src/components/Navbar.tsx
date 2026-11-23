@@ -22,20 +22,28 @@ import {
   Loader2,
   Mail,
   Menu,
+  RefreshCw,
+  ShieldAlert,
   SlidersHorizontal,
   Users,
   X,
 } from 'lucide-react';
-import { DriveWorkspaceConnection } from '../types';
-import type { DriveSyncState } from '../App';
+import {
+  DriveWorkspaceConnection,
+  GoogleConnectionStatus,
+  GoogleVerifiedSession,
+} from '../types';
 
 interface NavbarProps {
   activeTab: string;
   setActiveTab: (tab: string) => void;
   activeDataSourceName: string;
   totalRecordsCount: number;
+  googleSession?: GoogleVerifiedSession | null;
   driveConnection: DriveWorkspaceConnection | null;
-  driveSyncState?: DriveSyncState;
+  connectionStatus: GoogleConnectionStatus;
+  onConnectGoogle?: () => void;
+  onReconnectDrive?: () => void;
 }
 
 const PRIMARY_NAV_ITEMS = [
@@ -56,8 +64,8 @@ const SECONDARY_NAV_ITEMS = [
   },
   {
     id: 'integrations',
-    label: 'Google Drive & Email',
-    description: 'Connect Drive folder storage, Gmail SMTP & Custom SMTP',
+    label: 'Google Account & Email',
+    description: 'Google Drive workspace, Sheets, Gmail permissions & SMTP',
     icon: Cloud,
   },
   {
@@ -92,13 +100,28 @@ const SECONDARY_NAV_ITEMS = [
   },
 ];
 
+export const GOOGLE_STATUS_LABELS: Record<GoogleConnectionStatus, string> = {
+  not_connected: 'Not connected',
+  connecting: 'Connecting',
+  connected: 'Connected',
+  loading_workspace: 'Loading workspace',
+  syncing: 'Syncing',
+  synced: 'Synced',
+  access_expired: 'Access expired',
+  permission_missing: 'Permission missing',
+  sync_failed: 'Sync failed',
+};
+
 export const Navbar: React.FC<NavbarProps> = ({
   activeTab,
   setActiveTab,
   activeDataSourceName,
   totalRecordsCount,
+  googleSession,
   driveConnection,
-  driveSyncState = 'idle',
+  connectionStatus,
+  onConnectGoogle,
+  onReconnectDrive,
 }) => {
   const [isMoreOpen, setIsMoreOpen] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -133,6 +156,15 @@ export const Navbar: React.FC<NavbarProps> = ({
     setIsMobileMenuOpen(false);
   };
 
+  const isBusy =
+    connectionStatus === 'connecting' ||
+    connectionStatus === 'loading_workspace' ||
+    connectionStatus === 'syncing';
+  const isExpired = connectionStatus === 'access_expired';
+  const isPermMissing = connectionStatus === 'permission_missing';
+  const isFailed = connectionStatus === 'sync_failed';
+  const connectedEmail = driveConnection?.accountEmail || googleSession?.email || '';
+
   return (
     <header className="bg-slate-900 border-b border-slate-800 text-white sticky top-0 z-50 shadow-md">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -150,8 +182,8 @@ export const Navbar: React.FC<NavbarProps> = ({
               <span className="text-sm sm:text-base font-bold bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent truncate tracking-wide">
                 INVOICE STUDIO
               </span>
-              <span className="hidden sm:block text-[10px] text-slate-400 truncate mt-0.5">
-                Invoices & Quotations Suite
+              <span className="hidden sm:block text-[10px] text-slate-400 truncate mt-0.5 max-w-[180px]">
+                {connectedEmail || 'Invoices & Quotations Suite'}
               </span>
             </div>
           </button>
@@ -215,7 +247,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 >
                   <div className="px-3.5 py-1.5 border-b border-slate-100">
                     <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                      Workspace & Settings
+                      Workspace &amp; Settings
                     </p>
                   </div>
                   <div className="p-1.5 space-y-0.5">
@@ -259,7 +291,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </nav>
 
-          {/* Right Workspace Storage Status + Mobile Menu Button (NO Sign-In) */}
+          {/* Right Google Account / Drive Status + Mobile Menu Button */}
           <div className="flex items-center space-x-2 shrink-0">
             {totalRecordsCount > 0 && (
               <div className="hidden 2xl:flex items-center space-x-1.5 bg-slate-800/80 px-2.5 py-1.5 rounded-xl border border-slate-700 text-xs text-slate-300">
@@ -276,33 +308,53 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               type="button"
               data-tab="integrations"
-              onClick={() => handleSelectTab('integrations')}
+              onClick={() => {
+                if (isExpired && onReconnectDrive) {
+                  onReconnectDrive();
+                } else if (connectionStatus === 'not_connected' && onConnectGoogle) {
+                  handleSelectTab('integrations');
+                } else {
+                  handleSelectTab('integrations');
+                }
+              }}
               title={
                 driveConnection?.isConnected
-                  ? `Connected to Google Drive folder: ${driveConnection.folderName}`
-                  : 'Temporary workspace — click to connect a Google Drive folder for persistent storage'
+                  ? `${driveConnection.accountEmail} · Folder: ${driveConnection.folderName} (${GOOGLE_STATUS_LABELS[connectionStatus]})`
+                  : connectedEmail
+                    ? `${connectedEmail} (${GOOGLE_STATUS_LABELS[connectionStatus]})`
+                    : 'Connect your Google account for Drive workspace storage, Sheets import, and Gmail delivery'
               }
               className={`hidden sm:inline-flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${
-                driveConnection?.isConnected
-                  ? driveSyncState === 'error'
+                isExpired || isPermMissing
+                  ? 'bg-amber-950/70 border-amber-600/80 text-amber-200 hover:bg-amber-900/70'
+                  : isFailed
                     ? 'bg-rose-950/60 border-rose-700/70 text-rose-200 hover:bg-rose-900/70'
-                    : 'bg-emerald-950/60 border-emerald-700/60 text-emerald-200 hover:bg-emerald-900/70'
-                  : 'bg-amber-950/50 border-amber-700/60 text-amber-200 hover:bg-amber-900/60'
+                    : driveConnection?.isConnected
+                      ? 'bg-emerald-950/60 border-emerald-700/60 text-emerald-200 hover:bg-emerald-900/70'
+                      : 'bg-slate-800 border-slate-700 text-slate-200 hover:bg-slate-700'
               }`}
             >
-              {driveConnection?.isConnected ? (
-                driveSyncState === 'syncing' ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-                ) : driveSyncState === 'error' ? (
-                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                ) : (
-                  <Cloud className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
-                )
+              {isBusy ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+              ) : isExpired ? (
+                <RefreshCw className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              ) : isPermMissing ? (
+                <ShieldAlert className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              ) : isFailed ? (
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              ) : driveConnection?.isConnected ? (
+                <Cloud className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
               ) : (
-                <CloudOff className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+                <CloudOff className="w-3.5 h-3.5 shrink-0 text-slate-400" />
               )}
-              <span className="max-w-[125px] truncate">
-                {driveConnection?.isConnected ? driveConnection.folderName : 'Connect Drive'}
+              <span className="max-w-[145px] truncate">
+                {isExpired
+                  ? 'Access expired'
+                  : isPermMissing
+                    ? 'Permission missing'
+                    : driveConnection?.isConnected
+                      ? driveConnection.folderName
+                      : GOOGLE_STATUS_LABELS[connectionStatus]}
               </span>
             </button>
 
@@ -353,7 +405,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <div className="space-y-1.5 pt-2 border-t border-slate-800">
             <p className="px-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-              Settings & Tools
+              Settings &amp; Tools
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
               {SECONDARY_NAV_ITEMS.map((item) => {
@@ -379,13 +431,15 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </div>
 
-          <div className="pt-2 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400 px-2">
+          <div className="pt-2 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400 px-2 gap-2">
             <span className="truncate">
               {driveConnection?.isConnected
-                ? `Drive: ${driveConnection.folderName}`
-                : 'Temporary Workspace (Not Backed Up)'}
+                ? `${driveConnection.accountEmail} · ${driveConnection.folderName}`
+                : connectedEmail || GOOGLE_STATUS_LABELS[connectionStatus]}
             </span>
-            <span className="font-mono text-indigo-300 font-bold">{totalRecordsCount} rows</span>
+            <span className="font-mono text-indigo-300 font-bold shrink-0">
+              {GOOGLE_STATUS_LABELS[connectionStatus]}
+            </span>
           </div>
         </div>
       )}

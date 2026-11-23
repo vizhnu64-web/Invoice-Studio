@@ -122,6 +122,22 @@ export function getQueryParam(req: NormalizedRequest, key: string): string {
   return params.get(key) || '';
 }
 
+export function extractCatchAllRoute(req: NormalizedRequest, prefix: string): string {
+  const rawSlug = req.query?.slug ?? req.query?.['...slug'];
+  if (Array.isArray(rawSlug) && rawSlug.length > 0) {
+    return rawSlug.join('/').replace(/^\/+|\/+$/g, '');
+  }
+  if (typeof rawSlug === 'string' && rawSlug.trim()) {
+    return rawSlug.trim().replace(/^\/+|\/+$/g, '');
+  }
+  const pathname = (req.url || '').split('?')[0];
+  const normalizedPrefix = prefix.replace(/\/+$/, '');
+  const stripped = pathname.startsWith(normalizedPrefix)
+    ? pathname.slice(normalizedPrefix.length)
+    : pathname;
+  return stripped.replace(/^\/+|\/+$/g, '');
+}
+
 export function sendJson(res: NormalizedResponse, statusCode: number, body: any): void {
   res.setHeader('Cache-Control', 'no-store, max-age=0');
   const expressRes = res as { status?: (c: number) => { json?: (d: any) => void } };

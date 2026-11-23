@@ -65,7 +65,9 @@ import {
   validateManualInvoice,
 } from '../utils/manualInvoice';
 import { generateInvoicePDF } from '../utils/pdfGenerator';
+import { googleTokenManager } from '../utils/googleAuth';
 import { storage } from '../utils/storage';
+import { workspaceApi } from '../utils/workspaceApi';
 import { InvoicePreviewSheet } from './InvoicePreviewSheet';
 
 interface ManualEntryViewProps {
@@ -443,6 +445,25 @@ export const ManualEntryView: React.FC<ManualEntryViewProps> = ({
 
     const safeFileName = `${(targetFields['invoice_number'] || 'Invoice').replace(/[/\\?%*:|"<>]/g, '-')}.pdf`;
     doc.save(safeFileName);
+
+    // Best-effort upload to user's connected Google Drive Invoices/ folder
+    if (storage.getActiveWorkspaceId() && googleTokenManager.isTokenValid()) {
+      try {
+        const dataUri = doc.output('datauristring');
+        const pdfBase64 = dataUri.split('base64,')[1] || '';
+        if (pdfBase64) {
+          void workspaceApi
+            .uploadPdfToDrive({
+              documentType: 'invoice',
+              fileName: safeFileName,
+              pdfBase64,
+            })
+            .catch(() => {});
+        }
+      } catch {
+        // Non-blocking
+      }
+    }
   };
 
   const handleGenerateInvoice = async (): Promise<GenerationRecord | null> => {

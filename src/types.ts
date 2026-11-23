@@ -582,41 +582,106 @@ export interface QuotationRecord {
 }
 
 // ============================================================
-// GOOGLE DRIVE WORKSPACE CONNECTION & DIAGNOSTICS (NO SIGN-IN)
+// GOOGLE OAUTH SESSION, DRIVE WORKSPACE & DIAGNOSTICS
 // ============================================================
 
+export type GoogleConnectionStatus =
+  | 'not_connected'
+  | 'connecting'
+  | 'connected'
+  | 'loading_workspace'
+  | 'syncing'
+  | 'synced'
+  | 'access_expired'
+  | 'permission_missing'
+  | 'sync_failed';
+
+export interface GooglePermissionFlags {
+  identityConnected: boolean;
+  driveGranted: boolean;
+  sheetsGranted: boolean;
+  gmailGranted: boolean;
+}
+
+export interface GoogleVerifiedSession {
+  sub: string;
+  email: string;
+  name?: string;
+  picture?: string;
+  emailVerified?: boolean;
+  grantedScopes: string[];
+  expiresIn: number;
+  expiresAt: number;
+  permissions: GooglePermissionFlags;
+}
+
+export interface DriveWorkspaceSubfolders {
+  rootFolderId: string;
+  rootFolderName: string;
+  workspaceFolderId: string;
+  invoicesFolderId: string;
+  quotationsFolderId: string;
+  backupsFolderId: string;
+  assetsFolderId: string;
+  logosFolderId?: string;
+  signaturesFolderId?: string;
+  stampsFolderId?: string;
+}
+
+export interface TrackedDriveFileRevision {
+  fileId: string;
+  modifiedTime: string;
+  headRevisionId?: string;
+}
+
+export type WorkspaceFileRevisions = Record<string, TrackedDriveFileRevision>;
+
 export interface DriveWorkspaceConnection {
-  folderUrl: string;
+  accountSub: string;
+  folderUrl?: string;
   folderId: string;
   folderName: string;
-  rootFolderId?: string;
+  accountEmail: string;
+  accountName?: string;
   isConnected: boolean;
   lastSyncedAt?: string;
   connectedAt?: string;
-  serviceAccountEmail?: string | null;
+  hasDriveScope?: boolean;
+  hasSheetsScope?: boolean;
+  hasGmailScope?: boolean;
+  subfolders?: DriveWorkspaceSubfolders;
+}
+
+export interface DriveSyncConflict {
+  fileName: string;
+  fileId: string;
+  loadedModifiedTime: string;
+  remoteModifiedTime: string;
+  message: string;
 }
 
 export interface IntegrationDiagnostics {
-  serviceAccountConfigured: boolean;
-  serviceAccountEmail: string | null;
-  projectId: string | null;
+  authMode: 'google-gis-token-backend-verified';
+  storageProvider: 'user-google-drive-oauth';
+  gmailApiSupported: boolean;
+  googleOAuthConfigured: boolean;
+  googlePickerConfigured: boolean;
   smtpEncryptionConfigured: boolean;
-  missingEnvVars: string[];
-  readyForGoogleDrive: boolean;
-  readyForGoogleSheets: boolean;
-  storageProvider: 'google-drive-service-account';
+  missingServerEnvVars: string[];
+  appUrl: string;
 }
 
 // ============================================================
-// EMAIL INTEGRATION — GMAIL SMTP & CUSTOM SMTP (NO SIGN-IN)
+// EMAIL INTEGRATION — GMAIL API (DEFAULT) & CUSTOM SMTP (OPTIONAL)
 // ============================================================
 
-export type EmailDeliveryMethod = 'gmail_smtp' | 'custom_smtp';
+export type SmtpProviderMethod = 'gmail_smtp' | 'custom_smtp';
+export type EmailDeliveryMethod = 'gmail_api' | SmtpProviderMethod;
 
 export interface BackendSmtpConfig {
   configured: boolean;
   persistedInDrive: boolean;
-  provider: EmailDeliveryMethod;
+  provider: SmtpProviderMethod;
   host: string;
   port: number;
   encryption: 'SSL' | 'STARTTLS' | 'NONE';
@@ -644,6 +709,7 @@ export interface EmailDeliveryLogEntry {
   errorMessage?: string;
   sentAt: string;
 }
+
 
 
 

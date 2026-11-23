@@ -5,13 +5,24 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  AlertCircle,
+  AlertTriangle,
+  Archive,
+  RefreshCw,
+  RotateCcw,
+  ShieldAlert,
+} from 'lucide-react';
+import {
   BackendSmtpConfig,
   CalculationSettings,
   CompanySettings,
   CustomerRecord,
+  DriveSyncConflict,
   DriveWorkspaceConnection,
   EmailDeliveryLogEntry,
   GenerationRecord,
+  GoogleConnectionStatus,
+  GoogleVerifiedSession,
   GuidedWorkflowStep,
   IntegrationDiagnostics,
   InvoiceFieldConfig,
@@ -46,7 +57,29 @@ import { GuidedWorkflow } from './components/workflow/GuidedWorkflow';
 import { EmailSendStatus } from './utils/emailService';
 import { EMPTY_SPREADSHEET_DATA, storage } from './utils/storage';
 import { fetchServerDiagnostics } from './utils/googleSheets';
-import { DriveConnectResponse, workspaceApi } from './utils/workspaceApi';
+import {
+  getAccessToken,
+  GoogleAuthError,
+  googleSessionStore,
+  requestDriveConsent,
+  requestGmailConsent,
+  requestSheetsConsent,
+  signInWithGoogle,
+  signOutGoogle,
+  subscribeGoogleSession,
+} from './utils/googleAuthClient';
+import { openDriveFolderPicker } from './utils/googlePicker';
+import {
+  DriveFileSummary,
+  DriveSyncConflictError,
+  DriveWorkspaceBundle,
+  extractPaymentLedger,
+} from './utils/googleDriveClient';
+import {
+  resetTrackedDriveRevisions,
+  workspaceApi,
+  WorkspaceApiError,
+} from './utils/workspaceApi';
 
 const VALID_TABS = new Set([
   'dashboard',
@@ -67,10 +100,10 @@ const VALID_TABS = new Set([
 const DEFAULT_SMTP_CONFIG: BackendSmtpConfig = {
   configured: false,
   persistedInDrive: false,
-  provider: 'gmail_smtp',
-  host: 'smtp.gmail.com',
-  port: 465,
-  encryption: 'SSL',
+  provider: 'custom_smtp',
+  host: '',
+  port: 587,
+  encryption: 'STARTTLS',
   username: '',
   senderName: '',
   senderEmail: '',
@@ -84,47 +117,72 @@ function readTabFromHash(): string {
   return VALID_TABS.has(raw) ? raw : 'dashboard';
 }
 
-export type DriveSyncState = 'idle' | 'syncing' | 'synced' | 'error';
+function buildEmptyCompany(): CompanySettings {
+  return {
+    ...defaultCompanySettings,
+    brandPalette: { ...defaultCompanySettings.brandPalette },
+    typography: { ...defaultCompanySettings.typography },
+    assets: { ...defaultCompanySettings.assets },
+    content: { ...defaultCompanySettings.content, customTextBlocks: [] },
+    currency: { ...defaultCompanySettings.currency },
+    bankAccounts: [],
+  };
+}
+
+function buildEmptyTemplate(): InvoiceTemplate {
+  return {
+    ...defaultTemplates[0],
+    showSections: { ...defaultTemplates[0].showSections },
+    labels: { ...defaultTemplates[0].labels },
+  };
+}
+
+function buildEmptyWorkspaceDefaults() {
+  return {
+    company: buildEmptyCompany(),
+    fieldCatalog: defaultFieldCatalog.map((f) => ({ ...f })),
+    mappingProfiles: [...defaultMappingProfiles],
+    layoutConfig: { templates: [buildEmptyTemplate()] },
+  };
+}
 
 export default function App() {
   const [activeTab, setActiveTabState] = useState<string>(() => readTabFromHash());
-  const [driveConnection, setDriveConnection] = useState<DriveWorkspaceConnection | null>(() =>
-    storage.loadDriveConnection()
-  );
-  const [driveSyncState, setDriveSyncState] = useState<DriveSyncState>('idle');
-  const [driveSyncError, setDriveSyncError] = useState<string | null>(null);
-  const [diagnostics, setDiagnostics] = useState<IntegrationDiagnostics | null>(null);
 
-  const [company, setCompany] = useState<CompanySettings>(() => storage.loadCompanySettings());
+  // Google OAuth & Drive Connection State (strictly in-memory; never stored in localStorage)
+  const [googleSession, setGoogleSession] = useState<GoogleVerifiedSession | null>(null);
+  const [driveConnection, setDriveConnection] = useState<DriveWorkspaceConnection | null>(null);
+  const [connectionStatus, setConnectionStatus] =
+    useState<GoogleConnectionStatus>('not_connected');
+  const [driveSyncError, setDriveSyncError] = useState<string | null>(null);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState<boolean>(false);
+  const [syncConflict, setSyncConflict] = useState<DriveSyncConflict | null>(null);
+  const [driveBackups, setDriveBackups] = useState<DriveFileSummary[]>([]);
+  const [diagnostics, setDiagnostics] = useState<IntegrationDiagnostics | null>(null);
+  const [globalConflictBusy, setGlobalConflictBusy] = useState(false);
+
+  // Workspace Data State (genuinely empty on fresh visit — zero demo records)
+  const [company, setCompany] = useState<CompanySettings>(() => buildEmptyCompany());
   const [fields, setFields] = useState<InvoiceFieldConfig[]>(() =>
-    storage.loadFields(storage.loadCompanySettings())
+    defaultFieldCatalog.map((f) => ({ ...f }))
   );
-  const [mappingProfiles, setMappingProfiles] = useState<MappingProfile[]>(() =>
-    storage.loadProfiles()
-  );
+  const [mappingProfiles, setMappingProfiles] = useState<MappingProfile[]>(() => [
+    ...defaultMappingProfiles,
+  ]);
   const [activeProfileId, setActiveProfileId] = useState<string>('');
-  const [spreadsheetData, setSpreadsheetData] = useState<SpreadsheetData>(() =>
-    storage.loadSpreadsheetData()
-  );
-  const [generationHistory, setGenerationHistory] = useState<GenerationRecord[]>(() =>
-    storage.loadHistory()
-  );
-  const [quotations, setQuotations] = useState<QuotationRecord[]>(() =>
-    storage.loadQuotations()
-  );
-  const [customers, setCustomers] = useState<CustomerRecord[]>(() =>
-    storage.loadCustomers()
-  );
-  const [template, setTemplate] = useState<InvoiceTemplate>(() => storage.loadTemplate());
-  const [calculationSettings, setCalculationSettings] = useState<CalculationSettings>(() =>
-    storage.loadCalculationSettings()
-  );
-  const [emailStatuses, setEmailStatuses] = useState<Record<string, EmailSendStatus>>(() =>
-    storage.loadEmailStatuses()
-  );
-  const [emailLogs, setEmailLogs] = useState<EmailDeliveryLogEntry[]>(() =>
-    storage.loadEmailLogs()
-  );
+  const [spreadsheetData, setSpreadsheetData] = useState<SpreadsheetData>(() => ({
+    ...EMPTY_SPREADSHEET_DATA,
+    worksheets: [],
+  }));
+  const [generationHistory, setGenerationHistory] = useState<GenerationRecord[]>([]);
+  const [quotations, setQuotations] = useState<QuotationRecord[]>([]);
+  const [customers, setCustomers] = useState<CustomerRecord[]>([]);
+  const [template, setTemplate] = useState<InvoiceTemplate>(() => buildEmptyTemplate());
+  const [calculationSettings, setCalculationSettings] = useState<CalculationSettings>(() => ({
+    ...defaultCalculationSettings,
+  }));
+  const [emailStatuses, setEmailStatuses] = useState<Record<string, EmailSendStatus>>({});
+  const [emailLogs, setEmailLogs] = useState<EmailDeliveryLogEntry[]>([]);
   const [smtpConfig, setSmtpConfig] = useState<BackendSmtpConfig>(DEFAULT_SMTP_CONFIG);
 
   // Cross-tab navigation & filtering state
@@ -140,6 +198,47 @@ export default function App() {
   const [invoicePaymentFilter, setInvoicePaymentFilter] = useState<string>('ALL');
 
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestStateRef = useRef({
+    company,
+    fields,
+    mappingProfiles,
+    template,
+    customers,
+    generationHistory,
+    quotations,
+    emailLogs,
+    spreadsheetData,
+    driveConnection,
+    googleSession,
+  });
+
+  useEffect(() => {
+    latestStateRef.current = {
+      company,
+      fields,
+      mappingProfiles,
+      template,
+      customers,
+      generationHistory,
+      quotations,
+      emailLogs,
+      spreadsheetData,
+      driveConnection,
+      googleSession,
+    };
+  }, [
+    company,
+    fields,
+    mappingProfiles,
+    template,
+    customers,
+    generationHistory,
+    quotations,
+    emailLogs,
+    spreadsheetData,
+    driveConnection,
+    googleSession,
+  ]);
 
   const setActiveTab = useCallback((tab: string) => {
     const target = VALID_TABS.has(tab) ? tab : 'dashboard';
@@ -160,21 +259,59 @@ export default function App() {
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
 
+  // Purge any leftover legacy/corrupted browser storage on startup + fetch server diagnostics
+  useEffect(() => {
+    storage.purgeLegacyBrowserStorage();
+    let active = true;
+    fetchServerDiagnostics()
+      .then((diag) => {
+        if (active) setDiagnostics(diag);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Keep React state synced with in-memory GoogleSessionStore (including incremental scope grants & expiry)
+  useEffect(() => {
+    const unsubSession = subscribeGoogleSession((snap) => {
+      setGoogleSession(snap.session);
+      if (snap.session) {
+        setDriveConnection((prev) =>
+          prev && prev.accountSub === snap.session!.sub
+            ? {
+                ...prev,
+                accountEmail: snap.session!.email,
+                accountName: snap.session!.name,
+                hasDriveScope: snap.session!.permissions.driveGranted,
+                hasSheetsScope: snap.session!.permissions.sheetsGranted,
+                hasGmailScope: snap.session!.permissions.gmailGranted,
+              }
+            : prev
+        );
+      }
+      if (snap.expired) {
+        if (syncTimerRef.current) {
+          clearTimeout(syncTimerRef.current);
+          syncTimerRef.current = null;
+        }
+        setConnectionStatus((prev) =>
+          prev === 'not_connected' ? 'not_connected' : 'access_expired'
+        );
+        setDriveSyncError(
+          'Your Google access token expired. Your unsaved edits remain safely in memory — click Reconnect Google Account to resume syncing.'
+        );
+      }
+    });
+    return () => {
+      unsubSession();
+    };
+  }, []);
+
   const resetInMemoryWorkspace = useCallback(() => {
-    const freshCompany: CompanySettings = {
-      ...defaultCompanySettings,
-      brandPalette: { ...defaultCompanySettings.brandPalette },
-      typography: { ...defaultCompanySettings.typography },
-      assets: { ...defaultCompanySettings.assets },
-      content: { ...defaultCompanySettings.content, customTextBlocks: [] },
-      currency: { ...defaultCompanySettings.currency },
-      bankAccounts: [],
-    };
-    const freshTemplate: InvoiceTemplate = {
-      ...defaultTemplates[0],
-      showSections: { ...defaultTemplates[0].showSections },
-      labels: { ...defaultTemplates[0].labels },
-    };
+    const freshCompany = buildEmptyCompany();
+    const freshTemplate = buildEmptyTemplate();
     setCompany(freshCompany);
     setFields(defaultFieldCatalog.map((f) => ({ ...f })));
     setMappingProfiles([...defaultMappingProfiles]);
@@ -188,6 +325,9 @@ export default function App() {
     setEmailStatuses({});
     setEmailLogs([]);
     setSmtpConfig(DEFAULT_SMTP_CONFIG);
+    setDriveBackups([]);
+    setSyncConflict(null);
+    setHasUnsavedChanges(false);
     setPreselectedEmailRecordId(null);
     setPreselectedEmailQuotationId(null);
     setIncomingConvertedInvoice(null);
@@ -195,164 +335,8 @@ export default function App() {
     setInvoicePaymentFilter('ALL');
   }, []);
 
-  const hydrateFromRemoteWorkspace = useCallback(
-    (payload: {
-      workspace: any;
-      customers: CustomerRecord[];
-      invoices: GenerationRecord[];
-      quotations: QuotationRecord[];
-      emailLogs: EmailDeliveryLogEntry[];
-      smtpConfig?: BackendSmtpConfig;
-      sheetsState?: any;
-    }) => {
-      const nextCompany: CompanySettings = payload.workspace?.company
-        ? {
-            ...defaultCompanySettings,
-            ...payload.workspace.company,
-            brandPalette: {
-              ...defaultCompanySettings.brandPalette,
-              ...(payload.workspace.company.brandPalette || {}),
-            },
-            typography: {
-              ...defaultCompanySettings.typography,
-              ...(payload.workspace.company.typography || {}),
-            },
-            assets: {
-              ...defaultCompanySettings.assets,
-              ...(payload.workspace.company.assets || {}),
-            },
-            content: {
-              ...defaultCompanySettings.content,
-              ...(payload.workspace.company.content || {}),
-            },
-            currency: {
-              ...defaultCompanySettings.currency,
-              ...(payload.workspace.company.currency || {}),
-            },
-            bankAccounts: Array.isArray(payload.workspace.company.bankAccounts)
-              ? payload.workspace.company.bankAccounts
-              : [],
-          }
-        : { ...defaultCompanySettings, bankAccounts: [] };
-
-      const nextFields: InvoiceFieldConfig[] =
-        Array.isArray(payload.workspace?.fieldCatalog) && payload.workspace.fieldCatalog.length > 0
-          ? payload.workspace.fieldCatalog
-          : defaultFieldCatalog.map((f) => ({ ...f }));
-
-      const nextProfiles: MappingProfile[] = Array.isArray(payload.workspace?.mappingProfiles)
-        ? payload.workspace.mappingProfiles
-        : [];
-
-      const remoteTemplate = payload.workspace?.layoutConfig?.templates?.[0];
-      const nextTemplate: InvoiceTemplate = remoteTemplate
-        ? remoteTemplate
-        : {
-            ...defaultTemplates[0],
-            showSections: { ...defaultTemplates[0].showSections },
-            labels: { ...defaultTemplates[0].labels },
-          };
-
-      const nextCustomers = Array.isArray(payload.customers) ? payload.customers : [];
-      const nextInvoices = Array.isArray(payload.invoices) ? payload.invoices : [];
-      const nextQuotations = Array.isArray(payload.quotations) ? payload.quotations : [];
-      const nextEmailLogs = Array.isArray(payload.emailLogs) ? payload.emailLogs : [];
-
-      setCompany(nextCompany);
-      storage.saveCompanySettings(nextCompany);
-      setFields(nextFields);
-      storage.saveFields(nextFields);
-      setMappingProfiles(nextProfiles);
-      storage.saveProfiles(nextProfiles);
-      setTemplate(nextTemplate);
-      storage.saveTemplate(nextTemplate);
-      setCustomers(nextCustomers);
-      storage.saveCustomers(nextCustomers);
-      setGenerationHistory(nextInvoices);
-      storage.saveHistory(nextInvoices);
-      setQuotations(nextQuotations);
-      storage.saveQuotations(nextQuotations);
-      setEmailLogs(nextEmailLogs);
-      storage.saveEmailLogs(nextEmailLogs);
-      if (payload.smtpConfig) {
-        setSmtpConfig(payload.smtpConfig);
-      }
-
-      if (payload.sheetsState?.activeSpreadsheetId) {
-        const ds = payload.sheetsState.datasets?.[payload.sheetsState.activeSpreadsheetId];
-        if (ds && Array.isArray(ds.worksheets) && ds.worksheets.length > 0) {
-          const hydratedSheet: SpreadsheetData = {
-            fileName: `${ds.spreadsheetTitle} (Google Sheets)`,
-            activeSheetName: ds.worksheets[0]?.name || '',
-            worksheets: ds.worksheets.map((w: any) => ({
-              name: w.name,
-              headers: w.headers || [],
-              rows: w.rows || [],
-            })),
-          };
-          setSpreadsheetData(hydratedSheet);
-          storage.saveSpreadsheetData(hydratedSheet);
-        } else {
-          setSpreadsheetData({ ...EMPTY_SPREADSHEET_DATA, worksheets: [] });
-        }
-      } else {
-        setSpreadsheetData({ ...EMPTY_SPREADSHEET_DATA, worksheets: [] });
-      }
-    },
-    []
-  );
-
-  // Load server diagnostics & verify saved Drive folder connection (if any) on startup
-  useEffect(() => {
-    let active = true;
-    (async () => {
-      try {
-        const diag = await fetchServerDiagnostics();
-        if (active) setDiagnostics(diag);
-      } catch {
-        // Silent if server health unreachable temporarily
-      }
-
-      const savedConn = storage.loadDriveConnection();
-      if (savedConn?.isConnected && savedConn.folderId) {
-        storage.setActiveWorkspaceId(savedConn.folderId);
-        try {
-          const remote = await workspaceApi.fetchRemoteWorkspace();
-          if (!active) return;
-          hydrateFromRemoteWorkspace(remote);
-          const refreshedConn: DriveWorkspaceConnection = {
-            ...savedConn,
-            lastSyncedAt: remote.lastSyncedAt || savedConn.lastSyncedAt,
-          };
-          storage.saveDriveConnection(refreshedConn);
-          setDriveConnection(refreshedConn);
-          setDriveSyncState('synced');
-          setDriveSyncError(null);
-        } catch (err: any) {
-          if (!active) return;
-          setDriveSyncState('error');
-          setDriveSyncError(
-            err?.message || 'Unable to verify previously connected Google Drive folder.'
-          );
-        }
-      } else {
-        // Load ephemeral SMTP config if configured in this session
-        try {
-          const smtp = await workspaceApi.fetchSmtpConfig();
-          if (active && smtp) setSmtpConfig(smtp);
-        } catch {
-          // Ignore
-        }
-      }
-    })();
-
-    return () => {
-      active = false;
-    };
-  }, [hydrateFromRemoteWorkspace]);
-
-  const triggerDriveSync = useCallback(
-    async (overrides?: {
+  const buildCurrentBundle = useCallback(
+    (overrides?: {
       company?: CompanySettings;
       fields?: InvoiceFieldConfig[];
       mappingProfiles?: MappingProfile[];
@@ -361,120 +345,538 @@ export default function App() {
       invoices?: GenerationRecord[];
       quotations?: QuotationRecord[];
       emailLogs?: EmailDeliveryLogEntry[];
-    }) => {
-      const currentConn = storage.loadDriveConnection();
-      if (!currentConn?.isConnected || !currentConn.folderId) {
-        return null;
+      spreadsheetData?: SpreadsheetData;
+    }): DriveWorkspaceBundle => {
+      const snap = latestStateRef.current;
+      const nextInvoices = overrides?.invoices ?? snap.generationHistory;
+      const nextSpreadsheet = overrides?.spreadsheetData ?? snap.spreadsheetData;
+      return {
+        version: 3,
+        updatedAt: new Date().toISOString(),
+        company: overrides?.company ?? snap.company,
+        fieldCatalog: overrides?.fields ?? snap.fields,
+        mappingProfiles: overrides?.mappingProfiles ?? snap.mappingProfiles,
+        layoutConfig: { templates: [overrides?.template ?? snap.template] },
+        customers: overrides?.customers ?? snap.customers,
+        invoices: nextInvoices,
+        quotations: overrides?.quotations ?? snap.quotations,
+        payments: extractPaymentLedger(nextInvoices),
+        emailLogs: overrides?.emailLogs ?? snap.emailLogs,
+        spreadsheetData:
+          nextSpreadsheet.worksheets && nextSpreadsheet.worksheets.length > 0
+            ? nextSpreadsheet
+            : null,
+      };
+    },
+    []
+  );
+
+  const hydrateFromBundle = useCallback((bundle: DriveWorkspaceBundle) => {
+    const nextCompany: CompanySettings = bundle.company
+      ? {
+          ...buildEmptyCompany(),
+          ...bundle.company,
+          brandPalette: {
+            ...defaultCompanySettings.brandPalette,
+            ...(bundle.company.brandPalette || {}),
+          },
+          typography: {
+            ...defaultCompanySettings.typography,
+            ...(bundle.company.typography || {}),
+          },
+          assets: {
+            ...defaultCompanySettings.assets,
+            ...(bundle.company.assets || {}),
+          },
+          content: {
+            ...defaultCompanySettings.content,
+            ...(bundle.company.content || {}),
+          },
+          currency: {
+            ...defaultCompanySettings.currency,
+            ...(bundle.company.currency || {}),
+          },
+          bankAccounts: Array.isArray(bundle.company.bankAccounts)
+            ? bundle.company.bankAccounts
+            : [],
+        }
+      : buildEmptyCompany();
+
+    const nextFields: InvoiceFieldConfig[] =
+      Array.isArray(bundle.fieldCatalog) && bundle.fieldCatalog.length > 0
+        ? bundle.fieldCatalog
+        : defaultFieldCatalog.map((f) => ({ ...f }));
+
+    const nextProfiles: MappingProfile[] = Array.isArray(bundle.mappingProfiles)
+      ? bundle.mappingProfiles
+      : [];
+
+    const remoteTemplate = bundle.layoutConfig?.templates?.[0];
+    const nextTemplate: InvoiceTemplate = remoteTemplate ? remoteTemplate : buildEmptyTemplate();
+
+    const nextCustomers = Array.isArray(bundle.customers) ? bundle.customers : [];
+    const nextInvoices = Array.isArray(bundle.invoices) ? bundle.invoices : [];
+    const nextQuotations = Array.isArray(bundle.quotations) ? bundle.quotations : [];
+    const nextEmailLogs = Array.isArray(bundle.emailLogs) ? bundle.emailLogs : [];
+    const nextSpreadsheet: SpreadsheetData =
+      bundle.spreadsheetData && Array.isArray(bundle.spreadsheetData.worksheets)
+        ? bundle.spreadsheetData
+        : { ...EMPTY_SPREADSHEET_DATA, worksheets: [] };
+
+    setCompany(nextCompany);
+    storage.saveCompanySettings(nextCompany);
+    setFields(nextFields);
+    storage.saveFields(nextFields);
+    setMappingProfiles(nextProfiles);
+    storage.saveProfiles(nextProfiles);
+    setTemplate(nextTemplate);
+    storage.saveTemplate(nextTemplate);
+    setCustomers(nextCustomers);
+    storage.saveCustomers(nextCustomers);
+    setGenerationHistory(nextInvoices);
+    storage.saveHistory(nextInvoices);
+    setQuotations(nextQuotations);
+    storage.saveQuotations(nextQuotations);
+    setEmailLogs(nextEmailLogs);
+    storage.saveEmailLogs(nextEmailLogs);
+    setSpreadsheetData(nextSpreadsheet);
+    storage.saveSpreadsheetData(nextSpreadsheet);
+  }, []);
+
+  /**
+   * Connects or opens a Google Drive workspace folder through the stateless backend `/api/drive/connect`,
+   * isolating all in-memory data under `${session.sub}::${folderId}` and saving ONLY non-secret
+   * folder metadata under `invoice_studio_workspace_<google_sub>`.
+   */
+  const connectAndLoadDriveWorkspace = useCallback(
+    async (
+      session: GoogleVerifiedSession,
+      target?: { folderId?: string; folderUrl?: string }
+    ) => {
+      if (!session.permissions.driveGranted) {
+        setConnectionStatus('permission_missing');
+        setDriveSyncError(
+          'Google Drive permission (drive.file) was not granted. Click Grant Drive Permission to load or store your workspace.'
+        );
+        return;
       }
 
-      setDriveSyncState('syncing');
+      setConnectionStatus('loading_workspace');
+      setDriveSyncError(null);
+      setSyncConflict(null);
+
+      try {
+        // Strictly wipe previous workspace data from memory before loading target account/folder
+        storage.clearDriveConnection();
+        resetTrackedDriveRevisions();
+        resetInMemoryWorkspace();
+
+        const connected = await workspaceApi.connectDriveWorkspace({
+          folderId: target?.folderId,
+          folderUrl: target?.folderUrl,
+          emptyDefaults: buildEmptyWorkspaceDefaults(),
+        });
+
+        storage.setActiveWorkspaceId(connected.subfolders.rootFolderId, session.sub);
+        hydrateFromBundle(connected.bundle);
+        setDriveBackups(connected.backups || []);
+
+        const nextConn: DriveWorkspaceConnection = {
+          folderUrl: connected.folderUrl,
+          folderId: connected.subfolders.rootFolderId,
+          folderName: connected.subfolders.rootFolderName,
+          accountSub: session.sub,
+          accountEmail: session.email,
+          accountName: session.name,
+          hasDriveScope: session.permissions.driveGranted,
+          hasSheetsScope: session.permissions.sheetsGranted,
+          hasGmailScope: session.permissions.gmailGranted,
+          isConnected: true,
+          lastSyncedAt: connected.lastSyncedAt,
+          connectedAt: new Date().toISOString(),
+          subfolders: connected.subfolders,
+        };
+
+        storage.saveDriveConnection(nextConn);
+        storage.saveUserWorkspaceMetadata(session.sub, {
+          folderId: nextConn.folderId,
+          folderName: nextConn.folderName,
+          lastSyncedAt: nextConn.lastSyncedAt,
+        });
+
+        setDriveConnection(nextConn);
+        setConnectionStatus('synced');
+        setHasUnsavedChanges(false);
+
+        // Best-effort load per-business encrypted SMTP config from user's Drive
+        workspaceApi
+          .fetchSmtpConfig(nextConn.folderId)
+          .then((cfg) => setSmtpConfig(cfg))
+          .catch(() => setSmtpConfig(DEFAULT_SMTP_CONFIG));
+      } catch (err: any) {
+        if (
+          (err instanceof WorkspaceApiError && err.status === 401) ||
+          (err instanceof GoogleAuthError && err.code === 'GOOGLE_TOKEN_EXPIRED')
+        ) {
+          setConnectionStatus('access_expired');
+        } else if (err instanceof WorkspaceApiError && err.status === 403) {
+          setConnectionStatus('permission_missing');
+        } else {
+          setConnectionStatus('connected');
+        }
+        const msg = err?.message || 'Unable to load workspace from Google Drive.';
+        setDriveSyncError(msg);
+        throw err;
+      }
+    },
+    [hydrateFromBundle, resetInMemoryWorkspace]
+  );
+
+  // Connect Google Account -> Verify via backend -> Auto-load saved folder for `sub` or locate/create "Invoice Studio"
+  const handleConnectGoogleAccount = useCallback(async () => {
+    setDriveSyncError(null);
+    setConnectionStatus('connecting');
+    try {
+      const { session } = await signInWithGoogle({ prompt: 'select_account' });
+      setGoogleSession(session);
+
+      if (!session.permissions.driveGranted) {
+        setConnectionStatus('permission_missing');
+        setDriveSyncError(
+          'Google Drive permission was not approved. Click Grant Drive Permission to store your workspace in Google Drive.'
+        );
+        return;
+      }
+
+      setConnectionStatus('connected');
+
+      // Check per-account non-secret folder preference (`invoice_studio_workspace_<sub`)
+      const savedMeta = storage.loadUserWorkspaceMetadata(session.sub);
+      if (savedMeta?.folderId) {
+        try {
+          await connectAndLoadDriveWorkspace(session, { folderId: savedMeta.folderId });
+          return;
+        } catch {
+          // Saved folder may have been trashed/unshared; fall back cleanly to default "Invoice Studio" folder
+        }
+      }
+
+      await connectAndLoadDriveWorkspace(session);
+    } catch (err: any) {
+      setConnectionStatus(driveConnection?.isConnected ? 'access_expired' : 'not_connected');
+      setDriveSyncError(err?.message || 'Google Account connection could not be completed.');
+    }
+  }, [connectAndLoadDriveWorkspace, driveConnection?.isConnected]);
+
+  // Switch Google Account — wipe memory completely before connecting another Google account
+  const handleSwitchGoogleAccount = useCallback(async () => {
+    if (syncTimerRef.current) {
+      clearTimeout(syncTimerRef.current);
+      syncTimerRef.current = null;
+    }
+    await signOutGoogle();
+    resetTrackedDriveRevisions();
+    storage.clearDriveConnection();
+    setGoogleSession(null);
+    setDriveConnection(null);
+    resetInMemoryWorkspace();
+    setConnectionStatus('not_connected');
+    await handleConnectGoogleAccount();
+  }, [handleConnectGoogleAccount, resetInMemoryWorkspace]);
+
+  // Create or locate default "Invoice Studio" folder in user's My Drive
+  const handleCreateDefaultFolder = useCallback(async () => {
+    const session = googleSessionStore.getSession();
+    if (!session || !googleSessionStore.isTokenValid()) {
+      setConnectionStatus('access_expired');
+      setDriveSyncError('Please connect or reconnect your Google account first.');
+      return;
+    }
+    try {
+      await connectAndLoadDriveWorkspace(session);
+    } catch {
+      // Error state handled inside connectAndLoadDriveWorkspace
+    }
+  }, [connectAndLoadDriveWorkspace]);
+
+  // Select an existing Drive folder using official Google Picker
+  const handleSelectExistingFolder = useCallback(async () => {
+    const token = getAccessToken();
+    const session = googleSessionStore.getSession();
+    if (!token || !session) {
+      setConnectionStatus('access_expired');
+      setDriveSyncError('Please connect or reconnect your Google account first.');
+      return;
+    }
+    setDriveSyncError(null);
+    try {
+      const picked = await openDriveFolderPicker(token);
+      if (!picked) return;
+      await connectAndLoadDriveWorkspace(session, { folderId: picked.id });
+    } catch (err: any) {
+      setDriveSyncError(err?.message || 'Failed to open Google Drive Folder Picker.');
+    }
+  }, [connectAndLoadDriveWorkspace]);
+
+  // Connect Drive folder by pasted Google Drive folder URL or ID
+  const handleConnectFolderByUrl = useCallback(
+    async (folderUrlOrId: string) => {
+      const session = googleSessionStore.getSession();
+      if (!session || !googleSessionStore.isTokenValid()) {
+        setConnectionStatus('access_expired');
+        throw new Error('Please connect or reconnect your Google account first.');
+      }
+      await connectAndLoadDriveWorkspace(session, { folderUrl: folderUrlOrId });
+    },
+    [connectAndLoadDriveWorkspace]
+  );
+
+  // Sync workspace to user's connected Drive folder via stateless backend `/api/drive/workspace`
+  const triggerDriveSync = useCallback(
+    async (
+      overrides?: Parameters<typeof buildCurrentBundle>[0],
+      options?: { forceOverwrite?: boolean; allowEmptyOverwrite?: boolean }
+    ) => {
+      const currentConn = latestStateRef.current.driveConnection;
+      if (!currentConn?.isConnected || !currentConn.folderId) {
+        return;
+      }
+      if (!googleSessionStore.isTokenValid()) {
+        setConnectionStatus('access_expired');
+        setHasUnsavedChanges(true);
+        setDriveSyncError(
+          'Your Google access token expired. Unsaved changes are preserved — click Reconnect Google Account to sync.'
+        );
+        return;
+      }
+
+      setConnectionStatus('syncing');
       setDriveSyncError(null);
 
       try {
-        const res = await workspaceApi.syncWorkspaceToDrive({
-          workspace: {
-            company: overrides?.company ?? company,
-            fieldCatalog: overrides?.fields ?? fields,
-            mappingProfiles: overrides?.mappingProfiles ?? mappingProfiles,
-            layoutConfig: { templates: [overrides?.template ?? template] },
-            updatedAt: new Date().toISOString(),
-          },
-          customers: overrides?.customers ?? customers,
-          invoices: overrides?.invoices ?? generationHistory,
-          quotations: overrides?.quotations ?? quotations,
-          emailLogs: overrides?.emailLogs ?? emailLogs,
-        });
+        const bundle = buildCurrentBundle(overrides);
+        const { syncedAt } = await workspaceApi.saveDriveWorkspace(
+          currentConn.folderId,
+          bundle,
+          options
+        );
 
         const updatedConn: DriveWorkspaceConnection = {
           ...currentConn,
-          lastSyncedAt: res.syncedAt,
+          lastSyncedAt: syncedAt,
         };
         storage.saveDriveConnection(updatedConn);
+        if (updatedConn.accountSub) {
+          storage.saveUserWorkspaceMetadata(updatedConn.accountSub, {
+            folderId: updatedConn.folderId,
+            folderName: updatedConn.folderName,
+            lastSyncedAt: syncedAt,
+          });
+        }
         setDriveConnection(updatedConn);
-        setDriveSyncState('synced');
-        return res;
+        setConnectionStatus('synced');
+        setHasUnsavedChanges(false);
+        setSyncConflict(null);
       } catch (err: any) {
-        setDriveSyncState('error');
+        if (
+          (err instanceof WorkspaceApiError && err.status === 401) ||
+          (err instanceof GoogleAuthError && err.code === 'GOOGLE_TOKEN_EXPIRED')
+        ) {
+          setConnectionStatus('access_expired');
+          setHasUnsavedChanges(true);
+          setDriveSyncError(
+            'Your Google access token expired or was revoked. Unsaved changes are safely preserved — click Reconnect Google Account.'
+          );
+          return;
+        }
+        if (err instanceof WorkspaceApiError && err.status === 403) {
+          setConnectionStatus('permission_missing');
+          setHasUnsavedChanges(true);
+          setDriveSyncError(err.message);
+          return;
+        }
+        if (err instanceof DriveSyncConflictError) {
+          setSyncConflict(err.conflict);
+          setConnectionStatus('sync_failed');
+          setHasUnsavedChanges(true);
+          setDriveSyncError(err.message);
+          return;
+        }
+        setConnectionStatus('sync_failed');
+        setHasUnsavedChanges(true);
         setDriveSyncError(err?.message || 'Failed to sync changes to Google Drive.');
         throw err;
       }
     },
-    [company, customers, emailLogs, fields, generationHistory, mappingProfiles, quotations, template]
+    [buildCurrentBundle]
   );
 
+  // Reconnect after token expiration — preserves unsaved changes for same `sub`, wipes & loads if different `sub`
+  const handleReconnectGoogleAccount = useCallback(async () => {
+    setDriveSyncError(null);
+    const prevConn = latestStateRef.current.driveConnection;
+    const prevSession = latestStateRef.current.googleSession;
+    const hintEmail = prevConn?.accountEmail || prevSession?.email;
+    setConnectionStatus('connecting');
+
+    try {
+      const { session } = await signInWithGoogle({
+        prompt: hintEmail ? '' : 'select_account',
+        loginHint: hintEmail || undefined,
+      });
+      setGoogleSession(session);
+
+      if (!session.permissions.driveGranted) {
+        setConnectionStatus('permission_missing');
+        setDriveSyncError('Google Drive permission is missing. Grant Drive permission to resume syncing.');
+        return;
+      }
+
+      if (prevConn?.isConnected && prevConn.folderId) {
+        // Strict account isolation: if user authorized a different Google `sub`, clear previous data & load new user's workspace
+        if (prevConn.accountSub && session.sub !== prevConn.accountSub) {
+          const savedMeta = storage.loadUserWorkspaceMetadata(session.sub);
+          await connectAndLoadDriveWorkspace(
+            session,
+            savedMeta?.folderId ? { folderId: savedMeta.folderId } : undefined
+          );
+          return;
+        }
+
+        setConnectionStatus('connected');
+        workspaceApi
+          .fetchSmtpConfig(prevConn.folderId)
+          .then((cfg) => setSmtpConfig(cfg))
+          .catch(() => {});
+
+        if (hasUnsavedChanges) {
+          await triggerDriveSync();
+        } else {
+          setConnectionStatus('synced');
+        }
+      } else {
+        await connectAndLoadDriveWorkspace(session);
+      }
+    } catch (err: any) {
+      setConnectionStatus(prevConn?.isConnected ? 'access_expired' : 'not_connected');
+      setDriveSyncError(err?.message || 'Could not reconnect Google Account.');
+    }
+  }, [connectAndLoadDriveWorkspace, hasUnsavedChanges, triggerDriveSync]);
+
+  // Incremental Permission Requests
+  const handleEnableGmailPermission = useCallback(async () => {
+    setDriveSyncError(null);
+    const { session } = await requestGmailConsent();
+    setGoogleSession(session);
+  }, []);
+
+  const handleGrantSheetsPermission = useCallback(async () => {
+    setDriveSyncError(null);
+    const { session } = await requestSheetsConsent();
+    setGoogleSession(session);
+  }, []);
+
+  const handleGrantDrivePermission = useCallback(async () => {
+    setDriveSyncError(null);
+    const { session } = await requestDriveConsent();
+    setGoogleSession(session);
+    if (session.permissions.driveGranted && !latestStateRef.current.driveConnection?.isConnected) {
+      await connectAndLoadDriveWorkspace(session);
+    }
+  }, [connectAndLoadDriveWorkspace]);
+
   const scheduleDriveSync = useCallback(
-    (overrides?: Parameters<typeof triggerDriveSync>[0]) => {
-      if (!driveConnection?.isConnected) return;
+    (overrides?: Parameters<typeof buildCurrentBundle>[0]) => {
+      setHasUnsavedChanges(true);
+      const currentConn = latestStateRef.current.driveConnection;
+      if (!currentConn?.isConnected) return;
+      if (!googleSessionStore.isTokenValid()) {
+        setConnectionStatus('access_expired');
+        return;
+      }
       if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
       syncTimerRef.current = setTimeout(() => {
         void triggerDriveSync(overrides).catch(() => {});
-      }, 650);
+      }, 700);
     },
-    [driveConnection?.isConnected, triggerDriveSync]
+    [triggerDriveSync]
   );
 
-  const handleDriveConnected = useCallback(
-    (response: DriveConnectResponse) => {
-      // Strictly isolate workspaces: clear previous workspace caches before loading newly connected folder
-      const prevId = storage.getActiveWorkspaceId();
-      if (prevId && prevId !== response.folderId) {
-        storage.clearWorkspaceCaches(prevId);
-      }
-      storage.clearWorkspaceCaches(null);
-      resetInMemoryWorkspace();
+  // Conflict Resolution: Reload latest from Drive
+  const handleResolveConflictReload = useCallback(async () => {
+    const conn = latestStateRef.current.driveConnection;
+    const session = googleSessionStore.getSession();
+    if (!conn?.folderId || !session) return;
+    setGlobalConflictBusy(true);
+    try {
+      await connectAndLoadDriveWorkspace(session, { folderId: conn.folderId });
+    } finally {
+      setGlobalConflictBusy(false);
+    }
+  }, [connectAndLoadDriveWorkspace]);
 
-      const nextConn: DriveWorkspaceConnection = {
-        folderUrl: response.folderUrl,
-        folderId: response.folderId,
-        folderName: response.folderName,
-        rootFolderId: response.rootFolderId,
-        isConnected: true,
-        lastSyncedAt: response.lastSyncedAt,
-        connectedAt: new Date().toISOString(),
-        serviceAccountEmail: response.serviceAccountEmail,
-      };
-      storage.saveDriveConnection(nextConn);
-      setDriveConnection(nextConn);
-      setDriveSyncState('synced');
-      setDriveSyncError(null);
+  // Conflict Resolution: Backup remote first, then push local changes
+  const handleResolveConflictOverwrite = useCallback(async () => {
+    const conn = latestStateRef.current.driveConnection;
+    if (!conn?.folderId) return;
+    setGlobalConflictBusy(true);
+    try {
+      const remoteLoaded = await workspaceApi.loadDriveWorkspace(conn.folderId);
+      const backupRes = await workspaceApi.createDriveBackup(remoteLoaded.bundle);
+      setDriveBackups(backupRes.backups);
+      await triggerDriveSync(undefined, { forceOverwrite: true });
+    } finally {
+      setGlobalConflictBusy(false);
+    }
+  }, [triggerDriveSync]);
 
-      hydrateFromRemoteWorkspace({
-        workspace: response.workspace,
-        customers: response.customers,
-        invoices: response.invoices,
-        quotations: response.quotations,
-        emailLogs: response.emailLogs,
-        smtpConfig: response.smtpConfig,
-        sheetsState: response.sheetsState,
-      });
+  // Create Backup
+  const handleCreateBackup = useCallback(async (): Promise<DriveFileSummary | null> => {
+    const conn = latestStateRef.current.driveConnection;
+    if (!conn?.folderId) return null;
+    await triggerDriveSync();
+    const res = await workspaceApi.createDriveBackup(buildCurrentBundle());
+    setDriveBackups(res.backups);
+    return res.backup;
+  }, [buildCurrentBundle, triggerDriveSync]);
+
+  // Restore Backup
+  const handleRestoreBackup = useCallback(
+    async (backupFileId: string) => {
+      const res = await workspaceApi.restoreDriveBackup(backupFileId);
+      hydrateFromBundle(res.bundle);
+      setDriveConnection((prev) => (prev ? { ...prev, lastSyncedAt: res.restoredAt } : prev));
+      setHasUnsavedChanges(false);
+      setConnectionStatus('synced');
     },
-    [hydrateFromRemoteWorkspace, resetInMemoryWorkspace]
+    [hydrateFromBundle]
   );
 
+  // Explicit confirmed delete of a backup/PDF file inside user's Drive workspace
+  const handleDeleteDriveFile = useCallback(async (fileId: string) => {
+    await workspaceApi.deleteDriveFile(fileId);
+    const updatedBackups = await workspaceApi.listDriveBackups();
+    setDriveBackups(updatedBackups);
+  }, []);
+
+  // Disconnect Google cleanly — revoke token, wipe all in-memory data, stay on clean public dashboard
   const handleDisconnectDrive = useCallback(() => {
-    if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+    if (syncTimerRef.current) {
+      clearTimeout(syncTimerRef.current);
+      syncTimerRef.current = null;
+    }
+    void signOutGoogle();
+    resetTrackedDriveRevisions();
     storage.clearDriveConnection();
+    storage.purgeLegacyBrowserStorage();
+    setGoogleSession(null);
     setDriveConnection(null);
-    setDriveSyncState('idle');
+    setConnectionStatus('not_connected');
     setDriveSyncError(null);
     resetInMemoryWorkspace();
   }, [resetInMemoryWorkspace]);
 
-  const handleRestoreSnapshotToState = useCallback(
-    (snapshot: any) => {
-      hydrateFromRemoteWorkspace({
-        workspace: snapshot?.workspace || null,
-        customers: snapshot?.customers || [],
-        invoices: snapshot?.invoices || [],
-        quotations: snapshot?.quotations || [],
-        emailLogs: snapshot?.emailLogs || [],
-        sheetsState: snapshot?.sheetsState || null,
-      });
-    },
-    [hydrateFromRemoteWorkspace]
-  );
-
-  // State updaters with workspace-scoped persistence + Drive auto-sync
+  // State updaters with in-memory cache + Drive auto-sync
   const handleSaveCustomer = async (customer: CustomerRecord) => {
     setCustomers((prev) => {
       const next = [customer, ...prev.filter((c) => c.id !== customer.id)];
@@ -537,8 +939,56 @@ export default function App() {
   };
 
   const handleUpdateCompany = (updatedCompany: CompanySettings) => {
+    const prevAssets = latestStateRef.current.company.assets;
     setCompany(updatedCompany);
     storage.saveCompanySettings(updatedCompany);
+
+    // Best-effort upload newly changed brand assets into dedicated Drive Assets subfolders
+    if (latestStateRef.current.driveConnection?.isConnected && googleSessionStore.isTokenValid()) {
+      const assetEntries: Array<{
+        category: 'logos' | 'signatures' | 'stamps' | 'other';
+        name: string;
+        nextUrl?: string;
+        prevUrl?: string;
+      }> = [
+        {
+          category: 'logos',
+          name: 'company-logo',
+          nextUrl: updatedCompany.assets.logoUrl,
+          prevUrl: prevAssets.logoUrl,
+        },
+        {
+          category: 'signatures',
+          name: 'authorized-signature',
+          nextUrl: updatedCompany.assets.signatureUrl,
+          prevUrl: prevAssets.signatureUrl,
+        },
+        {
+          category: 'stamps',
+          name: 'company-stamp',
+          nextUrl: updatedCompany.assets.stampUrl,
+          prevUrl: prevAssets.stampUrl,
+        },
+        {
+          category: 'other',
+          name: 'payment-qr',
+          nextUrl: updatedCompany.assets.qrCodeUrl,
+          prevUrl: prevAssets.qrCodeUrl,
+        },
+      ];
+      for (const entry of assetEntries) {
+        if (entry.nextUrl && entry.nextUrl !== entry.prevUrl && entry.nextUrl.startsWith('data:')) {
+          void workspaceApi
+            .uploadAssetToDrive({
+              category: entry.category,
+              assetName: entry.name,
+              dataUrl: entry.nextUrl,
+            })
+            .catch(() => {});
+        }
+      }
+    }
+
     setFields((prev) => {
       const updated = prev.map((f) => {
         if (f.id === 'company_legal_name')
@@ -597,6 +1047,7 @@ export default function App() {
     setSpreadsheetData((prev) => {
       const next = typeof action === 'function' ? action(prev) : action;
       storage.saveSpreadsheetData(next);
+      scheduleDriveSync({ spreadsheetData: next });
       return next;
     });
   };
@@ -659,9 +1110,126 @@ export default function App() {
         setActiveTab={setActiveTab}
         activeDataSourceName={spreadsheetData.fileName}
         totalRecordsCount={totalRecordsCount}
+        googleSession={googleSession}
         driveConnection={driveConnection}
-        driveSyncState={driveSyncState}
+        connectionStatus={connectionStatus}
+        onConnectGoogle={() => void handleConnectGoogleAccount()}
+        onReconnectDrive={() => void handleReconnectGoogleAccount()}
       />
+
+      {/* Global Access Expired Banner (preserves unsaved changes across all tabs) */}
+      {connectionStatus === 'access_expired' && (
+        <div className="bg-amber-50 border-b border-amber-200 text-amber-950">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-xs">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>
+                <strong>Access expired:</strong> Your Google authorization expired.
+                {hasUnsavedChanges
+                  ? ' Your unsaved changes are safely preserved in memory and will sync as soon as you reconnect.'
+                  : ' Reconnect to resume Google Drive, Sheets, and Gmail operations.'}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleReconnectGoogleAccount()}
+              className="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Reconnect Google Account</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Global Permission Missing Banner */}
+      {connectionStatus === 'permission_missing' && activeTab !== 'integrations' && (
+        <div className="bg-amber-50 border-b border-amber-200 text-amber-950">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-xs">
+              <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>
+                <strong>Permission missing:</strong>{' '}
+                {driveSyncError || 'Required Google permission is missing for your active workspace.'}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveTab('integrations')}
+              className="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+            >
+              <span>Manage Google Permissions</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Global Sync Conflict Banner */}
+      {syncConflict && activeTab !== 'integrations' && (
+        <div className="bg-rose-50 border-b border-rose-200 text-rose-950">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-xs">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>
+                <strong>Drive sync conflict on {syncConflict.fileName}:</strong> Newer changes were
+                saved from another browser or session.
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={globalConflictBusy}
+                onClick={() => void handleResolveConflictReload()}
+                className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Reload Latest</span>
+              </button>
+              <button
+                type="button"
+                disabled={globalConflictBusy}
+                onClick={() => setActiveTab('integrations')}
+                className="px-3 py-1.5 rounded-lg bg-white border border-rose-300 hover:bg-rose-100 text-rose-800 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
+              >
+                <Archive className="w-3.5 h-3.5" />
+                <span>Resolve in Drive Settings</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Global Sync Failed Banner (surfaces Drive write errors on any tab) */}
+      {connectionStatus === 'sync_failed' && !syncConflict && activeTab !== 'integrations' && (
+        <div className="bg-rose-50 border-b border-rose-200 text-rose-950">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-xs">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>
+                <strong>Google Drive sync failed:</strong>{' '}
+                {driveSyncError || 'Your latest changes could not be saved to Google Drive.'}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void triggerDriveSync().catch(() => {})}
+                className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Retry Sync</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('integrations')}
+                className="px-3 py-1.5 rounded-lg bg-white border border-rose-300 hover:bg-rose-100 text-rose-800 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
+              >
+                <span>Open Drive Settings</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="flex-1 pb-16">
         {activeTab === 'dashboard' && (
@@ -673,8 +1241,14 @@ export default function App() {
             quotations={quotations}
             customers={customers}
             company={company}
+            googleSession={googleSession}
             driveConnection={driveConnection}
-            driveSyncState={driveSyncState}
+            connectionStatus={connectionStatus}
+            hasUnsavedChanges={hasUnsavedChanges}
+            onConnectGoogle={handleConnectGoogleAccount}
+            onSyncNow={() => triggerDriveSync()}
+            onReconnectDrive={handleReconnectGoogleAccount}
+            onEnableGmailPermission={handleEnableGmailPermission}
             onStartGuidedWorkflow={handleStartGuidedWorkflow}
             onNavigateQuotationsFiltered={handleNavigateQuotationsFiltered}
             onNavigateInvoicesFiltered={handleNavigateInvoicesFiltered}
@@ -725,17 +1299,33 @@ export default function App() {
         )}
         {activeTab === 'integrations' && (
           <GoogleIntegrationsView
+            googleSession={googleSession}
             driveConnection={driveConnection}
-            driveSyncState={driveSyncState}
+            connectionStatus={connectionStatus}
             driveSyncError={driveSyncError}
+            hasUnsavedChanges={hasUnsavedChanges}
+            syncConflict={syncConflict}
             diagnostics={diagnostics}
             smtpConfig={smtpConfig}
             setSmtpConfig={setSmtpConfig}
-            onDriveConnected={handleDriveConnected}
+            onConnectGoogleAccount={handleConnectGoogleAccount}
+            onSwitchGoogleAccount={handleSwitchGoogleAccount}
+            onReconnectGoogleAccount={handleReconnectGoogleAccount}
+            onEnableGmailPermission={handleEnableGmailPermission}
+            onGrantDrivePermission={handleGrantDrivePermission}
+            onGrantSheetsPermission={handleGrantSheetsPermission}
+            onCreateDefaultFolder={handleCreateDefaultFolder}
+            onSelectExistingFolder={handleSelectExistingFolder}
+            onConnectFolderByUrl={handleConnectFolderByUrl}
             onDisconnectDrive={handleDisconnectDrive}
             onManualSync={() => triggerDriveSync()}
-            onRestoredSnapshot={handleRestoreSnapshotToState}
+            onCreateBackup={handleCreateBackup}
+            onRestoreBackup={handleRestoreBackup}
+            onDeleteDriveFile={handleDeleteDriveFile}
+            onResolveConflictReload={handleResolveConflictReload}
+            onResolveConflictOverwrite={handleResolveConflictOverwrite}
             onNavigateTab={setActiveTab}
+            driveBackups={driveBackups}
             localCounts={{
               quotations: quotations.length,
               invoices: generationHistory.length,
@@ -820,7 +1410,10 @@ export default function App() {
             emailLogs={emailLogs}
             setEmailLogs={handleUpdateEmailLogs}
             smtpConfig={smtpConfig}
+            googleSession={googleSession}
             driveConnection={driveConnection}
+            onConnectGoogle={handleConnectGoogleAccount}
+            onEnableGmailPermission={handleEnableGmailPermission}
             initialSelectedRecordId={preselectedEmailRecordId}
             initialSelectedQuotationId={preselectedEmailQuotationId}
             onNavigateTab={setActiveTab}

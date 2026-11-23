@@ -8,6 +8,7 @@ import {
   AlertCircle,
   CheckCircle2,
   CheckSquare,
+  Cloud,
   Eye,
   FileCheck2,
   FileText,
@@ -15,10 +16,12 @@ import {
   Loader2,
   Mail,
   Paperclip,
+  RefreshCw,
   Search,
   Send,
   Server,
   Settings,
+  ShieldCheck,
   Square,
 } from 'lucide-react';
 import {
@@ -27,6 +30,7 @@ import {
   DriveWorkspaceConnection,
   EmailDeliveryLogEntry,
   GenerationRecord,
+  GoogleVerifiedSession,
   InvoiceTemplate,
   QuotationRecord,
 } from '../types';
@@ -46,7 +50,10 @@ interface EmailCenterViewProps {
   emailLogs: EmailDeliveryLogEntry[];
   setEmailLogs: React.Dispatch<React.SetStateAction<EmailDeliveryLogEntry[]>>;
   smtpConfig: BackendSmtpConfig;
+  googleSession: GoogleVerifiedSession | null;
   driveConnection: DriveWorkspaceConnection | null;
+  onConnectGoogle?: () => Promise<void>;
+  onEnableGmailPermission?: () => Promise<void>;
   initialSelectedRecordId?: string | null;
   initialSelectedQuotationId?: string | null;
   onNavigateTab: (tab: string) => void;
@@ -74,11 +81,18 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
   emailLogs,
   setEmailLogs,
   smtpConfig,
+  googleSession,
   driveConnection,
+  onConnectGoogle,
+  onEnableGmailPermission,
   initialSelectedRecordId,
   initialSelectedQuotationId,
   onNavigateTab,
 }) => {
+  // Default to Gmail API (per Employee Database Studio architecture), with Custom SMTP as optional alternative
+  const [providerMode, setProviderMode] = useState<'gmail_api' | 'smtp'>('gmail_api');
+  const [enablingGmail, setEnablingGmail] = useState(false);
+
   const [docTab, setDocTab] = useState<'invoice' | 'quotation'>(() =>
     initialSelectedQuotationId ? 'quotation' : 'invoice'
   );
@@ -112,7 +126,14 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
     sentCount: number;
     failedCount: number;
     persistedInDrive: boolean;
-    details: Array<{ documentNumber: string; recipientEmail: string; status: string; error?: string }>;
+    providerUsed: 'gmail_api' | 'smtp';
+    details: Array<{
+      documentNumber: string;
+      recipientEmail: string;
+      status: string;
+      error?: string;
+      retryable?: boolean;
+    }>;
   } | null>(null);
 
   useEffect(() => {
@@ -259,18 +280,41 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
     };
   };
 
-  const handleSendSelected = async () => {
+  const handleEnableGmailClick = async () => {
+    if (!onEnableGmailPermission) return;
+    setDispatchError(null);
+    setEnablingGmail(true);
+    try {
+      await onEnableGmailPermission();
+    } catch (err: any) {
+      setDispatchError(err?.message || 'Unable to grant Gmail send permission.');
+    } finally {
+      setEnablingGmail(false);
+    }
+  };
+
+  const dispatchTargets = async (targets: Array<(typeof normalizedDocs)[number]>) => {
     setDispatchError(null);
     setDispatchSummary(null);
 
-    if (!smtpConfig.configured) {
+    if (providerMode === 'gmail_api') {
+      if (!googleSession) {
+        setDispatchError('Connect your Google account first to send emails via Gmail API.');
+        return;
+      }
+      if (!googleSession.permissions.gmailGranted) {
+        setDispatchError(
+          'Gmail send permission (gmail.send) has not been enabled yet. Click "Enable Gmail Permission" above to authorize sending.'
+        );
+        return;
+      }
+    } else if (!smtpConfig.configured) {
       setDispatchError(
-        'SMTP email delivery is not configured yet. Configure Gmail SMTP or Custom SMTP in Google Drive & Email Settings first.'
+        'Custom SMTP is not configured yet. Configure SMTP in Google Account & Email Settings or switch to Gmail API.'
       );
       return;
     }
 
-    const targets = normalizedDocs.filter((d) => selectedIds.includes(d.id));
     if (targets.length === 0) {
       setDispatchError('Select at least one invoice or quotation to send.');
       return;
@@ -300,10 +344,21 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
         });
       }
 
-      setSendProgress('Sending via configured SMTP server...');
-      const res = await workspaceApi.sendRealEmails({ items: itemsToSend });
+      setSendProgress(
+        providerMode === 'gmail_api'
+          ? `Sending via Gmail API (${googleSession?.email})...`
+          : 'Sending via configured Custom SMTP server...'
+      );
 
-      // Update local statuses & email history logs
+      const res =
+        providerMode === 'gmail_api'
+          ? await workspaceApi.sendGmailEmails({
+              senderName: company.displayName || company.legalName || googleSession?.name || 'Invoice Studio',
+              replyTo: company.email || undefined,
+              items: itemsToSend,
+            })
+          : await workspaceApi.sendRealEmails({ items: itemsToSend });
+
       if (Array.isArray(res.logs) && res.logs.length > 0) {
         setEmailLogs((prev) => [...res.logs, ...prev].slice(0, 500));
       }
@@ -323,57 +378,165 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
         sentCount: res.sentCount,
         failedCount: res.failedCount,
         persistedInDrive: res.persistedInDrive,
+        providerUsed: providerMode,
         details: res.results,
       });
     } catch (err: any) {
-      setDispatchError(err?.message || 'Failed to send email(s) via SMTP.');
+      setDispatchError(
+        err?.message ||
+          (providerMode === 'gmail_api'
+            ? 'Failed to send email(s) via Gmail API.'
+            : 'Failed to send email(s) via SMTP.')
+      );
     } finally {
       setSending(false);
       setSendProgress('');
     }
   };
 
+  const handleSendSelected = () => {
+    const targets = normalizedDocs.filter((d) => selectedIds.includes(d.id));
+    void dispatchTargets(targets);
+  };
+
+  const handleRetryFailed = () => {
+    if (!dispatchSummary) return;
+    const failedNumbers = new Set(
+      dispatchSummary.details.filter((d) => d.status !== 'Sent').map((d) => d.documentNumber)
+    );
+    const targets = normalizedDocs.filter((d) => failedNumbers.has(d.number));
+    void dispatchTargets(targets);
+  };
+
+  const gmailReady = Boolean(googleSession?.permissions.gmailGranted);
+  const activeSenderEmail =
+    providerMode === 'gmail_api'
+      ? googleSession?.email || ''
+      : smtpConfig.senderEmail || smtpConfig.username || '';
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
-      {/* Header & SMTP Status */}
-      <div className="bg-white rounded-2xl border border-slate-200 p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2.5">
-            <Mail className="w-6 h-6 text-indigo-600" />
-            <span>Email Delivery Center</span>
-          </h1>
-          <p className="text-xs text-slate-500 mt-1">
-            Attach generated Invoice and Quotation PDFs and send directly via Gmail SMTP or Custom
-            SMTP without application sign-in.
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2.5">
-          <div
-            className={`inline-flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-semibold ${
-              smtpConfig.configured
-                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                : 'bg-amber-50 border-amber-200 text-amber-800'
-            }`}
-          >
-            <Server className="w-3.5 h-3.5 shrink-0" />
-            <span>
-              {smtpConfig.configured
-                ? `${smtpConfig.provider === 'gmail_smtp' ? 'Gmail SMTP' : 'Custom SMTP'}: ${
-                    smtpConfig.senderEmail || smtpConfig.username
-                  }`
-                : 'SMTP Not Configured'}
-            </span>
+      {/* Header & Provider Selector */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2.5">
+              <Mail className="w-6 h-6 text-indigo-600" />
+              <span>Email Delivery Center</span>
+            </h1>
+            <p className="text-xs text-slate-500 mt-1">
+              Send invoices and quotations with PDF attachments individually or in batch using your
+              connected Google account&apos;s Gmail API (default) or optional Custom SMTP.
+            </p>
           </div>
 
           <button
             type="button"
             onClick={() => onNavigateTab('integrations')}
-            className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+            className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 self-start md:self-auto cursor-pointer"
           >
             <Settings className="w-3.5 h-3.5" />
-            <span>SMTP Settings</span>
+            <span>Email &amp; Google Settings</span>
           </button>
+        </div>
+
+        {/* Provider Toggle: Gmail API (Default) vs Custom SMTP (Optional Alternative) */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => setProviderMode('gmail_api')}
+            onKeyDown={(e) => e.key === 'Enter' && setProviderMode('gmail_api')}
+            className={`p-4 rounded-2xl border-2 transition-all cursor-pointer flex items-start justify-between gap-3 ${
+              providerMode === 'gmail_api'
+                ? 'border-indigo-600 bg-indigo-50/40'
+                : 'border-slate-200 hover:border-slate-300 bg-white'
+            }`}
+          >
+            <div className="space-y-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <Mail className="w-4 h-4 text-indigo-600 shrink-0" />
+                <span className="text-xs font-bold text-slate-900">Gmail API (Default)</span>
+                <span
+                  className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                    gmailReady
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-amber-100 text-amber-800'
+                  }`}
+                >
+                  {gmailReady ? 'Ready' : googleSession ? 'Permission Needed' : 'Not Connected'}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-600 truncate">
+                {gmailReady
+                  ? `Sending as ${googleSession?.email} (gmail.send only)`
+                  : googleSession
+                    ? `Connected as ${googleSession.email} — grant incremental gmail.send permission`
+                    : 'Connect your Google account to send directly from Gmail'}
+              </p>
+            </div>
+            <div className="shrink-0" onClick={(e) => e.stopPropagation()}>
+              {!googleSession && onConnectGoogle ? (
+                <button
+                  type="button"
+                  onClick={() => void onConnectGoogle()}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <Cloud className="w-3 h-3" />
+                  <span>Connect</span>
+                </button>
+              ) : googleSession && !gmailReady && onEnableGmailPermission ? (
+                <button
+                  type="button"
+                  disabled={enablingGmail}
+                  onClick={handleEnableGmailClick}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                >
+                  {enablingGmail ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <ShieldCheck className="w-3 h-3" />
+                  )}
+                  <span>Enable Gmail Permission</span>
+                </button>
+              ) : null}
+            </div>
+          </div>
+
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => setProviderMode('smtp')}
+            onKeyDown={(e) => e.key === 'Enter' && setProviderMode('smtp')}
+            className={`p-4 rounded-2xl border-2 transition-all cursor-pointer flex items-start justify-between gap-3 ${
+              providerMode === 'smtp'
+                ? 'border-indigo-600 bg-indigo-50/40'
+                : 'border-slate-200 hover:border-slate-300 bg-white'
+            }`}
+          >
+            <div className="space-y-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <Server className="w-4 h-4 text-slate-700 shrink-0" />
+                <span className="text-xs font-bold text-slate-900">
+                  Custom SMTP (Optional Alternative)
+                </span>
+                <span
+                  className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                    smtpConfig.configured
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-slate-100 text-slate-600'
+                  }`}
+                >
+                  {smtpConfig.configured ? 'Configured' : 'Not Configured'}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-600 truncate">
+                {smtpConfig.configured
+                  ? `${smtpConfig.host}:${smtpConfig.port} (${smtpConfig.senderEmail || smtpConfig.username})`
+                  : 'Use your own domain SMTP server (credentials encrypted in your Drive)'}
+              </p>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -495,8 +658,17 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
 
         {/* Right 7 cols: Email Composer & Live Preview */}
         <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200 p-6 space-y-5">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-bold text-slate-900">Compose Email</h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-base font-bold text-slate-900">Compose Email</h2>
+              <p className="text-[11px] text-slate-500">
+                Sender:{' '}
+                <strong className="text-slate-800">
+                  {activeSenderEmail || 'Not configured'}
+                </strong>{' '}
+                via {providerMode === 'gmail_api' ? 'Gmail API' : 'Custom SMTP'}
+              </p>
+            </div>
             <span className="text-xs font-semibold text-indigo-600">
               {selectedIds.length} document{selectedIds.length === 1 ? '' : 's'} selected
             </span>
@@ -576,7 +748,8 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
           {showPreviewModal && activeDoc && (
             <div className="p-4 rounded-xl bg-indigo-50/50 border border-indigo-200 space-y-2 text-xs">
               <p className="font-bold text-indigo-900">
-                To: {getRecipientEmail(activeDoc.id, activeDoc.defaultEmail) || '(missing email)'}
+                From: {activeSenderEmail || '(not connected)'} → To:{' '}
+                {getRecipientEmail(activeDoc.id, activeDoc.defaultEmail) || '(missing email)'}
               </p>
               <p className="font-semibold text-slate-900">
                 Subject: {renderTemplate(subjectTemplate, buildVarsForDoc(activeDoc))}
@@ -591,7 +764,7 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100">
             <p className="text-[11px] text-slate-500">
               {driveConnection?.isConnected
-                ? 'Sent history will be archived to Google Drive (Email History/).'
+                ? 'One email per recipient. Sent history is archived to your Google Drive (workspace/email-history.json).'
                 : 'Connect Google Drive to archive sent email history permanently.'}
             </p>
             <button
@@ -610,7 +783,9 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
                   ? sendProgress || 'Sending...'
                   : `Send ${selectedIds.length || ''} ${
                       docTab === 'invoice' ? 'Invoice' : 'Quotation'
-                    }${selectedIds.length === 1 ? '' : 's'} via SMTP`}
+                    }${selectedIds.length === 1 ? '' : 's'} via ${
+                      providerMode === 'gmail_api' ? 'Gmail API' : 'SMTP'
+                    }`}
               </span>
             </button>
           </div>
@@ -630,12 +805,25 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
                   : 'bg-amber-50 border-amber-200 text-amber-900'
               }`}
             >
-              <div className="flex items-center gap-2 font-bold">
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
-                <span>
-                  Delivery Complete: {dispatchSummary.sentCount} Sent, {dispatchSummary.failedCount}{' '}
-                  Failed
-                </span>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 font-bold">
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  <span>
+                    Delivery Complete ({dispatchSummary.providerUsed === 'gmail_api' ? 'Gmail API' : 'SMTP'}):{' '}
+                    {dispatchSummary.sentCount} Sent, {dispatchSummary.failedCount} Failed
+                  </span>
+                </div>
+                {dispatchSummary.failedCount > 0 && (
+                  <button
+                    type="button"
+                    disabled={sending}
+                    onClick={handleRetryFailed}
+                    className="px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>Retry Failed</span>
+                  </button>
+                )}
               </div>
               {dispatchSummary.details.map((d, i) => (
                 <div key={i} className="text-[11px] flex items-center justify-between gap-2">
@@ -688,7 +876,11 @@ export const EmailCenterView: React.FC<EmailCenterViewProps> = ({
                     </td>
                     <td className="py-2.5 px-3 font-mono text-slate-700">{log.recipientEmail}</td>
                     <td className="py-2.5 px-3 text-slate-600">
-                      {log.deliveryMethod === 'gmail_smtp' ? 'Gmail SMTP' : 'Custom SMTP'}
+                      {log.deliveryMethod === 'gmail_api'
+                        ? 'Gmail API'
+                        : log.deliveryMethod === 'gmail_smtp'
+                          ? 'Gmail SMTP'
+                          : 'Custom SMTP'}
                     </td>
                     <td className="py-2.5 px-3">
                       <span

@@ -1268,7 +1268,7 @@ export const QuotationGeneratorView: React.FC<QuotationGeneratorViewProps> = ({
                 diagnostics={diagnostics}
                 driveConnection={driveConnection}
                 title="Import Quotations from Google Sheets"
-                subtitle="Connect a private sheet shared with the service account or a publicly viewable Google Sheet."
+                subtitle="Authorize read-only Google Sheets access and pick a spreadsheet from your Google Drive or paste its link."
                 onImportedRows={(payload) =>
                   handleLoadImportedDataset({
                     sourceLabel: `${payload.spreadsheetTitle} — ${payload.worksheetName}`,

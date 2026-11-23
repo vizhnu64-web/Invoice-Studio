@@ -9,39 +9,30 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
 import {
-  handleDriveBackup,
+  handleDriveBackups,
   handleDriveConnect,
-  handleDriveDiagnose,
-  handleDriveRestore,
-  handleDriveStatus,
-  handleDriveSync,
-  handleDriveTest,
-  handleDriveUploadPdf,
+  handleDriveFiles,
+  handleDriveWorkspace,
   handleEmailHistory,
   handleEmailSend,
   handleEmailTestSend,
+  handleGmailHistory,
+  handleGmailSend,
+  handleGmailTestSend,
+  handleGoogleConfig,
+  handleGoogleRevoke,
+  handleGoogleTest,
+  handleGoogleVerifySession,
   handleHealth,
-  handleInvoices,
-  handleQuotations,
-  handleSheetsData,
   handleSheetsMetadata,
   handleSheetsSync,
   handleSheetsValues,
   handleSmtpConfig,
   handleSmtpTest,
-  handleWorkspace,
 } from './api/_lib/handlers.js';
 import type { NormalizedRequest, NormalizedResponse } from './api/_lib/http.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-function extractSubSegments(url: string, prefix: string): string[] {
-  const pathname = (url || '').split('?')[0];
-  return pathname
-    .replace(new RegExp(`^${prefix}/?`), '')
-    .split('/')
-    .filter(Boolean);
-}
 
 async function startServer() {
   const app = express();
@@ -50,94 +41,42 @@ async function startServer() {
 
   const PORT = Number(process.env.PORT || 3000);
 
-  // Health & Diagnostics
-  app.all('/api/health', (req, res) =>
-    handleHealth(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
+  const adapt =
+    (fn: (req: NormalizedRequest, res: NormalizedResponse) => Promise<any>) =>
+    (req: express.Request, res: express.Response) =>
+      fn(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse);
 
-  // Google Drive Folder Workspace Storage (Service Account)
-  app.all('/api/drive/connect', (req, res) =>
-    handleDriveConnect(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
-  app.all('/api/drive/test', (req, res) =>
-    handleDriveTest(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
-  app.all('/api/drive/diagnose', (req, res) =>
-    handleDriveDiagnose(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
-  app.all('/api/drive/status', (req, res) =>
-    handleDriveStatus(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
-  app.all('/api/drive/sync', (req, res) =>
-    handleDriveSync(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
-  app.all('/api/drive/upload-pdf', (req, res) =>
-    handleDriveUploadPdf(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
-  app.all('/api/drive/backup', (req, res) =>
-    handleDriveBackup(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
-  app.all('/api/drive/restore', (req, res) =>
-    handleDriveRestore(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
+  // Health & Server Capability Diagnostics (No Secrets)
+  app.all('/api/health', adapt(handleHealth));
 
-  // Workspace state
-  app.all('/api/workspace', (req, res) =>
-    handleWorkspace(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
+  // Google Auth & Session Verification (Stateless Bearer Token)
+  app.all('/api/google/config', adapt(handleGoogleConfig));
+  app.all('/api/google/verify-session', adapt(handleGoogleVerifySession));
+  app.all('/api/google/test', adapt(handleGoogleTest));
+  app.all('/api/google/revoke', adapt(handleGoogleRevoke));
 
-  // Google Sheets URL Connector (Service Account + Public Fallback)
-  app.all('/api/sheets/metadata', (req, res) =>
-    handleSheetsMetadata(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
-  app.all('/api/sheets/values', (req, res) =>
-    handleSheetsValues(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
-  app.all('/api/sheets/sync', (req, res) =>
-    handleSheetsSync(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
-  app.all('/api/sheets/data', (req, res) =>
-    handleSheetsData(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
+  // Google Drive Workspace (Request-Scoped Drive API v3)
+  app.all('/api/drive/connect', adapt(handleDriveConnect));
+  app.all('/api/drive/workspace', adapt(handleDriveWorkspace));
+  app.all('/api/drive/files', adapt(handleDriveFiles));
+  app.all('/api/drive/backups', adapt(handleDriveBackups));
 
-  // Email Integration (Gmail SMTP & Custom SMTP via Nodemailer)
-  app.all('/api/email/smtp-config', (req, res) =>
-    handleSmtpConfig(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
-  app.all('/api/email/smtp-test', (req, res) =>
-    handleSmtpTest(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
-  app.all('/api/email/test-send', (req, res) =>
-    handleEmailTestSend(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
-  app.all('/api/email/send', (req, res) =>
-    handleEmailSend(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
-  app.all('/api/email/history', (req, res) =>
-    handleEmailHistory(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse)
-  );
+  // Google Sheets Import & Sync (Request-Scoped Sheets API v4)
+  app.all('/api/sheets/metadata', adapt(handleSheetsMetadata));
+  app.all('/api/sheets/values', adapt(handleSheetsValues));
+  app.all('/api/sheets/sync', adapt(handleSheetsSync));
 
-  // Quotations & Invoices CRUD
-  app.all('/api/quotations', (req, res) =>
-    handleQuotations(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse, [])
-  );
-  app.all('/api/quotations/*', (req, res) =>
-    handleQuotations(
-      req as unknown as NormalizedRequest,
-      res as unknown as NormalizedResponse,
-      extractSubSegments(req.originalUrl, '/api/quotations')
-    )
-  );
-  app.all('/api/invoices', (req, res) =>
-    handleInvoices(req as unknown as NormalizedRequest, res as unknown as NormalizedResponse, [])
-  );
-  app.all('/api/invoices/*', (req, res) =>
-    handleInvoices(
-      req as unknown as NormalizedRequest,
-      res as unknown as NormalizedResponse,
-      extractSubSegments(req.originalUrl, '/api/invoices')
-    )
-  );
+  // Gmail API Sending (Default Email Provider — Request-Scoped Gmail API v1)
+  app.all('/api/gmail/send', adapt(handleGmailSend));
+  app.all('/api/gmail/test-send', adapt(handleGmailTestSend));
+  app.all('/api/gmail/history', adapt(handleGmailHistory));
+
+  // Custom SMTP (Optional Alternative — Encrypted in User's Drive)
+  app.all('/api/email/smtp-config', adapt(handleSmtpConfig));
+  app.all('/api/email/smtp-test', adapt(handleSmtpTest));
+  app.all('/api/email/test-send', adapt(handleEmailTestSend));
+  app.all('/api/email/send', adapt(handleEmailSend));
+  app.all('/api/email/history', adapt(handleEmailHistory));
 
   // Reject unknown API endpoints cleanly as JSON
   app.use('/api', (req, res) => {

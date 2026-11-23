@@ -9,6 +9,7 @@ import {
   CustomerRecord,
   DriveWorkspaceConnection,
   EmailDeliveryLogEntry,
+  EmailDeliveryMethod,
   GenerationRecord,
   GstConfigurationSettings,
   InvoiceFieldConfig,
@@ -51,10 +52,6 @@ export const defaultGstSettings: GstConfigurationSettings = {
   taxType: 'AUTO',
 };
 
-const STORAGE_VERSION = 'v3';
-const DRIVE_CONNECTION_KEY = `invoice_studio_${STORAGE_VERSION}_drive_connection`;
-const TEMP_SESSION_KEY = `invoice_studio_${STORAGE_VERSION}_temp_session_id`;
-
 const BASE_KEYS = {
   COMPANY_PROFILES: 'company_profiles',
   ACTIVE_COMPANY_ID: 'active_company_id',
@@ -76,186 +73,275 @@ const BASE_KEYS = {
   EMAIL_PREFS: 'email_prefs',
 } as const;
 
-let activeWorkspaceId: string | null = null;
-const memoryFallback = new Map<string, string>();
-
-function hasWindowStorage(): boolean {
-  return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
-}
-
-function getTempStorage(): Storage | null {
-  if (typeof window !== 'undefined' && typeof window.sessionStorage !== 'undefined') {
-    return window.sessionStorage;
-  }
-  return null;
-}
+export const USER_WORKSPACE_META_PREFIX = 'invoice_studio_workspace_';
 
 /**
- * Generates or retrieves an ephemeral per-tab session ID used ONLY when no Google Drive folder is connected.
- * Keeps temporary browser tabs strictly isolated from each other and ensures fresh visits start clean.
+ * Non-secret browser metadata namespaced strictly by backend-verified Google `sub`.
+ * NEVER stores access tokens, passwords, or authoritative business records.
  */
-export function getTempSessionId(): string {
-  const ss = getTempStorage();
-  if (ss) {
-    let existing = ss.getItem(TEMP_SESSION_KEY);
-    if (!existing) {
-      existing = `tmp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-      ss.setItem(TEMP_SESSION_KEY, existing);
+export interface UserWorkspaceBrowserMetadata {
+  sub: string;
+  folderId?: string;
+  folderName?: string;
+  folderUrl?: string;
+  lastSpreadsheetId?: string;
+  lastSpreadsheetTitle?: string;
+  lastSyncedAt?: string;
+  preferredEmailMethod?: EmailDeliveryMethod;
+  updatedAt: string;
+}
+
+export function buildUserWorkspaceMetadataKey(googleSub: string): string {
+  const safeSub = String(googleSub || '').replace(/[^a-zA-Z0-9._-]/g, '');
+  if (!safeSub) {
+    throw new Error('A verified Google subject ID (sub) is required to namespace workspace metadata.');
+  }
+  return `${USER_WORKSPACE_META_PREFIX}${safeSub}`;
+}
+
+export function loadUserWorkspaceMetadata(
+  googleSub: string,
+  storageLike?: Pick<Storage, 'getItem'> | null
+): UserWorkspaceBrowserMetadata | null {
+  const store =
+    storageLike !== undefined
+      ? storageLike
+      : typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
+        ? window.localStorage
+        : null;
+  if (!store || !googleSub) return null;
+  try {
+    const key = buildUserWorkspaceMetadataKey(googleSub);
+    const raw = store.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || parsed.sub !== googleSub) {
+      return null;
     }
-    return existing;
+    return {
+      sub: googleSub,
+      folderId: typeof parsed.folderId === 'string' ? parsed.folderId : undefined,
+      folderName: typeof parsed.folderName === 'string' ? parsed.folderName : undefined,
+      folderUrl: typeof parsed.folderUrl === 'string' ? parsed.folderUrl : undefined,
+      lastSpreadsheetId:
+        typeof parsed.lastSpreadsheetId === 'string' ? parsed.lastSpreadsheetId : undefined,
+      lastSpreadsheetTitle:
+        typeof parsed.lastSpreadsheetTitle === 'string' ? parsed.lastSpreadsheetTitle : undefined,
+      lastSyncedAt: typeof parsed.lastSyncedAt === 'string' ? parsed.lastSyncedAt : undefined,
+      preferredEmailMethod:
+        parsed.preferredEmailMethod === 'gmail_api' ||
+        parsed.preferredEmailMethod === 'gmail_smtp' ||
+        parsed.preferredEmailMethod === 'custom_smtp'
+          ? parsed.preferredEmailMethod
+          : undefined,
+      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
+    };
+  } catch {
+    return null;
   }
-  if (!memoryFallback.has(TEMP_SESSION_KEY)) {
-    memoryFallback.set(
-      TEMP_SESSION_KEY,
-      `tmp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
-    );
+}
+
+export function saveUserWorkspaceMetadata(
+  googleSub: string,
+  patch: Partial<Omit<UserWorkspaceBrowserMetadata, 'sub' | 'updatedAt'>>,
+  storageLike?: Pick<Storage, 'getItem' | 'setItem'> | null
+): UserWorkspaceBrowserMetadata | null {
+  const store =
+    storageLike !== undefined
+      ? storageLike
+      : typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
+        ? window.localStorage
+        : null;
+  if (!store || !googleSub) return null;
+
+  try {
+    const existing = loadUserWorkspaceMetadata(googleSub, store);
+    // Explicitly whitelist ONLY non-secret metadata fields
+    const next: UserWorkspaceBrowserMetadata = {
+      sub: googleSub,
+      folderId: patch.folderId !== undefined ? patch.folderId : existing?.folderId,
+      folderName: patch.folderName !== undefined ? patch.folderName : existing?.folderName,
+      folderUrl: patch.folderUrl !== undefined ? patch.folderUrl : existing?.folderUrl,
+      lastSpreadsheetId:
+        patch.lastSpreadsheetId !== undefined ? patch.lastSpreadsheetId : existing?.lastSpreadsheetId,
+      lastSpreadsheetTitle:
+        patch.lastSpreadsheetTitle !== undefined
+          ? patch.lastSpreadsheetTitle
+          : existing?.lastSpreadsheetTitle,
+      lastSyncedAt: patch.lastSyncedAt !== undefined ? patch.lastSyncedAt : existing?.lastSyncedAt,
+      preferredEmailMethod:
+        patch.preferredEmailMethod !== undefined
+          ? patch.preferredEmailMethod
+          : existing?.preferredEmailMethod,
+      updatedAt: new Date().toISOString(),
+    };
+    const key = buildUserWorkspaceMetadataKey(googleSub);
+    store.setItem(key, JSON.stringify(next));
+    return next;
+  } catch {
+    return null;
   }
-  return memoryFallback.get(TEMP_SESSION_KEY)!;
+}
+
+export function clearUserWorkspaceMetadata(
+  googleSub: string,
+  storageLike?: Pick<Storage, 'removeItem'> | null
+): void {
+  const store =
+    storageLike !== undefined
+      ? storageLike
+      : typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
+        ? window.localStorage
+        : null;
+  if (!store || !googleSub) return;
+  try {
+    store.removeItem(buildUserWorkspaceMetadataKey(googleSub));
+  } catch {
+    // Ignore storage access errors
+  }
 }
 
 /**
- * Returns the active workspace identifier:
- * - Connected Google Drive folderId when connected
- * - null when operating in a temporary unbacked-up session
+ * Strictly in-memory business workspace store.
+ *
+ * Architecture guarantees:
+ * - Zero global localStorage keys for business records.
+ * - Zero access tokens or Drive credentials in localStorage/sessionStorage/IndexedDB.
+ * - Non-secret UI/folder preferences may ONLY be stored under `invoice_studio_workspace_<google_sub>`.
+ * - Switching accounts or disconnecting wipes all active in-memory workspace records completely.
  */
+let activeWorkspaceId: string | null = null;
+let activeAccountSub: string | null = null;
+let activeDriveConnection: DriveWorkspaceConnection | null = null;
+const memoryStore = new Map<string, string>();
+let runtimeSessionId: string | null = null;
+
+/**
+ * Cleans up any legacy global localStorage keys while preserving valid `invoice_studio_workspace_<sub>`
+ * non-secret metadata entries.
+ */
+export function purgeLegacyBrowserStorage(): void {
+  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return;
+  try {
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (!k) continue;
+      if (k.startsWith(USER_WORKSPACE_META_PREFIX)) {
+        // Verify it contains no accidental token fields; if corrupted, remove it
+        try {
+          const parsed = JSON.parse(window.localStorage.getItem(k) || '{}');
+          if (!parsed || typeof parsed.sub !== 'string' || 'accessToken' in parsed || 'token' in parsed) {
+            keysToRemove.push(k);
+          }
+        } catch {
+          keysToRemove.push(k);
+        }
+        continue;
+      }
+      if (k.startsWith('invoice_studio_') || k.startsWith('invoiceStudio')) {
+        keysToRemove.push(k);
+      }
+    }
+    for (const k of keysToRemove) {
+      window.localStorage.removeItem(k);
+    }
+  } catch {
+    // Ignore storage access restrictions
+  }
+}
+
+export function getTempSessionId(): string {
+  if (!runtimeSessionId) {
+    runtimeSessionId = `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  }
+  return runtimeSessionId;
+}
+
 export function getActiveWorkspaceId(): string | null {
-  if (activeWorkspaceId) return activeWorkspaceId;
-  const conn = loadDriveConnection();
-  if (conn?.isConnected && conn.folderId) {
-    activeWorkspaceId = conn.folderId;
-    return activeWorkspaceId;
-  }
-  return null;
+  return activeWorkspaceId;
 }
 
-/**
- * Switches the active workspace scope. Must be called when connecting, switching, or disconnecting a Drive folder.
- */
-export function setActiveWorkspaceId(folderId: string | null): void {
+export function setActiveWorkspaceId(folderId: string | null, accountSub?: string | null): void {
   activeWorkspaceId = folderId && folderId.trim() ? folderId.trim() : null;
+  if (accountSub !== undefined) {
+    activeAccountSub = accountSub && accountSub.trim() ? accountSub.trim() : null;
+  }
+}
+
+export function getActiveAccountSub(): string | null {
+  return activeAccountSub;
+}
+
+export function setActiveAccountSub(sub: string | null): void {
+  activeAccountSub = sub && sub.trim() ? sub.trim() : null;
 }
 
 function buildScopedKey(baseKey: string, workspaceId?: string | null): string {
   const scope = workspaceId !== undefined ? workspaceId : getActiveWorkspaceId();
+  const sub = activeAccountSub || 'anon';
   if (scope) {
-    return `invoice_studio_${STORAGE_VERSION}_ws_${scope}_${baseKey}`;
+    return `ws::${sub}::${scope}::${baseKey}`;
   }
-  return `invoice_studio_${STORAGE_VERSION}_tmp_${getTempSessionId()}_${baseKey}`;
+  return `tmp::${getTempSessionId()}::${baseKey}`;
 }
 
 function readRaw(baseKey: string, workspaceId?: string | null): string | null {
-  const scope = workspaceId !== undefined ? workspaceId : getActiveWorkspaceId();
-  const fullKey = buildScopedKey(baseKey, scope);
-
-  if (scope) {
-    if (hasWindowStorage()) {
-      return window.localStorage.getItem(fullKey);
-    }
-    return memoryFallback.get(fullKey) ?? null;
-  }
-
-  // Temporary unbacked-up workspace uses sessionStorage only (never leaks to future visitors or other businesses)
-  const ss = getTempStorage();
-  if (ss) {
-    return ss.getItem(fullKey);
-  }
-  return memoryFallback.get(fullKey) ?? null;
+  return memoryStore.get(buildScopedKey(baseKey, workspaceId)) ?? null;
 }
 
 function writeRaw(baseKey: string, value: string, workspaceId?: string | null): void {
-  const scope = workspaceId !== undefined ? workspaceId : getActiveWorkspaceId();
-  const fullKey = buildScopedKey(baseKey, scope);
-
-  try {
-    if (scope) {
-      if (hasWindowStorage()) {
-        window.localStorage.setItem(fullKey, value);
-        return;
-      }
-    } else {
-      const ss = getTempStorage();
-      if (ss) {
-        ss.setItem(fullKey, value);
-        return;
-      }
-    }
-    memoryFallback.set(fullKey, value);
-  } catch (err) {
-    console.warn('Browser storage quota reached:', err);
-  }
+  memoryStore.set(buildScopedKey(baseKey, workspaceId), value);
 }
 
 function removeRaw(baseKey: string, workspaceId?: string | null): void {
-  const scope = workspaceId !== undefined ? workspaceId : getActiveWorkspaceId();
-  const fullKey = buildScopedKey(baseKey, scope);
-  if (scope) {
-    if (hasWindowStorage()) window.localStorage.removeItem(fullKey);
-  } else {
-    const ss = getTempStorage();
-    if (ss) ss.removeItem(fullKey);
-  }
-  memoryFallback.delete(fullKey);
+  memoryStore.delete(buildScopedKey(baseKey, workspaceId));
 }
 
-/**
- * Clears all cached records for a specific workspace (or current temporary workspace)
- * to guarantee strict isolation when disconnecting or switching Drive folders.
- */
 export function clearWorkspaceCaches(workspaceId?: string | null): void {
   for (const key of Object.values(BASE_KEYS)) {
     removeRaw(key, workspaceId);
   }
 }
 
-// ============================================================
-// DRIVE CONNECTION METADATA (NON-SENSITIVE ONLY — NO SECRETS)
-// ============================================================
-
 export function loadDriveConnection(): DriveWorkspaceConnection | null {
-  try {
-    const raw = hasWindowStorage()
-      ? window.localStorage.getItem(DRIVE_CONNECTION_KEY)
-      : memoryFallback.get(DRIVE_CONNECTION_KEY) ?? null;
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as DriveWorkspaceConnection;
-    if (!parsed || !parsed.folderId || !parsed.isConnected) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
+  return activeDriveConnection;
 }
 
 export function saveDriveConnection(connection: DriveWorkspaceConnection): void {
-  const safePayload: DriveWorkspaceConnection = {
+  activeDriveConnection = {
+    accountSub: connection.accountSub || activeAccountSub || '',
     folderUrl: connection.folderUrl,
     folderId: connection.folderId,
     folderName: connection.folderName,
-    rootFolderId: connection.rootFolderId,
+    accountEmail: connection.accountEmail,
+    accountName: connection.accountName,
     isConnected: Boolean(connection.isConnected),
     lastSyncedAt: connection.lastSyncedAt,
     connectedAt: connection.connectedAt || new Date().toISOString(),
-    serviceAccountEmail: connection.serviceAccountEmail || null,
+    hasDriveScope: Boolean(connection.hasDriveScope ?? true),
+    hasSheetsScope: Boolean(connection.hasSheetsScope),
+    hasGmailScope: Boolean(connection.hasGmailScope),
+    subfolders: connection.subfolders,
   };
-  const serialized = JSON.stringify(safePayload);
-  if (hasWindowStorage()) {
-    window.localStorage.setItem(DRIVE_CONNECTION_KEY, serialized);
-  } else {
-    memoryFallback.set(DRIVE_CONNECTION_KEY, serialized);
+  if (activeDriveConnection.accountSub) {
+    setActiveAccountSub(activeDriveConnection.accountSub);
+    saveUserWorkspaceMetadata(activeDriveConnection.accountSub, {
+      folderId: activeDriveConnection.folderId,
+      folderName: activeDriveConnection.folderName,
+      folderUrl: activeDriveConnection.folderUrl,
+      lastSyncedAt: activeDriveConnection.lastSyncedAt,
+    });
   }
-  setActiveWorkspaceId(safePayload.folderId);
+  setActiveWorkspaceId(activeDriveConnection.folderId);
 }
 
 export function clearDriveConnection(): void {
-  const previousFolderId = getActiveWorkspaceId();
-  if (previousFolderId) {
-    clearWorkspaceCaches(previousFolderId);
-  }
-  if (hasWindowStorage()) {
-    window.localStorage.removeItem(DRIVE_CONNECTION_KEY);
-  }
-  memoryFallback.delete(DRIVE_CONNECTION_KEY);
-  setActiveWorkspaceId(null);
-  clearWorkspaceCaches(null);
+  memoryStore.clear();
+  activeDriveConnection = null;
+  activeWorkspaceId = null;
+  activeAccountSub = null;
+  runtimeSessionId = null;
 }
 
 function createFreshCompanyDefaults(): CompanySettings {
@@ -274,19 +360,23 @@ function createFreshCompanyDefaults(): CompanySettings {
 }
 
 export const storage = {
+  purgeLegacyBrowserStorage,
   getActiveWorkspaceId,
   setActiveWorkspaceId,
+  getActiveAccountSub,
+  setActiveAccountSub,
   setActiveStorageUser: setActiveWorkspaceId,
   clearWorkspaceCaches,
   clearAllUserWorkspaceCaches: () => {
-    const current = getActiveWorkspaceId();
-    if (current) clearWorkspaceCaches(current);
-    clearWorkspaceCaches(null);
+    memoryStore.clear();
   },
   loadDriveConnection,
   saveDriveConnection,
   clearDriveConnection,
   getTempSessionId,
+  loadUserWorkspaceMetadata,
+  saveUserWorkspaceMetadata,
+  clearUserWorkspaceMetadata,
 
   // Company Profiles
   loadCompanyProfiles: (): CompanySettings[] => {
@@ -307,8 +397,8 @@ export const storage = {
           }));
         }
       }
-    } catch (err) {
-      console.error('Failed to load company profiles', err);
+    } catch {
+      // fallback
     }
     return [createFreshCompanyDefaults()];
   },
@@ -360,9 +450,12 @@ export const storage = {
     const base = defaultFieldCatalog.map((f) => ({ ...f }));
     if (!company) return base;
     return base.map((f) => {
-      if (f.id === 'company_legal_name') return { ...f, value: company.legalName, defaultValue: company.legalName };
-      if (f.id === 'company_gstin') return { ...f, value: company.gstin, defaultValue: company.gstin };
-      if (f.id === 'company_email') return { ...f, value: company.email, defaultValue: company.email };
+      if (f.id === 'company_legal_name')
+        return { ...f, value: company.legalName, defaultValue: company.legalName };
+      if (f.id === 'company_gstin')
+        return { ...f, value: company.gstin, defaultValue: company.gstin };
+      if (f.id === 'company_email')
+        return { ...f, value: company.email, defaultValue: company.email };
       return f;
     });
   },
@@ -555,9 +648,7 @@ export const storage = {
     const existing = storage.loadCustomers();
     const idx = existing.findIndex((c) => c.id === customer.id);
     const updated =
-      idx >= 0
-        ? existing.map((c, i) => (i === idx ? customer : c))
-        : [customer, ...existing];
+      idx >= 0 ? existing.map((c, i) => (i === idx ? customer : c)) : [customer, ...existing];
     storage.saveCustomers(updated);
     return updated;
   },
@@ -681,7 +772,6 @@ export const storage = {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed && typeof parsed === 'object') {
-          // Strip any legacy sensitive keys if ever present
           return {
             senderName: String(parsed.senderName || ''),
             senderEmail: String(parsed.senderEmail || ''),
@@ -714,7 +804,6 @@ export const storage = {
   },
 
   saveEmailConfig: (prefs: Record<string, any>) => {
-    // Strictly never store passwords or API keys in localStorage
     const safePrefs = {
       senderName: String(prefs?.senderName || ''),
       senderEmail: String(prefs?.senderEmail || ''),
